@@ -177,6 +177,9 @@ last_search_result = ""
 # ---------------------------
 GROUP_MODE = False
 
+# Tools permitted in group chats. Everything else — RAG search, file
+# read/write, code editing, shell commands, memory writes, Telegram
+# sends as the user — is blocked. Groups get information-only tools.
 SAFE_GROUP_TOOLS = {
     "chat", "search_web", "weather", "air_quality", "news",
     "current_time", "show_last_result", "read_and_summarize",
@@ -755,11 +758,22 @@ def ask_ai_for_plan(user_request, context, correction=None):
     group_block = ""
     if GROUP_MODE:
         group_block = (
-            "\n GROUP MODE ACTIVE \n"
-            "This message came from a GROUP CHAT, not a private DM.\n"
-            f"You may ONLY use these tools: {', '.join(sorted(SAFE_GROUP_TOOLS))}.\n"
-            "If the request needs any other tool, politely say you can't do that "
-            "in a group and ask them to DM you directly.\n"
+            "\n=== GROUP MODE ACTIVE ===\n"
+            "This message came from a GROUP CHAT, not a private DM.\n\n"
+            f"ALLOWED TOOLS: {', '.join(sorted(SAFE_GROUP_TOOLS))}\n\n"
+            "BLOCKED in groups:\n"
+            "- rag_search (the user's personal indexed documents)\n"
+            "- read_file, write_file, patch_file, find_files, move_files\n"
+            "- run_command, list_symbols, repo_map\n"
+            "- read_screen, describe_screen, clipboard_read\n"
+            "- remember, forget (personal memory writes)\n"
+            "- telegram_user_send, telegram_user_delete, telegram_user_edit\n"
+            "- generate_image, describe_image, send_image_telegram\n"
+            "- All system tools (volume, media, lock, shutdown)\n\n"
+            "If a user asks for any blocked capability, reply briefly: you "
+            "can't do that in a group, DM the bot directly. Do NOT attempt "
+            "to call a blocked tool — you'll just get an error.\n"
+            "=== END GROUP MODE ===\n"
         )
 
     prompt = f"""{TOOL_DESCRIPTIONS}
@@ -3046,6 +3060,10 @@ NEVER SAY:
 If a listed tool is required, USE IT. Do not refuse, stall, narrate, or answer
 from memory instead of calling it. "Let me check" is not a response; emit the
 tool call.
+
+In group chats, only a small whitelist of information tools is available.
+Personal file access, RAG search, memory writes, and system actions are
+blocked. Never attempt a blocked tool — reply that the user should DM you.
 
 Clarify only when necessary. Ask one concise question only when ambiguity would
 materially change the answer or action. Otherwise use the most reasonable
