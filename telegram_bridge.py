@@ -89,6 +89,42 @@ def send_typing(chat_id):
 # ---------------------------
 # Images
 # ---------------------------
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+
+def send_photo(chat_id, path, caption=""):
+    """Send an image file to a chat as the BOT. Returns True on success."""
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(
+                f"{TELEGRAM_API}/sendPhoto",
+                data={"chat_id": chat_id, "caption": caption[:1024]},
+                files={"photo": (os.path.basename(path), f)},
+                timeout=60)
+        if r.status_code != 200:
+            print(f"[Telegram] sendPhoto HTTP {r.status_code}: {r.text[:200]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[Telegram] sendPhoto failed: {e}")
+        return False
+
+
+def _extract_generated_images(step_log):
+    """Paths from 'Action: generate_image(...) -> Result: Image saved: <path>' lines."""
+    paths = []
+    for line in step_log or []:
+        if not line.startswith("Action: generate_image(") or "-> Result: " not in line:
+            continue
+        result = line.split("-> Result: ", 1)[-1].strip()
+        if not result.startswith("Image saved:"):
+            continue
+        p = result.split("Image saved:", 1)[1].strip().strip('"').strip("'")
+        if os.path.isfile(p) and p.lower().endswith(_IMAGE_EXTS) and p not in paths:
+            paths.append(p)
+    return paths
+
+
 def _largest_photo_file_id(message):
     """Compressed photo: message["photo"] is a list of sizes — take the biggest."""
     photos = message.get("photo") or []
@@ -178,7 +214,7 @@ def describe_telegram_image(path, question):
 # Run a turn (blocking, safe for the telegram thread)
 # ---------------------------
 def run_agent_for_telegram(user_input):
-    """Runs agent.run_agent_turn and returns the final reply text."""
+    """Runs agent.run_agent_turn and returns (reply_text, generated_image_paths)."""
     log_capture = io.StringIO()
     with turn_lock:
         conversation_history.append(f"User: {user_input}")
@@ -202,7 +238,7 @@ def run_agent_for_telegram(user_input):
     if final.startswith("AI: "):
         final = final[4:]
 
-    return final
+    return final, _extract_generated_images(step_log)
 
 
 # ---------------------------
@@ -317,11 +353,14 @@ def main():
                 # Set the flag before running the turn
                 agent.GROUP_MODE = is_group
                 try:
-                    reply = run_agent_for_telegram(text)
+                    reply, gen_images = run_agent_for_telegram(text)
                 finally:
                     agent.GROUP_MODE = False   # always reset
                 print(f"[Telegram] AI: {reply[:100]}...")
                 send_message(chat_id, reply)
+                for img in gen_images:
+                    if send_photo(chat_id, img):
+                        print(f"[Telegram] sent generated image: {img}")
 
             time.sleep(1)
 

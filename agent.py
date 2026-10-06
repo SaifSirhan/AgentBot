@@ -183,7 +183,7 @@ GROUP_MODE = False
 SAFE_GROUP_TOOLS = {
     "chat", "search_web", "weather", "air_quality", "news",
     "current_time", "show_last_result", "read_and_summarize",
-    "list_reminders", "list_brains",
+    "generate_image", "list_reminders", "list_brains",
 }
 
 KNOWN_WEB_APPS = {
@@ -768,7 +768,7 @@ def ask_ai_for_plan(user_request, context, correction=None):
             "- read_screen, describe_screen, clipboard_read\n"
             "- remember, forget (personal memory writes)\n"
             "- telegram_user_send, telegram_user_delete, telegram_user_edit\n"
-            "- generate_image, describe_image, send_image_telegram\n"
+            "- describe_image, send_image_telegram\n"
             "- All system tools (volume, media, lock, shutdown)\n\n"
             "If a user asks for any blocked capability, reply briefly: you "
             "can't do that in a group, DM the bot directly. Do NOT attempt "
