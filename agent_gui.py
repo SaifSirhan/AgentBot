@@ -214,6 +214,7 @@ class AgentGUI:
             canvas.bind("<Button-4>", self._on_user_scroll, add="+")
             canvas.bind("<Button-5>", self._on_user_scroll, add="+")
             canvas.bind("<Configure>", self._on_chat_canvas_configure, add="+")
+            self.chat_frame.bind("<Configure>", self._on_chat_content_configure, add="+")
         except Exception:
             pass
 
@@ -477,6 +478,20 @@ class AgentGUI:
                 widget.fit_height()
             except Exception:
                 pass
+
+    def _reflow_new(self, widget):
+        """Apply the current wrap width to a widget added after the last reflow.
+
+        `_reflow_chat` early-returns when the pane width is unchanged, so a
+        freshly created MdText/CodeBlock would otherwise keep its default
+        width (92 chars) and compute its height for the wrong wrap — clipping
+        the bubble until some later resize forces a reflow.
+        """
+        try:
+            if self._last_key is not None:
+                widget.reflow(self._last_key[0])
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Settings dialog
@@ -1321,6 +1336,7 @@ class AgentGUI:
             if seg[0] == "code":
                 block = gw.CodeBlock(row, seg[1], seg[2], self._copy_text)
                 block.pack(fill="x", pady=(2, 6))
+                self._reflow_new(block)
                 made.append(block)
                 self._md_widgets.append(block)
                 continue
@@ -1332,6 +1348,7 @@ class AgentGUI:
                 continue
             md = gw.MdText(row, chunk, bg=COLOR_BG, fg=fg)
             md.pack(fill="x", anchor="w", pady=(1, 3))
+            self._reflow_new(md)
             made.append(md)
             self._md_widgets.append(md)
 
@@ -1431,6 +1448,20 @@ class AgentGUI:
         except Exception:
             pass
         self._reflow_chat()
+
+    def _on_chat_content_configure(self, event=None):
+        # Fires whenever the inner frame changes size, i.e. whenever a bubble
+        # grows (MdText.fit_height runs asynchronously after it is mapped).
+        # Refresh the scrollregion and, if the user is pinned to the bottom,
+        # follow the content down so a newly arrived reply is never left below
+        # the fold.
+        try:
+            canvas = self.chat_frame._parent_canvas
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+        if not self._user_scrolled_up:
+            self.root.after(30, self._do_scroll)
 
     def _scroll_if_pinned(self):
         try:
