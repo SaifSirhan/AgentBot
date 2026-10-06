@@ -12,6 +12,8 @@ Requires: pip install requests
 """
 
 import time
+import os
+import tempfile
 import requests
 import io
 import contextlib
@@ -22,10 +24,18 @@ import agent
 # ---------------------------
 # CONFIGURATION
 # ---------------------------
-TELEGRAM_TOKEN = "8204464038:AAEfK8vszZqB0AXsrwgoB9vGE1h9f0ZZw8I"
+# The bot token is read from config.json / environment — never hardcode it
+# here, this file is tracked by git. Same pattern as agent.py.
+try:
+    import config as _cfg
+    _c = _cfg.load_config()
+except Exception:
+    _c = {}
+
+TELEGRAM_TOKEN = (_c.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
 # Leave as "" to allow ANYONE who finds your bot. STRONGLY recommended to
 # set this to your own Telegram user ID (get it from @userinfobot).
-ALLOWED_USER_ID =  1242339032
+ALLOWED_USER_ID = 1242339032
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
@@ -68,6 +78,102 @@ def get_updates(offset=None):
         return []
 
 
+def send_typing(chat_id):
+    try:
+        requests.post(f"{TELEGRAM_API}/sendChatAction",
+                      json={"chat_id": chat_id, "action": "typing"})
+    except Exception:
+        pass
+
+
+# ---------------------------
+# Images
+# ---------------------------
+def _largest_photo_file_id(message):
+    """Compressed photo: message["photo"] is a list of sizes — take the biggest."""
+    photos = message.get("photo") or []
+    if not photos:
+        return None
+    best = max(photos,
+               key=lambda p: (p.get("file_size") or 0,
+                              (p.get("width") or 0) * (p.get("height") or 0)))
+    return best.get("file_id")
+
+
+def _image_document_file_id(message):
+    """Uncompressed image sent as a file: document with an image/* mime type."""
+    doc = message.get("document")
+    if not doc:
+        return None
+    mime = (doc.get("mime_type") or "").lower()
+    if mime.startswith("image/"):
+        return doc.get("file_id")
+    return None
+
+
+def detect_image_file_id(message):
+    """Return (file_id, is_image) for photo or image-document messages."""
+    return _largest_photo_file_id(message) or _image_document_file_id(message)
+
+
+def download_telegram_image(file_id, message_id):
+    """Resolve file_id via getFile then download it. Returns (path, error)."""
+    try:
+        r = requests.get(f"{TELEGRAM_API}/getFile",
+                         params={"file_id": file_id}, timeout=30)
+        data = r.json()
+    except Exception as e:
+        return None, f"getFile request failed: {e}"
+
+    if not data.get("ok"):
+        return None, f"getFile failed: {data.get('description')}"
+
+    file_path = (data.get("result") or {}).get("file_path")
+    if not file_path:
+        return None, "getFile returned no file_path"
+
+    ext = os.path.splitext(file_path)[1].lower() or ".jpg"
+    dest = os.path.join(tempfile.gettempdir(), f"tg_image_{message_id}{ext}")
+
+    try:
+        fr = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}",
+            timeout=60)
+        if fr.status_code != 200:
+            return None, f"download HTTP {fr.status_code}"
+        with open(dest, "wb") as f:
+            f.write(fr.content)
+    except Exception as e:
+        return None, f"download failed: {e}"
+
+    if not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+        return None, "downloaded file is empty"
+    return dest, None
+
+
+def describe_telegram_image(path, question):
+    """Vision first, OCR fallback, then an honest 'can't read it' reply."""
+    try:
+        reply = agent.describe_image(f"{path}|{question}")
+    except Exception as e:
+        reply = f"ERROR: {e}"
+
+    if reply and not reply.startswith("ERROR:"):
+        return reply
+
+    # Vision unavailable (no DeepSeek key / HTTP error) — fall back to OCR.
+    try:
+        import file_tools
+        ocr = file_tools._read_image(path)
+        if ocr and not ocr.startswith("[") and ocr.strip():
+            return f"(vision unavailable — OCR text instead)\n{ocr}"
+    except Exception as e:
+        print(f"[Telegram] OCR fallback failed: {e}")
+
+    print(f"[Telegram] vision failed: {reply[:200]}")
+    return "I can see there's an image but can't read it right now."
+
+
 # ---------------------------
 # Run a turn (blocking, safe for the telegram thread)
 # ---------------------------
@@ -103,6 +209,11 @@ def run_agent_for_telegram(user_input):
 # Main polling loop
 # ---------------------------
 def main():
+    if not TELEGRAM_TOKEN:
+        print("[Telegram] No TELEGRAM_BOT_TOKEN found in config.json or the "
+              "environment. Add it in the GUI settings (or setx "
+              "TELEGRAM_BOT_TOKEN \"...\"), then restart. Exiting.")
+        return
     print("[Telegram] Bridge starting...")
     print(f"[Telegram] Bot: @benjaminnethayahubot")
     print(f"[Telegram] Allowed user: {ALLOWED_USER_ID or 'ANYONE'}")
@@ -130,13 +241,49 @@ def main():
                 chat_id = message["chat"]["id"]
                 user_id = message["from"]["id"]
                 text = message.get("text", "").strip()
+                caption = (message.get("caption") or "").strip()
+                message_id = message.get("message_id", 0)
 
-                if not text:
+                image_file_id = detect_image_file_id(message)
+                has_image = bool(image_file_id)
+                is_other_document = bool(message.get("document")) and not has_image
+
+                if not text and not has_image and not is_other_document:
                     continue
 
                 # Access control
                 if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
                     send_message(chat_id, "Unauthorized.")
+                    continue
+
+                # --- Image: download, then route through the vision pipeline ---
+                if has_image:
+                    print(f"\n[Telegram] <{user_id}> [image] {caption}")
+                    send_typing(chat_id)
+                    question = caption or "Describe this image"
+                    img_path = None
+                    try:
+                        img_path, err = download_telegram_image(image_file_id, message_id)
+                        if not img_path:
+                            print(f"[Telegram] image download failed: {err}")
+                            send_message(chat_id, "I couldn't download that image — try again?")
+                            continue
+                        reply = describe_telegram_image(img_path, question)
+                        conversation_history.append(f"User: [image] {question}")
+                        conversation_history.append(f"AI: {reply}")
+                        send_message(chat_id, reply)
+                    finally:
+                        if img_path:
+                            try:
+                                os.remove(img_path)
+                            except Exception:
+                                pass
+                    continue
+
+                # --- Non-image document ---
+                if is_other_document:
+                    print(f"\n[Telegram] <{user_id}> [document] {caption or '(no caption)'}")
+                    send_message(chat_id, "I can only read text and images right now.")
                     continue
 
                 print(f"\n[Telegram] <{user_id}> {text}")
@@ -149,7 +296,8 @@ def main():
                         "  • open youtube and search lofi\n"
                         "  • remind me in 5 minutes to drink water\n"
                         "  • what's on my screen\n"
-                        "  • summarize https://example.com"
+                        "  • summarize https://example.com\n"
+                        "  • send me a photo and I'll tell you what's in it"
                     )
                     continue
 
@@ -159,11 +307,7 @@ def main():
                     continue
 
                 # Tell the user we're working on it
-                try:
-                    requests.post(f"{TELEGRAM_API}/sendChatAction",
-                                  json={"chat_id": chat_id, "action": "typing"})
-                except Exception:
-                    pass
+                send_typing(chat_id)
 
                 # Run the agent (blocks the loop — fine for a single user)
                                 # Detect if this came from a group chat
