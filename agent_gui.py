@@ -214,8 +214,16 @@ class AgentGUI:
             canvas.bind("<MouseWheel>", self._on_user_scroll, add="+")
             canvas.bind("<Button-4>", self._on_user_scroll, add="+")
             canvas.bind("<Button-5>", self._on_user_scroll, add="+")
+            canvas.bind("<Button-1>", self._on_user_scroll, add="+")
             canvas.bind("<Configure>", self._on_chat_canvas_configure, add="+")
             self.chat_frame.bind("<Configure>", self._on_chat_content_configure, add="+")
+            # The canvas-level binds above only fire when the pointer is over the
+            # canvas itself. Messages are separate widgets covering it, so in
+            # practice a wheel over the chat never reached them and the
+            # scrolled-up flag was never set. The toplevel is in every widget's
+            # bindtags, so binding there always fires.
+            self.root.bind("<MouseWheel>", self._on_user_scroll, add="+")
+            self.root.bind("<Button-1>", self._on_user_scroll, add="+")
         except Exception:
             pass
 
@@ -1441,9 +1449,27 @@ class AgentGUI:
     # Scroll
     # ------------------------------------------------------------------
     def _on_user_scroll(self, event=None):
+        # CustomTkinter scrolls the canvas from a bind_all handler, which runs
+        # *after* any per-widget binding. Reading the position here would see
+        # the pre-scroll state, so re-read once the canvas has actually moved.
+        try:
+            self.root.after_idle(self._refresh_scroll_flag)
+        except Exception:
+            self._refresh_scroll_flag()
+
+    def _refresh_scroll_flag(self):
+        # Pixel-accurate, not a fraction of the content. CustomTkinter sets
+        # yscrollincrement=1, so one wheel notch moves the canvas ~20px: a
+        # percentage threshold would need a huge scroll on a long chat and the
+        # flag would stay False, leaving the reader to be yanked down anyway.
+        # More than a few px off the bottom means the user is reading history.
         try:
             canvas = self.chat_frame._parent_canvas
-            self._user_scrolled_up = not (canvas.yview()[1] >= 0.995)
+            bbox = canvas.bbox("all")
+            if not bbox:
+                return
+            hidden_below = bbox[3] - (canvas.canvasy(0) + canvas.winfo_height())
+            self._user_scrolled_up = hidden_below > 5
         except Exception:
             pass
 
@@ -1461,16 +1487,14 @@ class AgentGUI:
     def _on_chat_content_configure(self, event=None):
         # Fires whenever the inner frame changes size, i.e. whenever a bubble
         # grows (MdText.fit_height runs asynchronously after it is mapped).
-        # Refresh the scrollregion and, if the user is pinned to the bottom,
-        # follow the content down so a newly arrived reply is never left below
-        # the fold.
+        # Refresh the scrollregion ONLY — never scroll from here. This fires
+        # many times while a long reply renders, and scrolling on every firing
+        # is what yanked the user back to the bottom mid-read.
         try:
             canvas = self.chat_frame._parent_canvas
             canvas.configure(scrollregion=canvas.bbox("all"))
         except Exception:
             pass
-        if not self._user_scrolled_up:
-            self._safe_scroll_to_bottom(delay=30)
 
     def _scroll_if_pinned(self):
         try:
@@ -1487,11 +1511,17 @@ class AgentGUI:
 
     def _safe_scroll_to_bottom(self, delay=100):
         """Scroll to bottom after layout settles. Handles CTkScrollableFrame
-        lag where the scrollregion hasn't updated yet."""
+        lag where the scrollregion hasn't updated yet. Never moves the view if
+        the user has scrolled up to read history."""
+        # Bail out up front: no point scheduling timers the user would only be
+        # dragged down by.
+        if getattr(self, "_user_scrolled_up", False):
+            return
+
         def do_scroll():
             # Re-check at fire time: the user may have scrolled up during the
             # delay, in which case we must leave them where they are.
-            if self._user_scrolled_up:
+            if getattr(self, "_user_scrolled_up", False):
                 return
             try:
                 canvas = self.chat_frame._parent_canvas
