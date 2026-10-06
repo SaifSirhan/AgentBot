@@ -1,0 +1,52 @@
+# AgentBot — direct runtime dependencies
+# Generated from the actual imports across the codebase. Transitive
+# dependencies are pulled in automatically by pip.
+
+# --- GUI ---
+customtkinter
+pillow
+pystray
+keyboard
+pyperclip
+pygetwindow
+winotify
+
+# --- HTTP / parsing ---
+requests
+beautifulsoup4
+feedparser
+
+# --- LLM / RAG ---
+chromadb
+sentence-transformers
+pypdf
+
+# --- Documents & OCR ---
+python-docx
+openpyxl
+pytesseract          # also requires the Tesseract binary installed on the system
+
+# --- Voice (TTS / STT) & audio ---
+kokoro
+faster-whisper
+sounddevice
+numpy
+pycaw                # Windows volume control
+comtypes             # required by pycaw
+
+# --- System / process ---
+psutil
+pyautogui
+schedule
+
+# --- Browser automation ---
+selenium
+webdriver-manager
+
+# --- Messaging integrations ---
+telethon             # Telegram user account
+google-api-python-client   # Gmail
+google-auth-oauthlib       # Gmail auth
+
+# --- Packaging (build only, not needed to run) ---
+pyinstaller
