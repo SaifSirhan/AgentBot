@@ -1,0 +1,8 @@
+# Autocorrect whitelist — one word per line.
+# Words here are NEVER changed. Add your contact names,
+# unusual slang, or anything you don't want touched.
+# Lines starting with # are ignored.
+
+# Examples (uncomment or add your own):
+# JEE
+# holocaustmuseum

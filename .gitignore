@@ -1,0 +1,51 @@
+# ---- Secrets & credentials (NEVER commit) ----
+.session
+*.session
+*.session-journal
+credentials.json
+config.json
+config.json.bak*
+.env
+*.key
+*api*key*
+*secret*
+*password*
+*token*
+tokens.json
+
+# ---- Local data / caches ----
+rag_db/
+AgentMemory/
+*.log
+research_*.md
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+build/
+dist/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ---- Local mockup artifacts ----
+_gui_mockup*.png
+
+# ---- Local / non-source / sensitive artifacts (kept out of the repo) ----
+# APIs.txt likely holds API keys; check-fk.php / sha512_sum are stray scratch
+# files; the rest are binaries, OS metadata, or local backups.
+APIs.txt
+check-fk.php
+sha512_sum
+operadriver.exe
+*.exe
+desktop.ini
+_backup_*/
+
