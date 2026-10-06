@@ -3404,6 +3404,14 @@ MISC
   list_brains() — list currently available AI providers.
   set_name(input) — rename the assistant.
 
+IMAGE
+  generate_image(input) — generate an AI image from a text prompt. Format:
+    "prompt|filename" (filename optional). Saves to Downloads. Free, no API key.
+  describe_image(input) — read and describe an image using vision. Format:
+    "path|question" (question optional, defaults to a full description). Handles
+    photos, screenshots, diagrams, and charts. USE THIS instead of OCR for
+    anything other than plain text in an image.
+
 =====================================================================
 10. EXAMPLES
 =====================================================================
@@ -3461,8 +3469,112 @@ VALID_TOOLS = {
     "telegram_user_send", "telegram_user_delete", "telegram_user_edit", "find_files", "move_files",
     "patch_file", "list_symbols", "repo_map",
     "whitelist", "send_maps_list",    "whitelist", "deep_research", "hardware_scan", "recommend_models",
-    "crawl_site", "map_site", "fetch_clean"
+    "crawl_site", "map_site", "fetch_clean",
+    "generate_image", "describe_image"
 }
+
+
+# ---------------------------
+# IMAGE TOOLS
+# ---------------------------
+def generate_image(input_str):
+    """Generate an AI image from a text prompt via Pollinations.ai (free, no key).
+
+    Format: "prompt|filename" (filename optional). Saves to Downloads.
+    """
+    parts = input_str.split("|", 1)
+    prompt = parts[0].strip()
+    if not prompt:
+        return "ERROR: generate_image needs a prompt."
+
+    filename = parts[1].strip() if len(parts) > 1 else None
+    if not filename:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"image_{timestamp}.png"
+    if not filename.lower().endswith((".png", ".jpg", ".jpeg")):
+        filename += ".png"
+
+    encoded = urllib.parse.quote(prompt)
+    url = (f"https://image.pollinations.ai/prompt/{encoded}"
+           f"?width=1024&height=1024&nologo=true")
+
+    try:
+        r = requests.get(url, timeout=60)
+        if r.status_code != 200:
+            return f"ERROR: pollinations HTTP {r.status_code}"
+
+        filepath = os.path.join(get_downloads_path(), filename)
+        with open(filepath, "wb") as f:
+            f.write(r.content)
+        return f"Image saved: {filepath}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def describe_image(input_str):
+    """Read/describe an image using DeepSeek V4 Flash vision.
+
+    Format: "path|question" (question optional). Prefer this over OCR for
+    anything that isn't plain text (photos, screenshots, diagrams, charts).
+    """
+    import base64
+
+    parts = input_str.split("|", 1)
+    path = parts[0].strip().strip('"').strip("'")
+    question = parts[1].strip() if len(parts) > 1 else "Describe this image in detail."
+
+    # Allow just a filename — assume Downloads
+    if not os.path.isabs(path):
+        candidate = os.path.join(get_downloads_path(), path)
+        if os.path.exists(candidate):
+            path = candidate
+
+    if not os.path.isfile(path):
+        return f"ERROR: file not found: {path}"
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+        return f"ERROR: not a supported image type: {ext}"
+
+    try:
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+    except Exception as e:
+        return f"ERROR reading file: {e}"
+
+    mime = "image/png" if ext == ".png" else "image/jpeg"
+    data_url = f"data:{mime};base64,{b64}"
+
+    if not DEEPSEEK_API_KEY:
+        return "ERROR: DEEPSEEK_API_KEY not set — vision requires DeepSeek."
+
+    try:
+        body = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": question},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }],
+            "max_tokens": 1024,
+        }
+        r = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=body, timeout=60,
+        )
+        if r.status_code != 200:
+            return f"ERROR: DeepSeek HTTP {r.status_code}: {r.text[:200]}"
+        data = r.json()
+        content = data["choices"][0]["message"].get("content", "")
+        return content.strip() or "ERROR: empty vision response"
+    except Exception as e:
+        return f"ERROR: {e}"
 
 
 # ---------------------------
@@ -3553,6 +3665,8 @@ def execute_tool(action):
     elif tool == 'recommend_models':       return recommend_models()
     elif tool == 'find_files':             return find_files(inp)
     elif tool == 'move_files':             return move_files(inp)
+    elif tool == 'generate_image':         return generate_image(inp)
+    elif tool == 'describe_image':         return describe_image(inp)
     else:                                  return f"ERROR: Unknown tool '{tool}'"
     
 
