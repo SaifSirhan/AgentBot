@@ -183,7 +183,7 @@ GROUP_MODE = False
 SAFE_GROUP_TOOLS = {
     "chat", "search_web", "weather", "air_quality", "news",
     "current_time", "show_last_result", "read_and_summarize",
-    "describe_screen", "read_screen", "list_reminders", "list_brains",
+    "list_reminders", "list_brains",
 }
 
 KNOWN_WEB_APPS = {
