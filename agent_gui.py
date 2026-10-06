@@ -1045,7 +1045,10 @@ class AgentGUI:
                 "/symbols file.py  → every class/function with line numbers\n"
                 "       e.g.  /symbols config.py\n\n"
                 "/map   [Folder|max_files]  → symbol map of a whole folder\n"
-                "       e.g.  /map agentbot|40     (no args = the AgentBot folder)",
+                "       e.g.  /map agentbot|40     (no args = the AgentBot folder)\n\n"
+                "Browser recipes — deterministic click/type scripts:\n\n"
+                "/recipe Name      → run a recipe from recipes.json\n"
+                "       e.g.  /recipe clock_out",
                 "system",
             )
             return True
@@ -1084,6 +1087,14 @@ class AgentGUI:
         if cmd == "/map":
             target = args or os.path.dirname(os.path.abspath(agent.__file__))
             result = agent.repo_map(target)
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/recipe":
+            if not args:
+                result = "ERROR: format is /recipe Name"
+            else:
+                from recipes import run_recipe
+                result = run_recipe(args.strip())
             return self._finish_slash_command(text, result)
 
         try:

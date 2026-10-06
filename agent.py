@@ -1837,6 +1837,10 @@ def execute_reminder(reminder_text):
     low = text.lower()
 
     try:
+        if low.startswith("recipe:"):
+            from recipes import run_recipe
+            return run_recipe(text.split(":", 1)[1].strip())
+
         if low.startswith("open "):
             target = text[5:].strip()
             if target.startswith(("http://", "https://")):
@@ -3308,6 +3312,10 @@ exist on", "list all URLs", or "map this site".
   fetch_clean(input) — fetch a URL and return its raw extracted text (no
 summarization). USE THIS when the user wants the actual content of a page, not a
 summary. For summaries, use read_and_summarize instead.
+  run_recipe(input) — run a saved browser recipe by name (input is just the
+name, e.g. "clock_out"). Recipes are fixed click/type/wait scripts the user set
+up in recipes.json. USE THIS when the user asks to "run the X recipe" or repeats
+a browser task that already has a recipe. A wrong name returns the real names.
   deep_research(input) — multi-step research on a topic. Searches the web, reads
 the top sources, writes a structured report, saves as .md to Downloads. USE THIS
 when the user asks to "research X", "do a deep dive on X", "give me a report on
@@ -3503,7 +3511,7 @@ VALID_TOOLS = {
     "find_files", "move_files",
     "patch_file", "list_symbols", "repo_map",
     "whitelist", "send_maps_list",    "whitelist", "deep_research", "hardware_scan", "recommend_models",
-    "crawl_site", "map_site", "fetch_clean",
+    "crawl_site", "map_site", "fetch_clean", "run_recipe",
     "generate_image", "describe_image"
 }
 
@@ -3654,6 +3662,9 @@ def execute_tool(action):
     elif tool == 'crawl_site':             return crawl_site(inp)
     elif tool == 'map_site':               return map_site(inp)
     elif tool == 'fetch_clean':            return fetch_clean(inp)
+    elif tool == 'run_recipe':
+        from recipes import run_recipe
+        return run_recipe(inp.strip())
     elif tool == 'run_command':            return run_command(inp)
     elif tool == 'search_web':             return search_web(inp)
     elif tool == 'show_last_result':       return show_last_result()

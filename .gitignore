@@ -49,3 +49,7 @@ operadriver.exe
 desktop.ini
 _backup_*/
 
+# Browser recipes are local config: real URLs/selectors for the user's own
+# sites, and a "type" step can carry credentials. Same rule as config.json.
+recipes.json
+
