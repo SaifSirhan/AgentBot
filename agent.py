@@ -2906,34 +2906,36 @@ def youtube_search(query):
 
 
 def play_on_youtube(query):
-    """Search YouTube Music for a song and play the top result."""
+    """Search YouTube for a song and play it in Opera via URL autoplay."""
     import urllib.parse
-    driver = get_driver()
-    if driver is None:
-        return "ERROR: browser could not start"
+    query = (query or "").strip()
+    if not query:
+        return "ERROR: play_on_youtube needs a song name."
 
-    # Step 1 — search and grab the first video ID
-    search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(query)}"
+    # Step 1 — get the top video ID from YouTube's search results
+    search_url = (
+        "https://www.youtube.com/results?search_query="
+        + urllib.parse.quote(query)
+    )
     try:
-        driver.get(search_url)
-        time.sleep(3)
-        # Find the first video link on the results page
-        links = driver.find_elements(By.CSS_SELECTOR, "a[href*='watch?v=']")
-        video_id = None
-        for a in links:
-            href = a.get_attribute("href") or ""
-            if "watch?v=" in href:
-                video_id = href.split("watch?v=")[1].split("&")[0]
-                break
-        if not video_id:
-            return f"ERROR: no results found for '{query}' on YouTube Music"
-
-        # Step 2 — open with autoplay
-        play_url = f"https://music.youtube.com/watch?v={video_id}&autoplay=1"
-        driver.get(play_url)
-        return f"Playing '{query}' on YouTube Music (video ID {video_id})"
+        r = requests.get(
+            search_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return f"ERROR: YouTube returned {r.status_code}"
+        # Grab the first videoId from the embedded JSON
+        m = re.search(r'"videoId":"([a-zA-Z0-9_-]{11})"', r.text)
+        if not m:
+            return f"ERROR: no results for '{query}'"
+        video_id = m.group(1)
     except Exception as e:
         return f"ERROR: {e}"
+
+    # Step 2 — open the autoplay URL in Opera (their real browser)
+    play_url = f"https://music.youtube.com/watch?v={video_id}&autoplay=1"
+    return _open_in_new_tab(play_url, label=f"Playing: {query}")
 
 
 def get_video_links(query):
@@ -3434,10 +3436,10 @@ hardware_scan() — report the user's GPU, VRAM, RAM, CPU cores.
 recommend_models() — recommend Ollama models that fit the user's hardware.
 
 MUSIC & MEDIA
-  play_on_youtube(input) — search YouTube Music for a song and play it
-automatically. Input: song name and/or artist, e.g. "50/50 the strokes". Uses
-URL-based autoplay so no clicking is required. USE THIS when the user says
-"play X on youtube" or "play X on youtube music".
+  play_on_youtube(input) — play a song on YouTube Music via URL autoplay.
+Input: song and/or artist, e.g. "50/50 the strokes". Opens in Opera,
+autoplays. USE THIS when the user says "play X on youtube" or "play X
+on youtube music".
 
 LOCAL FILES & DOCUMENTS
   rag_search(input) — search indexed user documents; 2–5 keywords.
