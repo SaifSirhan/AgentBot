@@ -2753,8 +2753,44 @@ def get_driver():
     return _driver
 
 
-def setup_browser_driver():
+def _clear_wdm_lock(max_age=None):
+    """Remove webdriver-manager's download lock.
+
+    It writes the lock while downloading a driver and deletes it when done. If
+    that process dies the file is left behind, and every later install() waits
+    60s and then fails with "Timed out waiting for ... lock". max_age=None skips
+    the age check and removes it unconditionally (used after a lock failure).
+    """
     try:
+        from webdriver_manager.core.driver_cache import DriverCacheManager
+        lock_path = DriverCacheManager().get_driver_lock_path("chromedriver", "win64")
+    except Exception:
+        lock_path = os.path.join(os.path.expanduser("~"), ".wdm", ".wdm-lock-chromedriver-win64")
+    try:
+        if max_age is not None:
+            age = time.time() - os.path.getmtime(lock_path)
+            if age <= max_age:
+                return False
+        os.remove(lock_path)
+        print(f"[browser] cleared stale webdriver-manager lock: {lock_path}")
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        print(f"[browser] could not clear webdriver-manager lock: {e}")
+        return False
+
+
+def setup_browser_driver(timeout=120):
+    """Launch Chrome via Selenium.
+
+    Reports which step failed (driver install vs Chrome launch) and runs under a
+    wall-clock timeout so a stuck download can never hang the caller forever.
+    """
+    import threading
+    result = {}
+
+    def _launch():
         options = Options()
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
@@ -2762,14 +2798,56 @@ def setup_browser_driver():
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--no-first-run")
         options.add_argument("--no-default-browser-check")
+        # Chrome blocks unmuted autoplay until the user interacts with the page,
+        # which defeats URL-based playback (play_on_youtube). Allow it.
+        options.add_argument("--autoplay-policy=no-user-gesture-required")
         profile_dir = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'AgentBrowserProfile')
         os.makedirs(profile_dir, exist_ok=True)
+        # Chrome leaves SingletonLock behind when it crashes; the next launch
+        # then attaches to a dead profile instead of starting a clean session.
+        lock_file = os.path.join(profile_dir, 'SingletonLock')
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+                print(f"[browser] removed stale Chrome profile lock: {lock_file}")
+            except Exception as e:
+                print(f"[browser] could not remove profile lock: {e}")
         options.add_argument(f"--user-data-dir={profile_dir}")
-        service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=options)
-    except Exception as e:
-        print(f"Chrome driver error: {e}")
+
+        # Step 1 — ChromeDriver. ChromeDriverManager resolves the build matching
+        # the installed Chrome (or latest if the version can't be read) and
+        # re-downloads whenever the cached driver doesn't match.
+        _clear_wdm_lock(max_age=120)
+        try:
+            driver_path = ChromeDriverManager().install()
+        except Exception as e:
+            if "lock" in str(e).lower() and _clear_wdm_lock():
+                try:
+                    driver_path = ChromeDriverManager().install()
+                except Exception as e2:
+                    result['error'] = f"ChromeDriver install failed: {e2}"
+                    return
+            else:
+                result['error'] = f"ChromeDriver install failed: {e}"
+                return
+        print(f"[browser] using ChromeDriver: {driver_path}")
+
+        # Step 2 — Chrome itself.
+        try:
+            result['driver'] = webdriver.Chrome(service=Service(driver_path), options=options)
+        except Exception as e:
+            result['error'] = f"Chrome launch failed: {e}"
+
+    t = threading.Thread(target=_launch, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        print(f"[browser] setup timed out after {timeout}s")
         return None
+    if result.get('error'):
+        print(f"Chrome driver error: {result['error']}")
+        return None
+    return result.get('driver')
 
 
 def _navigate(driver, url, retries=1):
@@ -2823,6 +2901,37 @@ def youtube_search(query):
             return f"Opened YouTube, searched '{query}', clicked: '{first_title}'."
         else:
             return f"No videos found for '{query}'."
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def play_on_youtube(query):
+    """Search YouTube Music for a song and play the top result."""
+    import urllib.parse
+    driver = get_driver()
+    if driver is None:
+        return "ERROR: browser could not start"
+
+    # Step 1 — search and grab the first video ID
+    search_url = f"https://music.youtube.com/search?q={urllib.parse.quote(query)}"
+    try:
+        driver.get(search_url)
+        time.sleep(3)
+        # Find the first video link on the results page
+        links = driver.find_elements(By.CSS_SELECTOR, "a[href*='watch?v=']")
+        video_id = None
+        for a in links:
+            href = a.get_attribute("href") or ""
+            if "watch?v=" in href:
+                video_id = href.split("watch?v=")[1].split("&")[0]
+                break
+        if not video_id:
+            return f"ERROR: no results found for '{query}' on YouTube Music"
+
+        # Step 2 — open with autoplay
+        play_url = f"https://music.youtube.com/watch?v={video_id}&autoplay=1"
+        driver.get(play_url)
+        return f"Playing '{query}' on YouTube Music (video ID {video_id})"
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -3165,7 +3274,8 @@ B. WHICH TOOL?
   4. Current weather → weather.
   5. Current AQI → air_quality.
   6. Current headlines → news.
-  7. YouTube search/video → youtube_search; links only → get_video_links.
+  7. YouTube search/video → youtube_search; links only → get_video_links;
+     "play X" on YouTube/YouTube Music → play_on_youtube.
   8. Previous search result → show_last_result.
   9. General web search / current or external facts → search_web.
  10. Google search and open top result → google_search_and_open.
@@ -3322,6 +3432,12 @@ when the user asks to "research X", "do a deep dive on X", "give me a report on
 X", or "find everything about X". Takes 1-3 minutes.
 hardware_scan() — report the user's GPU, VRAM, RAM, CPU cores.
 recommend_models() — recommend Ollama models that fit the user's hardware.
+
+MUSIC & MEDIA
+  play_on_youtube(input) — search YouTube Music for a song and play it
+automatically. Input: song name and/or artist, e.g. "50/50 the strokes". Uses
+URL-based autoplay so no clicking is required. USE THIS when the user says
+"play X on youtube" or "play X on youtube music".
 
 LOCAL FILES & DOCUMENTS
   rag_search(input) — search indexed user documents; 2–5 keywords.
@@ -3495,6 +3611,7 @@ Confirmation:
 VALID_TOOLS = {
     "chat", "search_web", "show_last_result", "read_and_summarize",
     "google_search_and_open", "youtube_search", "get_video_links",
+    "play_on_youtube",
     "open_app", "open_website", "run_command", "make_folder",
     "find_and_open_folder", "write_file", "read_file",
     "set_reminder", "remember", "forget", "read_screen",
@@ -3672,6 +3789,7 @@ def execute_tool(action):
     elif tool == 'open_app':               return open_app(inp)
     elif tool == 'youtube_search':         return youtube_search(inp)
     elif tool == 'get_video_links':        return get_video_links(inp)
+    elif tool == 'play_on_youtube':        return play_on_youtube(inp)
     elif tool == 'set_reminder':           return set_reminder(inp)
     elif tool == 'set_reminder_at':        return set_reminder_at(inp)
     elif tool == 'list_reminders':         return list_reminders()
