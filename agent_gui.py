@@ -144,6 +144,7 @@ class AgentGUI:
         self.attachments = []
         self._attach_thumbs = []
         self._user_scrolled_up = False
+        self._scroll_after_ids = []
         self.log_visible = False
         self.tray_icon = None
         self._bubble_labels = []
@@ -1322,7 +1323,8 @@ class AgentGUI:
             self._bubble_labels.append(label)
             for w in (row, holder, bubble, label):
                 w.bind("<Button-3>", lambda e, t=text: self._show_bubble_menu(e, t))
-            self._scroll_if_pinned()
+            if not self._user_scrolled_up:
+                self._safe_scroll_to_bottom(delay=100)
             return
 
         # agent / scheduled — bubble-less rich text, full width
@@ -1371,7 +1373,8 @@ class AgentGUI:
                             w.fit_height()
                         else:
                             w.configure(height=24)
-                self._scroll_if_pinned()
+                if not self._user_scrolled_up:
+                    self._safe_scroll_to_bottom(delay=100)
 
             toggle_btn.bind("<Button-1>", toggle)
             for w in made:
@@ -1384,7 +1387,8 @@ class AgentGUI:
             except Exception:
                 pass
 
-        self._scroll_if_pinned()
+        if not self._user_scrolled_up:
+            self._safe_scroll_to_bottom(delay=100)
 
     def _add_system_status(self, text, fg):
         row = ctk.CTkFrame(self.chat_frame, fg_color="transparent")
@@ -1403,7 +1407,8 @@ class AgentGUI:
     def _add_activity(self, summary, detail):
         chip = gw.ActivityChip(self.chat_frame, summary, detail)
         chip.pack(fill="x", padx=18, pady=(2, 4))
-        self._scroll_if_pinned()
+        if not self._user_scrolled_up:
+            self._safe_scroll_to_bottom(delay=100)
 
     def _update_wraplengths(self):
         try:
@@ -1427,6 +1432,10 @@ class AgentGUI:
         except Exception:
             pass
         self._resize_after_id = self.root.after(200, self._update_wraplengths)
+        # A resize (windowed <-> fullscreen) forces Tk to re-lay out the whole
+        # pane. Re-pin to the bottom afterwards so the view can't be left
+        # showing empty space below the last message.
+        self._safe_scroll_to_bottom(delay=150)
 
     # ------------------------------------------------------------------
     # Scroll
@@ -1461,7 +1470,7 @@ class AgentGUI:
         except Exception:
             pass
         if not self._user_scrolled_up:
-            self.root.after(30, self._do_scroll)
+            self._safe_scroll_to_bottom(delay=30)
 
     def _scroll_if_pinned(self):
         try:
@@ -1470,22 +1479,46 @@ class AgentGUI:
         except Exception:
             at_bottom = True
         if at_bottom and not self._user_scrolled_up:
-            # Two passes: the first lands before layout settles, the second
-            # (after reflow/fit_height) catches the grown scrollregion.
-            self.root.after(50, self._do_scroll)
-            self.root.after(150, self._do_scroll)
+            self._safe_scroll_to_bottom(delay=50)
 
     def _scroll_to_bottom(self):
         self._user_scrolled_up = False
-        self.root.after(50, self._do_scroll)
+        self._safe_scroll_to_bottom(delay=50)
 
-    def _do_scroll(self):
-        if self._user_scrolled_up:
-            return
-        try:
-            self.chat_frame._parent_canvas.yview_moveto(1.0)
-        except Exception:
-            pass
+    def _safe_scroll_to_bottom(self, delay=100):
+        """Scroll to bottom after layout settles. Handles CTkScrollableFrame
+        lag where the scrollregion hasn't updated yet."""
+        def do_scroll():
+            # Re-check at fire time: the user may have scrolled up during the
+            # delay, in which case we must leave them where they are.
+            if self._user_scrolled_up:
+                return
+            try:
+                canvas = self.chat_frame._parent_canvas
+                # Force Tk to finish laying out the new content
+                self.root.update_idletasks()
+                # Recalculate the scrollable region based on current content
+                bbox = canvas.bbox("all")
+                if bbox:
+                    canvas.configure(scrollregion=bbox)
+                # Now the scrollregion is accurate — scroll to real bottom
+                canvas.yview_moveto(1.0)
+            except Exception as e:
+                print(f"[scroll] {e}")
+
+        # Content can keep growing after the first frame (MdText height
+        # retries, code blocks, images), which would leave the scrollregion
+        # stale and scroll into empty space. Pass several times and let only
+        # the newest request's timers survive.
+        for old in getattr(self, "_scroll_after_ids", []):
+            try:
+                self.root.after_cancel(old)
+            except Exception:
+                pass
+        self._scroll_after_ids = [
+            self.root.after(d, do_scroll)
+            for d in (delay, delay + 150, delay + 350, delay + 700, delay + 1100)
+        ]
 
     # ------------------------------------------------------------------
     # Copy / Save

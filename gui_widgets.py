@@ -122,15 +122,19 @@ class MdText(tk.Text):
             return int(self.index("end-1c").split(".")[0])
 
     def fit_height(self):
-        mapped = self.winfo_ismapped()
-        if mapped:
-            self.update_idletasks()
+        if not self.winfo_ismapped():
+            # Tk reports a bogus display-line count for an unmapped Text widget
+            # (a one-line message measured 65 lines), which would balloon the
+            # bubble — and the chat scroll region — until a later retry fixed
+            # it. Keep the current height and retry once the widget is on screen.
+            self._refits += 1
+            if self._refits < 6:
+                self.after(200, self.fit_height)
+            return
+        self.update_idletasks()
         self.configure(height=max(1, self.display_lines()))
-        if mapped:
-            self.update_idletasks()
+        self.update_idletasks()
         self._refits += 1
-        if not mapped and self._refits < 6:
-            self.after(200, self.fit_height)
 
     def reflow(self, chars):
         self.configure(width=max(20, chars))
