@@ -32,4 +32,4 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Missing-comma bug in the RAG path configuration.
 - Duplicate config load and hardcoded Ollama URL/model overriding user config.
 
-[Unreleased]: https://github.com/your-username/AgentBot/commits/main
+[Unreleased]: https://github.com/SaifSirhan/AgentBot/commits/main

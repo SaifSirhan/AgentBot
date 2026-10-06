@@ -29,7 +29,7 @@ python --version    # -> Python 3.11.9
 ## 3. Clone and install dependencies
 
 ```powershell
-git clone https://github.com/<your-username>/AgentBot.git
+git clone https://github.com/SaifSirhan/AgentBot.git
 cd AgentBot
 pip install -r requirements.txt
 ```

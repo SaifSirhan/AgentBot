@@ -48,7 +48,7 @@ outage or rate limit never stops it.
 
 ```bash
 # 1. Clone
-git clone https://github.com/<your-username>/AgentBot.git
+git clone https://github.com/SaifSirhan/AgentBot.git
 cd AgentBot
 
 # 2. Create and activate a virtual environment (optional but recommended)
