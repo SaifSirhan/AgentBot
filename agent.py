@@ -111,7 +111,7 @@ _c = _cfg.load_config()
 # ---------------------------
 _default_priority = _c.get(
     "AGENT_BRAIN_PRIORITY",
-    "groq,deepseek,gemini,openrouter,mistral,huggingface,meta,cohere,ollama",
+    "deepseek,groq,gemini,openrouter,mistral,huggingface,meta,cohere,ollama",
 )
 BRAIN_PRIORITY = [
     b.strip().lower()
@@ -2940,6 +2940,14 @@ def telegram_user_edit(input_str):
         return f"ERROR: telegram_user_edit failed: {e}"
 
 
+def send_image_telegram(input_str):
+    """Send an image file to a Telegram contact as the user. Format: 'contact|image_path'."""
+    try:
+        return telegram_user.send_file_tool(input_str)
+    except Exception as e:
+        return f"ERROR: send_image_telegram failed: {e}"
+
+
 def whitelist(input_str):
     """Manage the autocorrect whitelist. Format: 'add <word>' / 'remove <word>' / 'list'."""
     try:
@@ -3378,6 +3386,13 @@ COMMUNICATION
     to delete; append |all for every matching message; newest uses
     "Contact|latest".
   telegram_user_edit(input) — "Contact|old text|new text"; within 48h.
+  send_image_telegram(input) — send an image file to a Telegram contact as
+    the user's personal account. Format: "contact|image_path". Use "me" for
+    Saved Messages. Path can be a full path or just a filename (assumes
+    Downloads). USE THIS after generate_image when the user wants the image
+    sent to someone. Example chain:
+        generate_image("a red apple|apple.png")
+        send_image_telegram("me|apple.png")
   whatsapp_send(input) — "contact|message".
   gmail_unread(input) — list unread email.
   gmail_read(input) — read email by UID.
@@ -3466,7 +3481,8 @@ VALID_TOOLS = {
     "send_maps_url",
     "weather", "air_quality", "news", "whatsapp_send", "describe_screen",
     "set_name", "current_time", "send_telegram_message",
-    "telegram_user_send", "telegram_user_delete", "telegram_user_edit", "find_files", "move_files",
+    "telegram_user_send", "telegram_user_delete", "telegram_user_edit", "send_image_telegram",
+    "find_files", "move_files",
     "patch_file", "list_symbols", "repo_map",
     "whitelist", "send_maps_list",    "whitelist", "deep_research", "hardware_scan", "recommend_models",
     "crawl_site", "map_site", "fetch_clean",
@@ -3498,10 +3514,22 @@ def generate_image(input_str):
     url = (f"https://image.pollinations.ai/prompt/{encoded}"
            f"?width=1024&height=1024&nologo=true")
 
+    token = (os.environ.get("POLLINATIONS_API_KEY") or "").strip()
+    if not token:
+        try:
+            token = (_cfg.get("POLLINATIONS_API_KEY", "") or "").strip()
+        except Exception:
+            token = ""
+    if token:
+        url += f"&token={urllib.parse.quote(token)}"
+
     try:
         r = requests.get(url, timeout=60)
+        if r.status_code == 402:
+            return ("ERROR: Pollinations free tier is rate-limited. Get a free key "
+                    "at enter.pollinations.ai and set POLLINATIONS_API_KEY.")
         if r.status_code != 200:
-            return f"ERROR: pollinations HTTP {r.status_code}"
+            return f"ERROR: pollinations HTTP {r.status_code}: {r.text[:200]}"
 
         filepath = os.path.join(get_downloads_path(), filename)
         with open(filepath, "wb") as f:
@@ -3655,6 +3683,7 @@ def execute_tool(action):
     elif tool == "telegram_user_send":     return telegram_user_send(action.get("input", ""))
     elif tool == "telegram_user_delete":   return telegram_user_delete(action.get("input", ""))
     elif tool == "telegram_user_edit":     return telegram_user_edit(action.get("input", ""))
+    elif tool == "send_image_telegram":    return send_image_telegram(action.get("input", ""))
     elif tool == 'whitelist':              return whitelist(inp)
     elif tool == 'send_maps_list':         return send_maps_list(inp)
     elif tool == 'verify_places':          return verify_places(inp)
@@ -3891,3 +3920,5 @@ Reply:"""
                 "⚠️ I didn't actually do that — no tool ran. "
                 "Say it again or use /find, /move, /mkdir to run it directly."
             )
+
+    return step_log

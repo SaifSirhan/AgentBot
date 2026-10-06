@@ -225,6 +225,59 @@ async def _send_async(contact, message):
 
 
 # ------------------------------------------------------------------
+# Async: send a file (image/document)
+# ------------------------------------------------------------------
+async def _send_file_async(contact, path):
+    client = _make_client()
+    try:
+        await client.connect()
+    except Exception as e:
+        return f"ERROR: could not connect to Telegram: {e}"
+
+    try:
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return "ERROR: not logged in. Run: python telegram_user.py login"
+
+        target = await _find_dialog(client, contact)
+        if target is None:
+            await client.disconnect()
+            return f"ERROR: no chat found matching '{contact}'. Check the exact name in Telegram."
+
+        await asyncio.sleep(random.uniform(2.0, 6.0))
+
+        try:
+            with open(path, "rb") as f:
+                msg = await client.send_file(target, f, caption="")
+            try:
+                msg_id = msg.id
+            except AttributeError:
+                msg_id = msg[0].id if isinstance(msg, list) and msg else "?"
+            display_name = getattr(target, "name", None) or contact
+            await client.disconnect()
+            return f"Sent image to '{display_name}' (msg id {msg_id})"
+        except errors.FloodWaitError as e:
+            wait = int(e.seconds)
+            await client.disconnect()
+            return f"ERROR: Telegram rate-limited (FloodWait {wait}s). Try again in {wait}s."
+        except errors.UserPrivacyRestrictedError:
+            await client.disconnect()
+            return f"ERROR: can't message '{contact}' — privacy settings block it."
+        except errors.UserIsBlockedError:
+            await client.disconnect()
+            return f"ERROR: '{contact}' has blocked you or you've blocked them."
+        except Exception as e:
+            await client.disconnect()
+            return f"ERROR: send file failed: {e}"
+    except Exception as e:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return f"ERROR: send_file failed: {e}"
+
+
+# ------------------------------------------------------------------
 # Async: delete by text (preview/confirm)
 # ------------------------------------------------------------------
 async def _delete_by_text_async(contact, text_query, all_matches=False, confirmed=False):
@@ -477,6 +530,28 @@ def send_telegram_tool(input_str):
         return "ERROR: format is 'Contact|message' (e.g. 'JEE|helo')"
     contact, _, message = input_str.partition("|")
     return send_message(contact.strip(), message.strip())
+
+
+def send_file_tool(input_str):
+    """Format: 'contact|image_path' (bare filename assumes ~/Downloads)."""
+    if not TELETHON_AVAILABLE:
+        return "ERROR: Telethon not installed. Run: pip install telethon"
+    parts = (input_str or "").split("|", 1)
+    if len(parts) < 2:
+        return "ERROR: format is 'contact|image_path'"
+    contact = parts[0].strip()
+    path = parts[1].strip().strip('"').strip("'")
+    if not contact or not path:
+        return "ERROR: format is 'contact|image_path'"
+    path = os.path.expanduser(path)
+    if not os.path.isabs(path):
+        path = os.path.join(os.path.expanduser("~"), "Downloads", path)
+    if not os.path.isfile(path):
+        return f"ERROR: file not found: {path}"
+    try:
+        return asyncio.run(_send_file_async(contact, path))
+    except Exception as e:
+        return f"ERROR: {e}"
 
 
 def delete_tool(input_str):

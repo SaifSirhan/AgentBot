@@ -145,9 +145,78 @@ def read_file(path):
     return f"{header}\n{_truncate(body)}\n--- end {name} ---"
 
 
+def _describe_image_via_agent(path, question=None):
+    """Route an image through agent.describe_image() (DeepSeek vision).
+
+    Imported lazily — agent.py imports this module, so a top-level import
+    would be circular.  Returns an 'ERROR: ...' string on any failure.
+    """
+    try:
+        import agent
+    except Exception as e:
+        return f"ERROR: vision unavailable: {e}"
+    q = question or ("Describe this image in detail. Include any visible text, "
+                     "objects, colours, and layout.")
+    try:
+        return agent.describe_image(f"{path}|{q}")
+    except Exception as e:
+        return f"ERROR: vision failed: {e}"
+
+
 def build_attachment_block(paths):
-    """Concatenate all attached files into a single text block for the LLM."""
+    """Concatenate all attached files into a single text block for the LLM.
+
+    Images go through vision (describe_image) first, falling back to OCR.
+    Failures are reported per-file with a specific reason instead of a vague
+    generic message.
+    """
     if not paths:
         return ""
-    parts = [read_file(p) for p in paths]
+
+    parts = []
+    for i, p in enumerate(paths, 1):
+        name = os.path.basename(p) or p
+        label = f"[attachment {i}: {name}]"
+
+        if not os.path.exists(p):
+            reason = f"file not found at {p}"
+            print(f"{label} ERROR: {reason}")
+            parts.append(f"{label} ERROR: {reason}")
+            continue
+        if not os.path.isfile(p):
+            reason = "not a regular file (is it a folder?)"
+            print(f"{label} ERROR: {reason}")
+            parts.append(f"{label} ERROR: {reason}")
+            continue
+        if not os.access(p, os.R_OK):
+            reason = "permission denied"
+            print(f"{label} ERROR: {reason}")
+            parts.append(f"{label} ERROR: {reason}")
+            continue
+
+        ext = os.path.splitext(p)[1].lower()
+        try:
+            if ext in IMAGE_EXTS:
+                vision = _describe_image_via_agent(p)
+                if vision and not vision.startswith("ERROR:"):
+                    body = f"[visual description]\n{vision}"
+                else:
+                    # Vision unavailable (no key / HTTP error) — fall back to OCR.
+                    print(f"{label} vision unavailable ({vision[:80]}); using OCR")
+                    body = _read_image(p)
+            else:
+                body = read_file(p)
+        except PermissionError as e:
+            reason = f"permission denied ({e})"
+            print(f"{label} ERROR: {reason}")
+            parts.append(f"{label} ERROR: {reason}")
+            continue
+        except Exception as e:
+            reason = f"read exception: {type(e).__name__}: {e}"
+            print(f"{label} ERROR: {reason}")
+            parts.append(f"{label} ERROR: {reason}")
+            continue
+
+        parts.append(f"{label}\n{body}")
+
     return "\n\n".join(parts)

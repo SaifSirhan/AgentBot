@@ -133,7 +133,7 @@ class AgentGUI:
         self.root = root
         root.title("Agent")
         root.geometry("880x760+100+100")
-        root.minsize(600, 500)
+        root.minsize(700, 600)
         root.configure(fg_color=COLOR_BG)
 
         self.conversation_history = agent.load_conversation_history()
@@ -142,6 +142,7 @@ class AgentGUI:
         self.recording = False
         self.bubble_log = []
         self.attachments = []
+        self._attach_thumbs = []
         self._user_scrolled_up = False
         self.log_visible = False
         self.tray_icon = None
@@ -212,7 +213,7 @@ class AgentGUI:
             canvas.bind("<MouseWheel>", self._on_user_scroll, add="+")
             canvas.bind("<Button-4>", self._on_user_scroll, add="+")
             canvas.bind("<Button-5>", self._on_user_scroll, add="+")
-            canvas.bind("<Configure>", lambda e: self._reflow_chat(), add="+")
+            canvas.bind("<Configure>", self._on_chat_canvas_configure, add="+")
         except Exception:
             pass
 
@@ -239,6 +240,7 @@ class AgentGUI:
             border_color=COLOR_BORDER,
         )
         pill.pack(fill="x", padx=14, pady=12)
+        self._input_row = pill
 
         self.entry = ctk.CTkTextbox(
             pill,
@@ -1219,6 +1221,7 @@ class AgentGUI:
     def _render_attachments(self):
         for w in self.attach_strip.winfo_children():
             w.destroy()
+        self._attach_thumbs = []
         if not self.attachments:
             self.attach_strip.pack_forget()
             return
@@ -1230,11 +1233,26 @@ class AgentGUI:
             name = os.path.basename(path)
             if len(name) > 32:
                 name = name[:29] + "…"
+
+            thumb = None
+            if path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")):
+                try:
+                    from PIL import Image
+                    img = Image.open(path)
+                    img.thumbnail((60, 60))
+                    ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+                    self._attach_thumbs.append(ctk_img)
+                    thumb = ctk.CTkLabel(chip, image=ctk_img, text="", width=60, height=60)
+                    thumb.pack(side="left", padx=(8, 4), pady=4)
+                except Exception:
+                    thumb = None
+
+            label_text = f"{name}" if thumb else f"📎 {name}"
             ctk.CTkLabel(
-                chip, text=f"📎 {name}",
+                chip, text=label_text,
                 font=ctk.CTkFont(family=FONT_UI, size=11),
                 text_color="#e5e7eb",
-            ).pack(side="left", padx=(8, 4), pady=4)
+            ).pack(side="left", padx=(8, 4) if not thumb else (0, 4), pady=4)
 
             ctk.CTkButton(
                 chip, text="✕", width=22, height=22,
@@ -1403,6 +1421,17 @@ class AgentGUI:
         except Exception:
             pass
 
+    def _on_chat_canvas_configure(self, event=None):
+        # Keep the scrollregion honest when the window is resized — CTk only
+        # refreshes it from the inner frame's <Configure>, which does not fire
+        # on pure canvas resizes (windowed / non-fullscreen mode).
+        try:
+            canvas = self.chat_frame._parent_canvas
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+        self._reflow_chat()
+
     def _scroll_if_pinned(self):
         try:
             canvas = self.chat_frame._parent_canvas
@@ -1410,16 +1439,20 @@ class AgentGUI:
         except Exception:
             at_bottom = True
         if at_bottom and not self._user_scrolled_up:
-            self.root.after(20, self._do_scroll)
+            # Two passes: the first lands before layout settles, the second
+            # (after reflow/fit_height) catches the grown scrollregion.
+            self.root.after(50, self._do_scroll)
+            self.root.after(150, self._do_scroll)
 
     def _scroll_to_bottom(self):
         self._user_scrolled_up = False
-        self.root.after(20, self._do_scroll)
+        self.root.after(50, self._do_scroll)
 
     def _do_scroll(self):
+        if self._user_scrolled_up:
+            return
         try:
             self.chat_frame._parent_canvas.yview_moveto(1.0)
-            self._user_scrolled_up = False
         except Exception:
             pass
 
