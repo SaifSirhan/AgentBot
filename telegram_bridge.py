@@ -243,6 +243,34 @@ def send_animation_to_current_chat(url, caption=""):
     return "ERROR: Telegram rejected the GIF"
 
 
+def send_local_animation(path):
+    """Send a GIF from a local file to the chat being handled right now.
+
+    Used by reply_with_gif when the group's own library has a match — an
+    uploaded file rather than a URL, since these came from Telegram in the
+    first place and have no public URL.
+    """
+    chat_id = get_current_chat() or ALLOWED_USER_ID
+    if not chat_id:
+        return "ERROR: no current Telegram chat and no ALLOWED_USER_ID set"
+    if not path or not os.path.isfile(path):
+        return f"ERROR: file not found: {path}"
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(
+                f"{TELEGRAM_API}/sendAnimation",
+                data={"chat_id": chat_id},
+                files={"animation": (os.path.basename(path), f)},
+                timeout=120)
+        if r.status_code != 200:
+            print(f"[Telegram] sendAnimation HTTP {r.status_code}: {r.text[:200]}")
+            return "ERROR: Telegram rejected the GIF"
+        return "GIF sent."
+    except Exception as e:
+        print(f"[Telegram] send_local_animation failed: {e}")
+        return f"ERROR: {e}"
+
+
 def _extract_generated_images(step_log):
     """Paths from 'Action: generate_image(...) -> Result: Image saved: <path>' lines."""
     paths = []

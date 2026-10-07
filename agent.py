@@ -3078,22 +3078,48 @@ def send_image_telegram(input_str):
         return f"ERROR: send_image_telegram failed: {e}"
 
 
+def _pick_library_gif(query):
+    """Path to a matching GIF from the stored group library, or None.
+
+    Wrapped so a broken library (missing dir, unreadable jsonl) degrades to
+    "no local match" and lets the caller fall through to Giphy rather than
+    failing the whole tool.
+    """
+    try:
+        import gif_library
+        return gif_library.pick_best_gif(query)
+    except Exception as e:
+        print(f"[gif] library lookup failed: {type(e).__name__}: {e}")
+        return None
+
+
 def reply_with_gif(input_str):
     """Reply in the current Telegram chat with a GIF matching an emotion/context.
 
-    Unlike send_telegram_message, this posts to whichever chat asked — so in a
-    group it answers the group rather than DMing the user.
+    Prefers the group's own library, falls back to Giphy. Unlike
+    send_telegram_message, this posts to whichever chat asked — so in a group
+    it answers the group rather than DMing the user.
     """
-    from gif_tool import get_gif_for_emotion
-
     query = (input_str or "").strip().strip('"').strip("'")
     if not query:
         return "ERROR: reply_with_gif needs a search term"
 
+    local_path = _pick_library_gif(query)
+    if local_path:
+        try:
+            import telegram_bridge
+            result = telegram_bridge.send_local_animation(local_path)
+            return f"Replied with a GIF from the group library ({result})."
+        except Exception as e:
+            print(f"[gif] library reply failed, falling back: {e}")
+
+    from gif_tool import get_gif_for_emotion
+
     url = get_gif_for_emotion(query)
     if not url:
-        return (f"ERROR: no GIF found for '{query}' — try a plainer emotion "
-                "word like 'celebration' or 'facepalm'")
+        return (f"ERROR: no GIF found for '{query}' — the group library had no "
+                f"match and Giphy returned nothing. Try a plainer emotion word "
+                f"like 'celebration' or 'facepalm'.")
 
     try:
         import telegram_bridge
@@ -3103,8 +3129,9 @@ def reply_with_gif(input_str):
 
 
 def send_gif(input_str):
-    """Search Giphy and send a GIF to a Telegram contact as the user.
+    """Send a GIF to a Telegram contact as the user.
 
+    Prefers the group's own library, falls back to Giphy.
     Format: 'contact|search_term'. Use 'me' for Saved Messages.
     """
     parts = (input_str or "").split("|", 1)
@@ -3114,11 +3141,23 @@ def send_gif(input_str):
     if not contact or not query:
         return "ERROR: needs both a contact and a search term"
 
+    local_path = _pick_library_gif(query)
+    if local_path:
+        try:
+            import telegram_user
+            result = telegram_user.send_local_gif_tool(f"{contact}|{local_path}")
+            if not result.startswith("ERROR"):
+                return f"Sent GIF from the group library: {result}"
+            print(f"[gif] library send failed, falling back: {result}")
+        except Exception as e:
+            print(f"[gif] library send raised, falling back: {e}")
+
     from gif_tool import search_gif
 
     url = search_gif(query)
     if not url:
-        return (f"ERROR: no GIF found for '{query}'. Check GIPHY_API_KEY is set "
+        return (f"ERROR: no GIF found for '{query}' — the group library had no "
+                f"match and Giphy returned nothing. Check GIPHY_API_KEY is set "
                 f"and the query is searchable.")
 
     try:
@@ -3660,11 +3699,12 @@ COMMUNICATION
     "facepalm", "sarcastic clap", "confused". Use this when you want to react
     in this conversation. USE IT sparingly — only when a text reply would feel
     flat and a GIF would land better. Not every message needs a GIF.
-  send_gif(input) — search Giphy for a GIF and send it to a NAMED Telegram
-    contact as the user. Format: "contact|search_term". Use "me" for Saved
-    Messages. Use this when told to SEND someone a GIF ("send a funny GIF to
-    JEE"). Search terms should describe the emotion or vibe, not a literal
-    scene — "facepalm" works better than "person with hand on face".
+  send_gif(input) — send a GIF to a NAMED Telegram contact as the user. Format:
+    "contact|search_term". Use "me" for Saved Messages. Prefers the group's
+    own GIF library (matched by emotion labels), falls back to Giphy. USE THIS
+    when told to SEND someone a GIF ("send a funny GIF to JEE"). Search terms
+    should describe the emotion or context ("facepalm", "celebration", "bro is
+    done"), not literal scenes.
 
 PLACES & MAPS
   verify_places(input) — "place1|place2|place3"; geocode each place and

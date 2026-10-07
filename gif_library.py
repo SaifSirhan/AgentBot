@@ -220,25 +220,96 @@ def library_stats():
             f"{len(labels)} labeled.")
 
 
-def find_by_emotion(emotion, max_results=3):
-    """Return hashes whose labels match an emotion, most-used first.
+def _match_label(query, label):
+    """Score how well a query matches one label. 0 means no match.
 
-    Substring match in both directions, so 'celebrate' finds 'celebration' and
-    'sarcastic clap' is found by 'clap'.
+    Substring matching alone is not enough here. A plain `query in label or
+    label in query` test is bidirectional and fires on incidental fragments:
+    the real library contains the label "ratio", and `"ratio" in "celebration"`
+    is True, so asking for a celebration GIF could hand back a ratio meme.
+    Same shape for "peak"/"speak" and "shock"/"shocking".
+
+    So beyond containment, require word boundaries on the contained side, then
+    demote loose matches so a precise label always wins.
+    """
+    import re
+    if not query or not label:
+        return 0
+    if query == label:
+        return 3                       # exact
+    if re.search(r"\b" + re.escape(query) + r"\b", label):
+        return 2                       # query is a whole word inside the label
+    # Loose: only a fragment matches. Kept because people do abbreviate, but
+    # ranked below real matches so it can never beat one.
+    if query in label:
+        return 1
+    if re.search(r"\b" + re.escape(label) + r"\b", query):
+        return 1
+    return 0
+
+
+def _score_hashes(query, labels):
+    """Return {hash: best_score} for hashes with at least one matching label."""
+    scores = {}
+    for h, rec in labels.items():
+        best = 0
+        for label in rec.get("labels") or []:
+            s = _match_label(query, (label or "").strip().lower())
+            if s > best:
+                best = s
+        if best:
+            scores[h] = best
+    return scores
+
+
+def find_by_emotion(emotion, max_results=3):
+    """Return hashes whose labels match an emotion, best match first.
+
+    Ordered by match quality, then by how often the group actually used the
+    GIF — a precise match on a rarely-sent GIF beats a loose one on a popular
+    GIF, but among equally good matches the group's own behaviour decides.
     """
     emotion = (emotion or "").strip().lower()
     if not emotion:
         return []
     occs = _load_occurrences()
-    labels = _load_labels()
-    matches = []
-    for h, rec in labels.items():
-        for label in rec.get("labels") or []:
-            if emotion in label or label in emotion:
-                matches.append((h, len(occs.get(h, []))))
+    scores = _score_hashes(emotion, _load_labels())
+    ranked = sorted(scores.items(),
+                    key=lambda kv: (-kv[1], -len(occs.get(kv[0], []))))
+    return [h for h, _ in ranked[:max_results]]
+
+
+def pick_best_gif(emotion):
+    """Path to the best-matching stored GIF, or None.
+
+    Tries the top few matches rather than only the first: a hash can outrank
+    another on label score but have no file on disk (a failed copy, a deleted
+    library entry), and falling through to the next is better than reporting
+    no match when one exists.
+    """
+    for h in find_by_emotion(emotion, max_results=5):
+        p = _find_gif_file(h)
+        if p:
+            return p
+    return None
+
+
+def get_labels_for(emotion):
+    """Labels that match a query, for logging and debugging.
+
+    Reports the label text, not the hash, so a log line says why a GIF was
+    chosen.
+    """
+    emotion = (emotion or "").strip().lower()
+    if not emotion:
+        return []
+    out = []
+    for rec in _load_labels().values():
+        for lab in rec.get("labels") or []:
+            if _match_label(emotion, (lab or "").strip().lower()):
+                out.append(lab)
                 break
-    matches.sort(key=lambda x: -x[1])
-    return [h for h, _ in matches[:max_results]]
+    return out
 
 
 def get_gif_path(digest):
