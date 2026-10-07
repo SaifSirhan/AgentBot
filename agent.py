@@ -3867,12 +3867,19 @@ def describe_image(input_str):
         return f"ERROR: {e}"
 
 
-def describe_images(paths, question=None):
+def describe_images(paths, question=None, fast=False):
     """Describe several images in ONE vision call, as an ordered sequence.
 
     For GIF/video frames, where the useful signal is what changes *between*
     frames — describing them one at a time loses the motion and costs a
     separate request per frame.
+
+    fast=True disables the model's thinking. Worth it when the question asks
+    for a fixed format ("subject;mood;action") rather than judgement — the
+    reasoning buys nothing there and costs a lot: measured 15.2s / 2949
+    reasoning tokens with thinking on, versus 1.6s / 0 with it off. Note the
+    tradeoff is real, if small: the thinking run read the frame's motion
+    correctly ("moving down-right") where the fast run said "stationary".
     """
     import base64
 
@@ -3914,6 +3921,10 @@ def describe_images(paths, question=None):
             # describe_image uses) and even 4096 both truncate.
             "max_tokens": 8192,
         }
+        if fast:
+            # Top-level REST params; `enable_thinking` is ignored by this API.
+            body["thinking"] = {"type": "disabled"}
+            body["reasoning_effort"] = "none"
         r = requests.post(
             "https://api.deepseek.com/v1/chat/completions",
             headers={

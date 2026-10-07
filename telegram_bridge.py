@@ -47,6 +47,10 @@ conversation_history = []
 # One lock so concurrent messages don't corrupt state
 turn_lock = threading.Lock()
 
+# How long a video gets, from download to reply. Past this the reaction is
+# dropped in favour of a short honest line — a chat has moved on by then.
+_VIDEO_BUDGET = 25.0
+
 # The chat whose message is currently being handled. Tool calls like
 # reply_with_gif() run deep inside agent.run_agent_turn() and have no way to
 # know which chat asked — in a group that's the difference between answering
@@ -99,6 +103,43 @@ def send_typing(chat_id):
                       json={"chat_id": chat_id, "action": "typing"})
     except Exception:
         pass
+
+
+# ---------------------------
+# Typing keepalive
+# ---------------------------
+# Telegram's typing indicator expires after ~5s. Video processing takes tens of
+# seconds, so a single send_typing() leaves the chat looking dead for the whole
+# wait. Re-send every few seconds for as long as we're actually working.
+def _typing_keepalive(chat_id, stop_event, interval=4.0):
+    while not stop_event.wait(interval):
+        send_typing(chat_id)
+
+
+class _Typing:
+    """Context manager: hold the typing indicator up for the block's duration."""
+
+    def __init__(self, chat_id, interval=4.0):
+        self.chat_id = chat_id
+        self.interval = interval
+        self._stop = None
+        self._thread = None
+
+    def __enter__(self):
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=_typing_keepalive,
+            args=(self.chat_id, self._stop, self.interval),
+            daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        if self._stop:
+            self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+        return False
 
 
 # ---------------------------
@@ -237,10 +278,10 @@ def detect_image_file_id(message):
 
 
 def detect_gif_file_id(message):
-    """file_id for a GIF / short silent video, else None.
+    """file_id for a GIF, else None.
 
     Telegram converts GIFs to silent MP4s and puts them in message["animation"];
-    the same clip sent "as file" arrives in message["document"] with a video/* or
+    the same clip sent "as file" arrives in message["document"] with an
     image/gif mime type. Check this BEFORE detect_image_file_id, which would
     otherwise claim image/gif documents as ordinary stills.
     """
@@ -251,7 +292,27 @@ def detect_gif_file_id(message):
     doc = message.get("document")
     if doc and doc.get("file_id"):
         mime = (doc.get("mime_type") or "").lower()
-        if mime.startswith("video/") or mime == "image/gif":
+        if mime == "image/gif":
+            return doc["file_id"]
+    return None
+
+
+def detect_video_file_id(message):
+    """file_id for a real video, else None.
+
+    message["video"] is a sent video; a video/* document is one sent "as
+    file". Note this overlaps detect_gif_file_id on video/* documents —
+    animations live in message["animation"], so a video/* document is a real
+    video and the two detectors don't actually compete.
+    """
+    vid = message.get("video")
+    if vid and vid.get("file_id"):
+        return vid["file_id"]
+
+    doc = message.get("document")
+    if doc and doc.get("file_id"):
+        mime = (doc.get("mime_type") or "").lower()
+        if mime.startswith("video/"):
             return doc["file_id"]
     return None
 
@@ -373,14 +434,16 @@ def handle_message(message):
 
     gif_file_id = detect_gif_file_id(message)
     has_gif = bool(gif_file_id)
+    video_file_id = detect_video_file_id(message)
+    has_video = bool(video_file_id)
     # An image/gif document matches both detectors — GIF wins, so
     # it never falls through to the single-still vision path.
-    image_file_id = None if has_gif else detect_image_file_id(message)
+    image_file_id = None if (has_gif or has_video) else detect_image_file_id(message)
     has_image = bool(image_file_id)
     is_other_document = (bool(message.get("document"))
-                         and not has_image and not has_gif)
+                         and not has_image and not has_gif and not has_video)
 
-    if not text and not has_image and not has_gif and not is_other_document:
+    if not (text or has_image or has_gif or has_video or is_other_document):
         return
 
     # Access control
@@ -393,34 +456,86 @@ def handle_message(message):
     record_recent(_display_name(message), text or caption)
     set_current_chat(chat_id)
 
-    # --- GIF / short silent video: decode frames, read them in context ---
+    # --- GIF: store it, don't describe it ---
+    # Group GIFs are memes; frame descriptions are the wrong tool (see the
+    # module docstring in telegram_media). Silent, no reply.
     if has_gif:
         print(f"\n[Telegram] <{user_id}> [gif] {caption}")
-        send_typing(chat_id)
         gif_path = None
         try:
             import telegram_media
         except ImportError as e:
-            print(f"[Telegram] GIF support unavailable: {e}")
-            send_message(chat_id, "GIF support needs "
-                                  "`pip install imageio imageio-ffmpeg`.")
+            print(f"[Telegram] GIF storage unavailable: {e}")
             return
         try:
             gif_path, err = download_telegram_image(gif_file_id, message_id)
             if not gif_path:
                 print(f"[Telegram] gif download failed: {err}")
-                send_message(chat_id, "I couldn't download that GIF — try again?")
                 return
-            recent = _recent_excluding_tail(5, text or caption)
-            reply = telegram_media.describe_gif_in_context(
-                gif_path, recent_messages=recent, caption=caption)
-            conversation_history.append(f"User: [gif] {caption}")
-            conversation_history.append(f"AI: {reply}")
-            send_message(chat_id, reply)
+            recent = [m["text"] for m in _recent_excluding_tail(5, text or caption)]
+            digest, is_new = telegram_media.save_group_gif(
+                gif_path,
+                chat_id=chat_id,
+                sender=_display_name(message) or str(user_id),
+                sender_id=user_id,
+                caption=caption,
+                recent_messages=recent,
+            )
+            print(f"[Telegram] gif {'new' if is_new else 'already known'}: "
+                  f"{digest[:8]}")
+        except Exception as e:
+            print(f"[Telegram] gif store failed: {type(e).__name__}: {e}")
         finally:
             if gif_path:
                 try:
                     os.remove(gif_path)
+                except Exception:
+                    pass
+        return
+
+    # --- Video: watch it and react ---
+    if has_video:
+        print(f"\n[Telegram] <{user_id}> [video] {caption}")
+        video_path = None
+        # Deadline covers download + frames + optional Whisper + the two
+        # model calls. Past it the chat has moved on and a late reaction is
+        # worse than a short honest one.
+        deadline = time.monotonic() + _VIDEO_BUDGET
+        try:
+            import telegram_media
+        except ImportError as e:
+            print(f"[Telegram] video support unavailable: {e}")
+            send_message(chat_id, "video support needs "
+                                  "`pip install imageio imageio-ffmpeg`.")
+            return
+        try:
+            with _Typing(chat_id):
+                video_path, err = download_telegram_image(video_file_id, message_id)
+                if not video_path:
+                    print(f"[Telegram] video download failed: {err}")
+                    send_message(chat_id, "I couldn't download that video — try again?")
+                    return
+
+                duration = telegram_media.probe_duration(video_path)
+                if duration and duration > telegram_media._MAX_VIDEO_SECONDS:
+                    print(f"[Telegram] video too long: {duration:.0f}s")
+                    send_message(chat_id, "that's a bit long for me to watch in "
+                                          "a group chat — send a clip under a minute")
+                    return
+
+                recent = _recent_excluding_tail(5, text or caption)
+                reply = telegram_media.react_to_video(
+                    video_path, recent_messages=recent, caption=caption,
+                    deadline=deadline)
+            conversation_history.append(f"User: [video] {caption}")
+            conversation_history.append(f"AI: {reply}")
+            send_message(chat_id, reply)
+        except Exception as e:
+            print(f"[Telegram] video handler failed: {type(e).__name__}: {e}")
+        finally:
+            if video_path:
+                try:
+                    os.remove(video_path)
                 except Exception:
                     pass
         return
