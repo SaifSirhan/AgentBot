@@ -111,7 +111,7 @@ class RAGTool:
             return f"Skipped {filepath} (empty)"
 
         # Skip huge files
-        if len(text) > 200_000:
+        if len(text) > 500_000:
             return f"Skipped {filepath} (too large: {len(text)} chars)"
 
         chunks = self._chunk(text, size=1000, overlap=200)
