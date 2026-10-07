@@ -113,6 +113,41 @@ def _fuzzy_score(query, target):
         return score
     return 0
 
+
+SLASH_HISTORY_FILE = os.path.join(
+    os.environ.get("APPDATA", "."), "AgentBot", "slash_history.json"
+)
+
+
+def _load_slash_history():
+    import json
+    if not os.path.exists(SLASH_HISTORY_FILE):
+        return []
+    try:
+        with open(SLASH_HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_slash_history(history):
+    import json
+    try:
+        os.makedirs(os.path.dirname(SLASH_HISTORY_FILE), exist_ok=True)
+        with open(SLASH_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+    except Exception:
+        pass
+
+
+def _record_slash_use(cmd):
+    history = _load_slash_history()
+    if cmd in history:
+        history.remove(cmd)
+    history.insert(0, cmd)
+    history = history[:10]
+    _save_slash_history(history)
+
 FONT_UI = "Segoe UI"
 BUBBLE_FONT_SIZE = 12
 BUBBLE_PAD_X = 12
@@ -336,6 +371,14 @@ class AgentGUI:
         self.entry.bind("<<Paste>>", lambda e: self.root.after(10, self._autogrow_entry))
         self.entry.bind("<<Modified>>", lambda e: self.root.after(10, self._autogrow_entry))
         self.entry.bind("<KeyRelease>", self._autogrow_entry)
+
+        # Slash autocomplete: detect text changes and dismiss on focus loss
+        try:
+            inner = self.entry._textbox
+            inner.bind("<KeyRelease>", lambda e: self._maybe_show_slash_popup(), add="+")
+            inner.bind("<FocusOut>", lambda e: self._hide_slash_popup(), add="+")
+        except Exception:
+            pass
 
         self._icon_clip = gw.make_icon("clip", 18, gw.COLOR_TEXT_MID)
         self._icon_mic = gw.make_icon("mic", 18, gw.COLOR_ACCENT)
@@ -1171,6 +1214,48 @@ class AgentGUI:
     def _on_slash_click(self, idx):
         if 0 <= idx < len(self._slash_matches):
             self._insert_slash_command(self._slash_matches[idx]["cmd"])
+
+    def _maybe_show_slash_popup(self):
+        """Called on every keystroke. Decides if popup should show/hide."""
+        try:
+            content = self.entry.get("1.0", "end-1c")
+        except Exception:
+            return
+        # Only when: content starts with '/', no newline, no attachments
+        if (not content.startswith("/")
+                or "\n" in content
+                or self.attachments):
+            self._hide_slash_popup()
+            return
+        # If content has a space → user has moved to args, hide popup
+        if " " in content:
+            self._hide_slash_popup()
+            return
+        query = content[1:]  # drop the leading /
+        # Score each command
+        scored = []
+        for item in SLASH_COMMANDS:
+            s = _fuzzy_score(query, item["cmd"])
+            if s > 0:
+                scored.append((s, item))
+        # If empty query, sort by history first
+        if not query:
+            history = _load_slash_history()
+            def sort_key(pair):
+                s, item = pair
+                try:
+                    rank = history.index(item["cmd"])
+                except ValueError:
+                    rank = 999
+                return (rank, item["cmd"])
+            scored.sort(key=sort_key)
+        else:
+            scored.sort(key=lambda p: -p[0])
+        matches = [item for _, item in scored]
+        if matches:
+            self._show_slash_popup(matches)
+        else:
+            self._hide_slash_popup()
 
     # ------------------------------------------------------------------
     # Slash commands
