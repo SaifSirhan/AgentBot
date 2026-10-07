@@ -51,6 +51,14 @@ turn_lock = threading.Lock()
 # dropped in favour of a short honest line — a chat has moved on by then.
 _VIDEO_BUDGET = 25.0
 
+# Telegram caps GIFs at ~10s, so anything longer is a genuine video even when it
+# arrives with a mime type that could be either.
+_GIF_MAX_SECONDS = 10.0
+
+# Files downloaded only to settle the GIF-vs-video tie, keyed by file_id, so the
+# branch that wins doesn't fetch the same bytes again.
+_pending_download = {}
+
 # The chat whose message is currently being handled. Tool calls like
 # reply_with_gif() run deep inside agent.run_agent_turn() and have no way to
 # know which chat asked — in a group that's the difference between answering
@@ -280,10 +288,17 @@ def detect_image_file_id(message):
 def detect_gif_file_id(message):
     """file_id for a GIF, else None.
 
-    Telegram converts GIFs to silent MP4s and puts them in message["animation"];
-    the same clip sent "as file" arrives in message["document"] with an
-    image/gif mime type. Check this BEFORE detect_image_file_id, which would
-    otherwise claim image/gif documents as ordinary stills.
+    Telegram converts GIFs to silent MP4s and puts them in message["animation"].
+    The same clip sent "as file" arrives in message["document"] as video/mp4
+    (NOT image/gif — Telegram transcodes on send), which is why video/mp4 has to
+    be claimed here or the GIF falls through to the video branch and gets a
+    spoken reaction it was never meant to get.
+
+    That makes this detector overlap the video one on video/mp4 documents. The
+    tie is broken by duration in handle_message: Telegram caps GIFs at ~10s, so
+    a longer mp4 document is a genuine video. Check this BEFORE
+    detect_image_file_id, which would otherwise claim image/gif documents as
+    ordinary stills.
     """
     anim = message.get("animation")
     if anim and anim.get("file_id"):
@@ -292,7 +307,7 @@ def detect_gif_file_id(message):
     doc = message.get("document")
     if doc and doc.get("file_id"):
         mime = (doc.get("mime_type") or "").lower()
-        if mime == "image/gif":
+        if mime in ("image/gif", "video/mp4"):
             return doc["file_id"]
     return None
 
@@ -315,6 +330,17 @@ def detect_video_file_id(message):
         if mime.startswith("video/"):
             return doc["file_id"]
     return None
+
+
+def _probe_video_seconds(path):
+    """Duration of a downloaded file, or None. Delegates to telegram_media so
+    the ffmpeg invocation lives in one place."""
+    try:
+        import telegram_media
+        return telegram_media.probe_duration(path)
+    except Exception as e:
+        print(f"[Telegram] duration probe unavailable: {e}")
+        return None
 
 
 def download_telegram_image(file_id, message_id):
@@ -436,6 +462,27 @@ def handle_message(message):
     has_gif = bool(gif_file_id)
     video_file_id = detect_video_file_id(message)
     has_video = bool(video_file_id)
+
+    # A video/mp4 document matches both detectors. Telegram caps GIFs at ~10s,
+    # so duration decides: a 3-minute mp4 sent as a file is a real video and
+    # deserves the reaction the GIF branch would have silently swallowed.
+    # message["document"]["duration"] is free; only probe the file when absent.
+    if has_gif and has_video:
+        doc = message.get("document") or {}
+        dur = doc.get("duration")
+        if dur is None:
+            # Header probe needs the bytes, so download before deciding. The
+            # temp file is handed to the branch below so nothing is fetched
+            # twice.
+            probed, err = download_telegram_image(video_file_id, message_id)
+            if probed:
+                dur = _probe_video_seconds(probed)
+                _pending_download[video_file_id] = probed
+        if dur is not None and dur > _GIF_MAX_SECONDS:
+            has_gif = False          # real video: let the video branch have it
+        else:
+            has_video = False        # short clip: treat as the GIF it is
+
     # An image/gif document matches both detectors — GIF wins, so
     # it never falls through to the single-still vision path.
     image_file_id = None if (has_gif or has_video) else detect_image_file_id(message)
@@ -468,10 +515,12 @@ def handle_message(message):
             print(f"[Telegram] GIF storage unavailable: {e}")
             return
         try:
-            gif_path, err = download_telegram_image(gif_file_id, message_id)
+            gif_path = _pending_download.pop(gif_file_id, None)
             if not gif_path:
-                print(f"[Telegram] gif download failed: {err}")
-                return
+                gif_path, err = download_telegram_image(gif_file_id, message_id)
+                if not gif_path:
+                    print(f"[Telegram] gif download failed: {err}")
+                    return
             recent = [m["text"] for m in _recent_excluding_tail(5, text or caption)]
             digest, is_new = telegram_media.save_group_gif(
                 gif_path,
@@ -510,11 +559,13 @@ def handle_message(message):
             return
         try:
             with _Typing(chat_id):
-                video_path, err = download_telegram_image(video_file_id, message_id)
+                video_path = _pending_download.pop(video_file_id, None)
                 if not video_path:
-                    print(f"[Telegram] video download failed: {err}")
-                    send_message(chat_id, "I couldn't download that video — try again?")
-                    return
+                    video_path, err = download_telegram_image(video_file_id, message_id)
+                    if not video_path:
+                        print(f"[Telegram] video download failed: {err}")
+                        send_message(chat_id, "I couldn't download that video — try again?")
+                        return
 
                 duration = telegram_media.probe_duration(video_path)
                 if duration and duration > telegram_media._MAX_VIDEO_SECONDS:
