@@ -190,6 +190,10 @@ class AgentGUI:
         self.bubble_log = []
         self.attachments = []
         self._attach_thumbs = []
+        self._slash_popup = None      # Toplevel, created lazily
+        self._slash_visible = False
+        self._slash_matches = []      # current filtered list
+        self._slash_index = 0         # selected row index
         self._user_scrolled_up = False
         self._scroll_after_ids = []
         self.log_visible = False
@@ -1054,6 +1058,119 @@ class AgentGUI:
             self.entry.insert("1.0", text)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Slash command autocomplete popup
+    # ------------------------------------------------------------------
+    def _build_slash_popup(self):
+        """Create the popup Toplevel (once) and return it."""
+        if self._slash_popup is not None:
+            return self._slash_popup
+        pop = ctk.CTkToplevel(self.root)
+        pop.overrideredirect(True)
+        pop.attributes("-topmost", True)
+        pop.configure(fg_color=COLOR_INPUT_BG)
+        # Border via a wrapper frame
+        wrapper = ctk.CTkFrame(pop, fg_color=COLOR_INPUT_BG, corner_radius=10,
+                               border_width=1, border_color="#2a2e3d")
+        wrapper.pack(fill="both", expand=True, padx=1, pady=1)
+        # Rows container
+        pop._rows_frame = ctk.CTkFrame(wrapper, fg_color="transparent")
+        pop._rows_frame.pack(fill="both", expand=True, padx=4, pady=4)
+        pop.withdraw()  # hidden until needed
+        self._slash_popup = pop
+        return pop
+
+    def _hide_slash_popup(self):
+        if self._slash_popup is None:
+            return
+        try:
+            self._slash_popup.withdraw()
+        except Exception:
+            pass
+        self._slash_visible = False
+
+    def _show_slash_popup(self, matches):
+        pop = self._build_slash_popup()
+        # Clear old rows
+        for w in pop._rows_frame.winfo_children():
+            w.destroy()
+        if not matches:
+            self._hide_slash_popup()
+            return
+        self._slash_matches = matches
+        self._slash_index = 0
+        # Build one row per match (cap at 5 visible)
+        for i, item in enumerate(matches[:5]):
+            row = ctk.CTkFrame(pop._rows_frame, fg_color="transparent",
+                               corner_radius=6, height=28)
+            row.pack(fill="x", pady=1)
+            row.pack_propagate(False)
+            # Left icon
+            ctk.CTkLabel(row, text=item["icon"], width=22,
+                         font=ctk.CTkFont(family=FONT_UI, size=13)
+                         ).pack(side="left", padx=(6, 2))
+            # Command name
+            ctk.CTkLabel(row, text=item["cmd"], width=150, anchor="w",
+                         font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
+                         text_color="#e6e8ec"
+                         ).pack(side="left", padx=(0, 6))
+            # Description
+            ctk.CTkLabel(row, text=item["desc"], anchor="w",
+                         font=ctk.CTkFont(family=FONT_UI, size=11),
+                         text_color="#9ca3af"
+                         ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+            # Store index on the row for click handlers
+            row._slash_index = i
+            # Click handler
+            for w in (row,) + tuple(row.winfo_children()):
+                w.bind("<Button-1>", lambda e, idx=i: self._on_slash_click(idx))
+                # Hover
+                w.bind("<Enter>", lambda e, idx=i: self._on_slash_hover(idx))
+        # Highlight the first row
+        self._highlight_slash_row(0)
+        # Position above entry
+        self._position_slash_popup()
+        pop.deiconify()
+        pop.lift()
+        self._slash_visible = True
+
+    def _position_slash_popup(self):
+        """Place popup above the entry, left-aligned."""
+        if self._slash_popup is None:
+            return
+        self.root.update_idletasks()
+        ex = self.entry.winfo_rootx()
+        ey = self.entry.winfo_rooty()
+        # Width: same as entry_wrap (the CTkFrame around the textbox)
+        ew = self.entry.master.winfo_width()
+        # Compute popup height from row count
+        n = min(len(self._slash_matches), 5)
+        ph = n * 30 + 16  # row height 30 + padding
+        self._slash_popup.geometry(f"{ew}x{ph}+{ex}+{ey - ph - 6}")
+
+    def _highlight_slash_row(self, idx):
+        """Change the bg colour of the selected row."""
+        pop = self._slash_popup
+        if pop is None:
+            return
+        rows = pop._rows_frame.winfo_children()
+        for i, row in enumerate(rows):
+            try:
+                if i == idx:
+                    row.configure(fg_color=COLOR_BTN_PRIMARY)
+                else:
+                    row.configure(fg_color="transparent")
+            except Exception:
+                pass
+
+    def _on_slash_hover(self, idx):
+        self._slash_index = idx
+        self._highlight_slash_row(idx)
+
+    def _on_slash_click(self, idx):
+        if 0 <= idx < len(self._slash_matches):
+            self._insert_slash_command(self._slash_matches[idx]["cmd"])
 
     # ------------------------------------------------------------------
     # Slash commands
