@@ -1048,7 +1048,12 @@ class AgentGUI:
                 "       e.g.  /map agentbot|40     (no args = the AgentBot folder)\n\n"
                 "Browser recipes — deterministic click/type scripts:\n\n"
                 "/recipe Name      → run a recipe from recipes.json\n"
-                "       e.g.  /recipe clock_out",
+                "       e.g.  /recipe clock_out\n\n"
+                "Security scanning — static analysis, no AI:\n\n"
+                "/scan  File        → scan a file (hash, entropy, verdict)\n"
+                "       e.g.  /scan C:\\Users\\USER\\Downloads\\file.exe\n\n"
+                "/quarantine File   → move a file to Downloads\\Quarantine\\\n\n"
+                "/quarantine-list   → list quarantined files",
                 "system",
             )
             return True
@@ -1095,6 +1100,27 @@ class AgentGUI:
             else:
                 from recipes import run_recipe
                 result = run_recipe(args.strip())
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/scan":
+            if not args:
+                result = "ERROR: format is /scan <file_path>"
+            else:
+                import security_tools
+                result = security_tools.scan_file(args.strip())
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/quarantine":
+            if not args:
+                result = "ERROR: format is /quarantine <file_path>"
+            else:
+                import security_tools
+                result = security_tools.quarantine_file(args.strip())
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/quarantine-list":
+            import security_tools
+            result = security_tools.list_quarantine()
             return self._finish_slash_command(text, result)
 
         try:

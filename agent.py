@@ -26,6 +26,7 @@ import gmail_tool
 import scheduler
 import memory
 import screen
+import security_tools
 import air_quality as air_quality_tool
 import threading as _threading
 import telegram_user
@@ -3571,6 +3572,19 @@ IMAGE
     photos, screenshots, diagrams, and charts. USE THIS instead of OCR for
     anything other than plain text in an image.
 
+SECURITY
+  scan_file(input) — static analysis of a file. Computes SHA256, entropy,
+    suspicious string patterns, and returns a verdict (LIKELY CLEAN /
+    SUSPICIOUS / LIKELY MALICIOUS). Input: full file path. USE THIS when the
+    user asks to scan, check, or analyze a file for safety.
+  scan_process(input) — inspect a running process. Shows path, command line,
+    user, network connections. Input: process name (partial, e.g. "svchost") or
+    PID number. USE THIS when the user asks about a suspicious process.
+  quarantine_file(input) — move a suspicious file to Downloads\Quarantine\.
+    Reversible. Input: full file path. ALWAYS show the scan_file result first
+    and confirm with the user before calling this.
+  list_quarantine() — list files currently in quarantine.
+
 =====================================================================
 10. EXAMPLES
 =====================================================================
@@ -3631,6 +3645,7 @@ VALID_TOOLS = {
     "patch_file", "list_symbols", "repo_map",
     "whitelist", "send_maps_list",    "whitelist", "deep_research", "hardware_scan", "recommend_models",
     "crawl_site", "map_site", "fetch_clean", "run_recipe",
+    "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image"
 }
 
@@ -3843,6 +3858,10 @@ def execute_tool(action):
     elif tool == 'recommend_models':       return recommend_models()
     elif tool == 'find_files':             return find_files(inp)
     elif tool == 'move_files':             return move_files(inp)
+    elif tool == 'scan_file':              return security_tools.scan_file(inp)
+    elif tool == 'scan_process':           return security_tools.scan_process(inp)
+    elif tool == 'quarantine_file':        return security_tools.quarantine_file(inp)
+    elif tool == 'list_quarantine':        return security_tools.list_quarantine()
     elif tool == 'generate_image':         return generate_image(inp)
     elif tool == 'describe_image':         return describe_image(inp)
     else:                                  return f"ERROR: Unknown tool '{tool}'"
