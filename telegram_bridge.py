@@ -63,6 +63,10 @@ _pending_download = {}
 # reply_with_gif() run deep inside agent.run_agent_turn() and have no way to
 # know which chat asked — in a group that's the difference between answering
 # the group and DMing the user. Set for the duration of each turn.
+#
+# thread-local rather than a module global for the same reason the sender flag
+# below is: a global set by one chat would be read by a turn running in another
+# thread, and the bridge can handle a watcher event while a turn is in flight.
 _chat_ctx = threading.local()
 
 
@@ -72,6 +76,44 @@ def set_current_chat(chat_id):
 
 def get_current_chat():
     return getattr(_chat_ctx, "chat_id", None)
+
+
+# Whether the person who triggered the CURRENT turn is the bot's owner.
+#
+# Groups are open to everyone (see handle_message), but tools that act as the
+# owner's personal Telegram account must not be. Deep inside a turn the tool
+# has no access to the originating message, so the sender's status is published
+# here and read back by the guard in agent.py.
+#
+# Deliberately thread-local, NOT a module-level global: a global is shared by
+# every thread, so with two chats in flight a non-owner could read the owner's
+# value. Fails closed — an unset flag reads as "not the owner".
+_sender_ctx = threading.local()
+
+
+def set_current_sender(user_id, is_owner):
+    """Publish who triggered this turn, for tools that need to know.
+
+    Stored together so the two can never disagree — reading the owner flag
+    without knowing which sender it described is how a check like this goes
+    wrong.
+    """
+    _sender_ctx.user_id = user_id
+    _sender_ctx.is_owner = bool(is_owner)
+
+
+def get_current_sender_is_owner():
+    """True only when the current turn was triggered by the owner.
+
+    Returns False when no turn context exists. An unset thread reporting
+    "owner" would be the dangerous direction to be wrong in, and this guard
+    protects the user's personal Telegram account.
+    """
+    return bool(getattr(_sender_ctx, "is_owner", False))
+
+
+def get_current_sender_id():
+    return getattr(_sender_ctx, "user_id", None)
 
 
 # ---------------------------
@@ -521,10 +563,28 @@ def handle_message(message):
     if not (text or has_image or has_gif or has_video or is_other_document):
         return
 
-    # Access control
-    if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
-        send_message(chat_id, "Unauthorized.")
+    # Access control.
+    #
+    # Groups are open: anyone in a group the bot was added to can talk to it,
+    # with no @mention needed. That is deliberate for group use, but it means
+    # the bot now reads every message in those groups rather than only the
+    # ones addressed to it — a real privacy change that depends on BotFather
+    # Group Privacy being OFF to take effect.
+    #
+    # DMs stay owner-only: a DM is someone talking to the bot directly, and
+    # there is no group context to justify opening it.
+    #
+    # Note this only gates *talking to* the bot. Tools that act as the owner's
+    # personal account are blocked separately by the guard in agent.py, which
+    # reads the flag published below.
+    is_group = (message.get("chat") or {}).get("type") in ("group", "supergroup")
+    is_owner = bool(ALLOWED_USER_ID) and user_id == ALLOWED_USER_ID
+
+    if not is_group and not is_owner:
+        send_message(chat_id, "This bot is personal. DM the owner instead.")
         return
+
+    set_current_sender(user_id, is_owner)
 
     # Keep this message for the context pass of a GIF that follows, and scoped
     # to this chat so reply_with_gif() answers the right conversation.

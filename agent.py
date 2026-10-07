@@ -3044,8 +3044,44 @@ def send_telegram_message(text):
         return f"ERROR: {e}"
 
 
+def _owner_only_refusal():
+    """Message to return when a non-owner asks for an as-user action, else None.
+
+    These tools act as the user's personal Telegram account, so in a group —
+    which is open to everyone — they must be owner-only. Deep inside a turn the
+    tool can't see the originating message, so the bridge publishes the
+    sender's status; this reads it back.
+
+    Fails OPEN when the bridge isn't loaded or hasn't set a context: the agent
+    also runs from the GUI and the CLI, where there is no untrusted sender and
+    refusing would break the tool for local use. Fails CLOSED within the
+    bridge, because that's exactly the case this exists to stop.
+    """
+    try:
+        import telegram_bridge
+    except Exception:
+        return None                      # no bridge: local use, allow
+    if not hasattr(telegram_bridge, "get_current_sender_is_owner"):
+        return None                      # older bridge, no concept of a sender
+    if getattr(telegram_bridge, "_sender_ctx", None) is None:
+        return None                      # bridge imported but never handled a message
+    if not hasattr(telegram_bridge._sender_ctx, "is_owner"):
+        return None                      # no turn in flight on this thread
+    if telegram_bridge.get_current_sender_is_owner():
+        return None
+    return "ERROR: only the bot owner can send messages as the user."
+
+
+def _blocked_for_non_owner():
+    """True when the current caller may not use an as-user tool."""
+    return _owner_only_refusal() is not None
+
+
 def telegram_user_send(input_str):
     """Send a Telegram message as your personal account. Format: 'Contact|message'."""
+    refusal = _owner_only_refusal()
+    if refusal:
+        return refusal
     try:
         return telegram_user.send_telegram_tool(input_str)
     except Exception as e:
@@ -3054,6 +3090,9 @@ def telegram_user_send(input_str):
 
 def telegram_user_delete(input_str):
     """Delete a Telegram message by matching its text. Format: 'Contact|text' or 'Contact|text|all'."""
+    refusal = _owner_only_refusal()
+    if refusal:
+        return refusal
     try:
         import telegram_user
         return telegram_user.delete_tool(input_str)
@@ -3063,6 +3102,9 @@ def telegram_user_delete(input_str):
 
 def telegram_user_edit(input_str):
     """Edit a Telegram message by matching its old text. Format: 'Contact|old text|new text'."""
+    refusal = _owner_only_refusal()
+    if refusal:
+        return refusal
     try:
         import telegram_user
         return telegram_user.edit_tool(input_str)
@@ -3072,6 +3114,9 @@ def telegram_user_edit(input_str):
 
 def send_image_telegram(input_str):
     """Send an image file to a Telegram contact as the user. Format: 'contact|image_path'."""
+    refusal = _owner_only_refusal()
+    if refusal:
+        return refusal
     try:
         return telegram_user.send_file_tool(input_str)
     except Exception as e:
@@ -3103,6 +3148,12 @@ def reply_with_gif(input_str):
     query = (input_str or "").strip().strip('"').strip("'")
     if not query:
         return "ERROR: reply_with_gif needs a search term"
+
+    # Checked before the library lookup: a refused request should cost nothing,
+    # and this tool starts work the moment it's called.
+    refusal = _owner_only_refusal()
+    if refusal:
+        return refusal
 
     local_path = _pick_library_gif(query)
     if local_path:
@@ -3140,6 +3191,10 @@ def send_gif(input_str):
     contact, query = parts[0].strip(), parts[1].strip()
     if not contact or not query:
         return "ERROR: needs both a contact and a search term"
+
+    refusal = _owner_only_refusal()
+    if refusal:
+        return refusal
 
     local_path = _pick_library_gif(query)
     if local_path:
