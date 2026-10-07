@@ -3651,6 +3651,12 @@ on youtube music".
 LOCAL FILES & DOCUMENTS
   rag_search(input) — search indexed user documents; 2–5 keywords.
     Returns snippets tagged [From: path].
+  search_group_chat(input) — search the exported Telegram group chat.
+    Format: "query" or "query|year" or "query|YYYY-MM". USE THIS when the
+    user asks about old conversations, wants messages from a specific time,
+    or uses phrases like "back in 2023" or "last year". NEVER returns
+    results from other indexed folders (Downloads, Fire Writing, etc.).
+    Example: "lari dari rumah|2023".
   read_file(input) — read an exact full path only; never partial.
   write_file(input) — "filename|content". Creates or FULLY OVERWRITES a file.
     NEVER use write_file to modify an existing file — you will destroy everything
@@ -3863,7 +3869,8 @@ VALID_TOOLS = {
     "whitelist", "send_maps_list",    "whitelist", "deep_research", "hardware_scan", "recommend_models",
     "crawl_site", "map_site", "fetch_clean", "run_recipe",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
-    "generate_image", "describe_image", "reply_with_gif", "send_gif"
+    "generate_image", "describe_image", "reply_with_gif", "send_gif",
+    "search_group_chat"
 }
 
 
@@ -4075,6 +4082,70 @@ def describe_images(paths, question=None, fast=False):
 
 
 # ---------------------------
+# GROUP CHAT HISTORY SEARCH
+# ---------------------------
+def search_group_chat(input_str):
+    """Search the exported Telegram group chat with optional date filter.
+
+    Format: "query" or "query|year" or "query|YYYY-MM".
+    """
+    from rag_tool import get_rag
+    from rag_tool import GROUP_EXPORT_ROOT
+
+    parts = input_str.split("|", 1)
+    query = parts[0].strip()
+    date_filter = parts[1].strip() if len(parts) > 1 else None
+
+    if not query:
+        return "ERROR: search_group_chat needs a search query. Use 'query' or 'query|2023'."
+
+    rag = get_rag()
+    if rag.collection.count() == 0:
+        return "No documents indexed yet."
+
+    q_embedding = rag.model.encode([query], show_progress_bar=False).tolist()
+
+    # Scope to the exported group chat and optionally a year/month. Both checks
+    # are substring tests on the source path, which Chroma cannot express:
+    # {"source": {"$contains": ...}} is array-membership and silently matches
+    # nothing on this field, so we over-fetch and filter in Python instead.
+    fetch_k = min(max(600, rag.collection.count()), 2000)
+    try:
+        results = rag.collection.query(
+            query_embeddings=q_embedding,
+            n_results=fetch_k,
+        )
+    except Exception as e:
+        return f"ERROR: search failed: {e}"
+
+    docs = results["documents"][0] if results.get("documents") else []
+    metas = results["metadatas"][0] if results.get("metadatas") else []
+
+    root = GROUP_EXPORT_ROOT.replace("/", "\\").lower()
+    keep = []
+    for doc, meta in zip(docs, metas):
+        norm = (meta or {}).get("source", "").replace("/", "\\")
+        if not norm.lower().startswith(root):
+            continue
+        if date_filter and date_filter not in norm:
+            continue
+        keep.append((doc, meta))
+
+    if not keep:
+        suffix = f" in {date_filter}" if date_filter else ""
+        return f"No matches for '{query}'{suffix} in the group chat export."
+
+    out = []
+    for doc, meta in keep[:8]:
+        norm = (meta or {}).get("source", "unknown").replace("/", "\\")
+        short = norm.split("\\")[-1] if "\\" in norm else norm
+        folder = norm.split("\\")[-2] if norm.count("\\") >= 2 else ""
+        label = f"{folder}/{short}" if folder else short
+        out.append(f"[From: {label}]\n{doc}")
+    return "\n\n---\n\n".join(out)
+
+
+# ---------------------------
 # TOOL EXECUTION
 # ---------------------------
 def execute_tool(action):
@@ -4164,6 +4235,7 @@ def execute_tool(action):
     elif tool == 'verify_places':          return verify_places(inp)
     elif tool == 'rag_search':             return search_documents(inp)
     elif tool == 'rag_index':              return index_documents(inp)
+    elif tool == 'search_group_chat':      return search_group_chat(inp)
     elif tool == 'deep_research':          return deep_research(inp)
     elif tool == 'hardware_scan':          return hardware_scan()
     elif tool == 'recommend_models':       return recommend_models()

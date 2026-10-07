@@ -26,6 +26,11 @@ STATE_FILE = os.path.join(
     os.environ.get("APPDATA", "."), "AgentBot", "rag_state.json"
 )
 
+# Root of the flattened Telegram export. Kept in sync with
+# telegram_export_parser.OUTPUT_DIR; consumers use it to scope searches to the
+# group chat rather than every indexed folder.
+GROUP_EXPORT_ROOT = r"C:\Users\USER\PrivateExport"
+
 
 def _load_state() -> dict:
     import json

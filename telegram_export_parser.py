@@ -20,6 +20,7 @@ from telegram_scrubber import record_stats, scrub_line, scrub_stats
 
 # Deliberately outside the repo, outside Downloads, outside Documents. This data
 # is a full private group chat and must not sit next to code that gets committed.
+# Kept in sync with rag_tool.GROUP_EXPORT_ROOT, which scopes group-chat searches.
 OUTPUT_DIR = r"C:\Users\USER\PrivateExport"
 BLOCKLIST_FILE = os.path.join(OUTPUT_DIR, "blocklist.txt")
 
