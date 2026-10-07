@@ -152,6 +152,26 @@ def detect_image_file_id(message):
     return _largest_photo_file_id(message) or _image_document_file_id(message)
 
 
+def detect_gif_file_id(message):
+    """file_id for a GIF / short silent video, else None.
+
+    Telegram converts GIFs to silent MP4s and puts them in message["animation"];
+    the same clip sent "as file" arrives in message["document"] with a video/* or
+    image/gif mime type. Check this BEFORE detect_image_file_id, which would
+    otherwise claim image/gif documents as ordinary stills.
+    """
+    anim = message.get("animation")
+    if anim and anim.get("file_id"):
+        return anim["file_id"]
+
+    doc = message.get("document")
+    if doc and doc.get("file_id"):
+        mime = (doc.get("mime_type") or "").lower()
+        if mime.startswith("video/") or mime == "image/gif":
+            return doc["file_id"]
+    return None
+
+
 def download_telegram_image(file_id, message_id):
     """Resolve file_id via getFile then download it. Returns (path, error)."""
     try:
@@ -280,16 +300,52 @@ def main():
                 caption = (message.get("caption") or "").strip()
                 message_id = message.get("message_id", 0)
 
-                image_file_id = detect_image_file_id(message)
+                gif_file_id = detect_gif_file_id(message)
+                has_gif = bool(gif_file_id)
+                # An image/gif document matches both detectors — GIF wins, so
+                # it never falls through to the single-still vision path.
+                image_file_id = None if has_gif else detect_image_file_id(message)
                 has_image = bool(image_file_id)
-                is_other_document = bool(message.get("document")) and not has_image
+                is_other_document = (bool(message.get("document"))
+                                     and not has_image and not has_gif)
 
-                if not text and not has_image and not is_other_document:
+                if not text and not has_image and not has_gif and not is_other_document:
                     continue
 
                 # Access control
                 if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
                     send_message(chat_id, "Unauthorized.")
+                    continue
+
+                # --- GIF / short silent video: decode frames, one vision call ---
+                if has_gif:
+                    print(f"\n[Telegram] <{user_id}> [gif] {caption}")
+                    send_typing(chat_id)
+                    question = caption or "Describe what's happening in this GIF"
+                    gif_path = None
+                    try:
+                        import telegram_media
+                    except ImportError as e:
+                        print(f"[Telegram] GIF support unavailable: {e}")
+                        send_message(chat_id, "GIF support needs "
+                                              "`pip install imageio imageio-ffmpeg`.")
+                        continue
+                    try:
+                        gif_path, err = download_telegram_image(gif_file_id, message_id)
+                        if not gif_path:
+                            print(f"[Telegram] gif download failed: {err}")
+                            send_message(chat_id, "I couldn't download that GIF — try again?")
+                            continue
+                        reply = telegram_media.describe_gif(gif_path, question)
+                        conversation_history.append(f"User: [gif] {question}")
+                        conversation_history.append(f"AI: {reply}")
+                        send_message(chat_id, reply)
+                    finally:
+                        if gif_path:
+                            try:
+                                os.remove(gif_path)
+                            except Exception:
+                                pass
                     continue
 
                 # --- Image: download, then route through the vision pipeline ---

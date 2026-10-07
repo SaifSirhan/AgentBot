@@ -26,6 +26,10 @@ python-docx
 openpyxl
 pytesseract          # also requires the Tesseract binary installed on the system
 
+# --- GIF / short video frame extraction (Telegram animations) ---
+imageio
+imageio-ffmpeg       # bundles an ffmpeg binary; no system install needed
+
 # --- Voice (TTS / STT) & audio ---
 kokoro
 faster-whisper

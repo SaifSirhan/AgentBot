@@ -3827,6 +3827,75 @@ def describe_image(input_str):
         return f"ERROR: {e}"
 
 
+def describe_images(paths, question=None):
+    """Describe several images in ONE vision call, as an ordered sequence.
+
+    For GIF/video frames, where the useful signal is what changes *between*
+    frames — describing them one at a time loses the motion and costs a
+    separate request per frame.
+    """
+    import base64
+
+    paths = [p for p in (paths or []) if p and os.path.isfile(p)]
+    if not paths:
+        return "ERROR: no images to describe"
+
+    question = (question or "").strip() or (
+        "These are evenly-spaced frames from a single animated sequence, in "
+        "order. Describe what happens across the sequence in one or two "
+        "sentences."
+    )
+
+    content = [{"type": "text", "text": question}]
+    for p in paths:
+        ext = os.path.splitext(p)[1].lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+            return f"ERROR: not a supported image type: {ext}"
+        try:
+            with open(p, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+        except Exception as e:
+            return f"ERROR reading file: {e}"
+        mime = "image/png" if ext == ".png" else "image/jpeg"
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}"}})
+
+    if not DEEPSEEK_API_KEY:
+        return "ERROR: DEEPSEEK_API_KEY not set — vision requires DeepSeek."
+
+    try:
+        body = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [{"role": "user", "content": content}],
+            # deepseek-flash reasons before it answers, and reasoning tokens
+            # count against this budget. At 1024 it can spend the whole thing
+            # thinking and return empty content (finish_reason "length").
+            # Measured on 8 GIF frames: ~1200-2000 reasoning tokens.
+            "max_tokens": 4096,
+        }
+        r = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=body, timeout=180,
+        )
+        if r.status_code != 200:
+            return f"ERROR: DeepSeek HTTP {r.status_code}: {r.text[:200]}"
+        data = r.json()
+        choice = data["choices"][0]
+        content_out = choice["message"].get("content", "")
+        if content_out.strip():
+            return content_out.strip()
+        if choice.get("finish_reason") == "length":
+            return ("ERROR: answer truncated — the model spent its whole token "
+                    "budget reasoning before replying (raise max_tokens)")
+        return "ERROR: empty vision response"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
 # ---------------------------
 # TOOL EXECUTION
 # ---------------------------
