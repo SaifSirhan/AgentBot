@@ -1369,7 +1369,12 @@ class AgentGUI:
                 "       e.g.  /scan C:\\Users\\USER\\Downloads\\file.exe\n\n"
                 "/quarantine File   → move a file to Downloads\\Quarantine\\\n\n"
                 "/quarantine-list   → list quarantined files\n\n"
-                "/rag   query       → search your indexed documents",
+                "/rag   query       → search your indexed documents\n\n"
+                "Group GIF library — memes the bot stored from Telegram:\n\n"
+                "/gif-stats         → how many GIFs, occurrences and labels\n\n"
+                "/label-gifs        → label every unlabeled GIF (costs API calls)\n"
+                "/label-gifs 50     → label the 50 most-reused only\n"
+                "/label-gifs min 2  → only GIFs sent 2+ times (cheapest start)",
                 "system",
             )
             return True
@@ -1446,6 +1451,63 @@ class AgentGUI:
                 from rag_tool import search_documents
                 result = search_documents(args.strip())
             return self._finish_slash_command(text, result)
+
+        if cmd == "/gif-stats":
+            try:
+                import gif_library
+                result = gif_library.library_stats()
+            except Exception as e:
+                result = f"ERROR: {e}"
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/label-gifs":
+            # /label-gifs        -> every unlabeled GIF
+            # /label-gifs 50     -> the 50 most-reused
+            # /label-gifs min 2  -> only GIFs used 2+ times
+            parts_l = args.split()
+            limit = None
+            min_occ = 1
+            if len(parts_l) == 1 and parts_l[0].isdigit():
+                limit = int(parts_l[0])
+            elif len(parts_l) == 2 and parts_l[0].lower() == "min":
+                if not parts_l[1].isdigit():
+                    self._add_bubble(text, "user")
+                    self._add_bubble(
+                        "ERROR: /label-gifs min N — N must be a number", "system")
+                    return True
+                min_occ = int(parts_l[1])
+
+            try:
+                import gif_library  # noqa: F401  (fail fast if unavailable)
+            except Exception as e:
+                self._add_bubble(text, "user")
+                self._add_bubble(f"ERROR: {e}", "system")
+                return True
+
+            # Labeling costs an API call per GIF and runs for minutes, so it
+            # goes on a worker thread with the result pushed back on the UI
+            # thread via root.after — same shape as indexing.
+            self._add_bubble(text, "user")
+            self._add_system_bubble("🏷️ Labeling GIFs… this can take a while.")
+            self.set_status("Labeling GIFs…", busy=True)
+
+            def work():
+                try:
+                    import gif_library
+                    msg = gif_library.label_gifs(min_occurrences=min_occ,
+                                                 limit=limit)
+                except Exception as e:
+                    msg = f"❌ Labeling failed: {e}"
+                # Never let the callback itself be the thing that fails: if
+                # posting the result back raises, the user is left with the
+                # "Labeling…" bubble forever.
+                try:
+                    self.root.after(0, lambda m=msg: self._label_done(m))
+                except Exception:
+                    print(f"[label-gifs] {msg}")
+
+            threading.Thread(target=work, daemon=True).start()
+            return True
 
         try:
             import telegram_user
@@ -2236,6 +2298,10 @@ class AgentGUI:
         threading.Thread(target=work, daemon=True).start()
 
     def _index_done(self, msg):
+        self._add_system_bubble(msg)
+        self.set_status("Ready")
+
+    def _label_done(self, msg):
         self._add_system_bubble(msg)
         self.set_status("Ready")
 
