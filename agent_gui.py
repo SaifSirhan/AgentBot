@@ -1374,7 +1374,12 @@ class AgentGUI:
                 "/gif-stats         → how many GIFs, occurrences and labels\n\n"
                 "/label-gifs        → label every unlabeled GIF (costs API calls)\n"
                 "/label-gifs 50     → label the 50 most-reused only\n"
-                "/label-gifs min 2  → only GIFs sent 2+ times (cheapest start)",
+                "/label-gifs min 2  → only GIFs sent 2+ times (cheapest start)\n\n"
+                "Telegram group export (private, stays outside the repo):\n\n"
+                "/import-chat <result.json>\n"
+                "       → parse a Telegram Desktop export into scrubbed monthly\n"
+                "         files under C:\\Users\\USER\\PrivateExport\n\n"
+                "/reindex           → re-index RAG_AUTO_INDEX_FOLDERS",
                 "system",
             )
             return True
@@ -1451,6 +1456,97 @@ class AgentGUI:
                 from rag_tool import search_documents
                 result = search_documents(args.strip())
             return self._finish_slash_command(text, result)
+
+        if cmd == "/import-chat":
+            if not args.strip():
+                self._add_bubble(
+                    "Usage: /import-chat <path to result.json>\n"
+                    "Parses a Telegram Desktop export into scrubbed monthly "
+                    "files under C:\\Users\\USER\\PrivateExport.", "system")
+                return True
+            try:
+                import telegram_export_parser  # noqa: F401
+            except Exception as e:
+                self._add_bubble(text, "user")
+                self._add_bubble(f"ERROR: {e}", "system")
+                return True
+
+            self._add_bubble(text, "user")
+            self._add_system_bubble("📥 Parsing and scrubbing Telegram export…")
+            self.set_status("Parsing export…", busy=True)
+
+            def work():
+                try:
+                    import telegram_export_parser as tep
+                    r = tep.parse_json_export(args.strip())
+                    msg = (
+                        f"✅ Chat import complete:\n"
+                        f"  Chat: {r['chat_name']}\n"
+                        f"  Files written: {r['files_written']}\n"
+                        f"  Messages indexed: {r['total_messages']}\n"
+                        f"  Dropped (address/blocklist): {r['dropped_lines']}\n"
+                        f"  Redacted: {r['modified_lines']}\n"
+                        f"  Output: {r['output_dir']}\n\n"
+                        f"Review the scrub report before indexing:\n"
+                        f"  {r['report_path']}\n\n"
+                        f"Run /reindex to add it to RAG."
+                    )
+                except Exception as e:
+                    msg = f"❌ Import failed: {e}"
+                try:
+                    self.root.after(0, lambda m=msg: self._add_system_bubble(m))
+                except Exception:
+                    print("[import-chat] finished; could not post result to UI")
+
+            threading.Thread(target=work, daemon=True).start()
+            return True
+
+        if cmd == "/reindex":
+            try:
+                import config  # noqa: F401
+                import rag_tool  # noqa: F401
+            except Exception as e:
+                self._add_bubble(text, "user")
+                self._add_bubble(f"ERROR: {e}", "system")
+                return True
+
+            self._add_bubble(text, "user")
+            self._add_system_bubble("🔍 Re-indexing configured folders…")
+            self.set_status("Re-indexing…", busy=True)
+
+            def work():
+                try:
+                    import config
+                    import rag_tool
+                    cfg = config.load_config()
+                    folders = cfg.get("RAG_AUTO_INDEX_FOLDERS", [])
+                    if isinstance(folders, str):
+                        folders = [f.strip() for f in folders.split(",") if f.strip()]
+                    lines = []
+                    skipped = 0
+                    for folder in folders:
+                        if not os.path.isdir(folder):
+                            skipped += 1
+                            continue
+                        try:
+                            res = rag_tool.index_documents(folder)
+                            first = (res or "done").splitlines()[0] if res else "done"
+                        except Exception as e:
+                            first = f"failed: {e}"
+                        # Only the folder name, never its contents.
+                        lines.append(f"  {os.path.basename(folder) or folder}: {first}")
+                    msg = "✅ Reindex complete:\n" + "\n".join(lines)
+                    if skipped:
+                        msg += f"\n  ({skipped} configured folder(s) not found, skipped)"
+                except Exception as e:
+                    msg = f"❌ Reindex failed: {e}"
+                try:
+                    self.root.after(0, lambda m=msg: self._add_system_bubble(m))
+                except Exception:
+                    print("[reindex] finished; could not post result to UI")
+
+            threading.Thread(target=work, daemon=True).start()
+            return True
 
         if cmd == "/gif-stats":
             try:

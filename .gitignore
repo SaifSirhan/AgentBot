@@ -53,3 +53,9 @@ _backup_*/
 # sites, and a "type" step can carry credentials. Same rule as config.json.
 recipes.json
 
+
+# Telegram group export — a full private chat, kept outside the repo. Listed
+# anyway so an accidental copy into the working tree can't be committed.
+TelegramExport/
+result.json
+PrivateExport/
