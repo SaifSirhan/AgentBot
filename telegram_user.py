@@ -554,6 +554,85 @@ def send_file_tool(input_str):
         return f"ERROR: {e}"
 
 
+# ------------------------------------------------------------------
+# Async: send a GIF by URL
+# ------------------------------------------------------------------
+async def _send_gif_async(contact, gif_url):
+    """Send a GIF straight from a URL. Telethon fetches it, so the file never
+    lands on disk.
+
+    Telegram renders this as an animation (autoplaying, no chrome) rather than
+    a file attachment, which is what makes a Giphy URL the right thing to hand
+    over here — downloading it first and sending the bytes loses that.
+    """
+    client = _make_client()
+    try:
+        await client.connect()
+    except Exception as e:
+        return f"ERROR: could not connect to Telegram: {e}"
+
+    try:
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return "ERROR: not logged in. Run: python telegram_user.py login"
+
+        target = await _find_dialog(client, contact)
+        if target is None:
+            await client.disconnect()
+            return (f"ERROR: no chat found matching '{contact}'. "
+                    f"Check the exact name in Telegram.")
+
+        await asyncio.sleep(random.uniform(2.0, 6.0))
+
+        try:
+            msg = await client.send_file(target, gif_url, caption="")
+            try:
+                msg_id = msg.id
+            except AttributeError:
+                msg_id = msg[0].id if isinstance(msg, list) and msg else "?"
+            display_name = getattr(target, "name", None) or contact
+            await client.disconnect()
+            return f"Sent GIF to '{display_name}' (msg id {msg_id})"
+        except errors.FloodWaitError as e:
+            wait = int(e.seconds)
+            await client.disconnect()
+            return f"ERROR: Telegram rate-limited (FloodWait {wait}s). Try again in {wait}s."
+        except errors.UserPrivacyRestrictedError:
+            await client.disconnect()
+            return f"ERROR: can't message '{contact}' — privacy settings block it."
+        except errors.UserIsBlockedError:
+            await client.disconnect()
+            return f"ERROR: '{contact}' has blocked you or you've blocked them."
+        except Exception as e:
+            await client.disconnect()
+            return f"ERROR: send GIF failed: {e}"
+    except Exception as e:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return f"ERROR: send_gif failed: {e}"
+
+
+def send_gif_tool(input_str):
+    """Send a GIF (by URL) to a contact. Format: 'contact|gif_url'."""
+    if not TELETHON_AVAILABLE:
+        return "ERROR: Telethon not installed. Run: pip install telethon"
+    parts = (input_str or "").split("|", 1)
+    if len(parts) < 2:
+        return "ERROR: format is 'contact|gif_url'"
+    contact = parts[0].strip()
+    url = parts[1].strip()
+    if not contact or not url:
+        return "ERROR: needs both a contact and a GIF URL"
+    if not url.lower().startswith(("http://", "https://")):
+        return f"ERROR: not a URL: {url}"
+    try:
+        return asyncio.run(_send_gif_async(contact, url))
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
 def delete_tool(input_str):
     """
     Format: 'Contact|text'                → preview match by text

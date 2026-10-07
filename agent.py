@@ -3102,6 +3102,32 @@ def reply_with_gif(input_str):
         return f"ERROR: reply_with_gif failed: {e}"
 
 
+def send_gif(input_str):
+    """Search Giphy and send a GIF to a Telegram contact as the user.
+
+    Format: 'contact|search_term'. Use 'me' for Saved Messages.
+    """
+    parts = (input_str or "").split("|", 1)
+    if len(parts) < 2:
+        return "ERROR: format is 'contact|search_term'"
+    contact, query = parts[0].strip(), parts[1].strip()
+    if not contact or not query:
+        return "ERROR: needs both a contact and a search term"
+
+    from gif_tool import search_gif
+
+    url = search_gif(query)
+    if not url:
+        return (f"ERROR: no GIF found for '{query}'. Check GIPHY_API_KEY is set "
+                f"and the query is searchable.")
+
+    try:
+        import telegram_user
+        return telegram_user.send_gif_tool(f"{contact}|{url}")
+    except Exception as e:
+        return f"ERROR: send_gif failed: {e}"
+
+
 def whitelist(input_str):
     """Manage the autocorrect whitelist. Format: 'add <word>' / 'remove <word>' / 'list'."""
     try:
@@ -3629,11 +3655,16 @@ COMMUNICATION
   gmail_read(input) — read email by UID.
   gmail_search(input) — search email by keyword.
   whitelist(input) — "add <word>", "remove <word>", or "list".
-  reply_with_gif(input) — reply in the current Telegram chat with a GIF
+  reply_with_gif(input) — reply in the CURRENT Telegram chat with a GIF
     matching an emotion or context. Input: search term like "celebration",
-    "facepalm", "sarcastic clap", "confused". USE THIS sparingly — only when
-    a text reply would feel flat and a GIF would land better. Not every
-    message needs a GIF.
+    "facepalm", "sarcastic clap", "confused". Use this when you want to react
+    in this conversation. USE IT sparingly — only when a text reply would feel
+    flat and a GIF would land better. Not every message needs a GIF.
+  send_gif(input) — search Giphy for a GIF and send it to a NAMED Telegram
+    contact as the user. Format: "contact|search_term". Use "me" for Saved
+    Messages. Use this when told to SEND someone a GIF ("send a funny GIF to
+    JEE"). Search terms should describe the emotion or vibe, not a literal
+    scene — "facepalm" works better than "person with hand on face".
 
 PLACES & MAPS
   verify_places(input) — "place1|place2|place3"; geocode each place and
@@ -3737,7 +3768,7 @@ VALID_TOOLS = {
     "whitelist", "send_maps_list",    "whitelist", "deep_research", "hardware_scan", "recommend_models",
     "crawl_site", "map_site", "fetch_clean", "run_recipe",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
-    "generate_image", "describe_image", "reply_with_gif"
+    "generate_image", "describe_image", "reply_with_gif", "send_gif"
 }
 
 
@@ -4032,6 +4063,7 @@ def execute_tool(action):
     elif tool == "telegram_user_edit":     return telegram_user_edit(action.get("input", ""))
     elif tool == "send_image_telegram":    return send_image_telegram(action.get("input", ""))
     elif tool == "reply_with_gif":         return reply_with_gif(action.get("input", ""))
+    elif tool == 'send_gif':               return send_gif(inp)
     elif tool == 'whitelist':              return whitelist(inp)
     elif tool == 'send_maps_list':         return send_maps_list(inp)
     elif tool == 'verify_places':          return verify_places(inp)
