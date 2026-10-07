@@ -388,6 +388,7 @@ class AgentGUI:
         self._icon_mic = gw.make_icon("mic", 18, gw.COLOR_ACCENT)
         self._icon_mic_rec = gw.make_icon("mic", 18, "#ffffff")
         self._icon_send = gw.make_icon("send", 16, "#06281a")
+        self._icon_stop = gw.make_icon("stop", 16, gw.COLOR_TEXT_MID)
 
         BTN = 32
         btn_cluster = ctk.CTkFrame(pill, fg_color="transparent")
@@ -416,6 +417,19 @@ class AgentGUI:
         self.mic_btn.pack(side="left", padx=2)
         self.mic_btn.bind("<ButtonPress-1>", self.on_mic_press)
         self.mic_btn.bind("<ButtonRelease-1>", self.on_mic_release)
+
+        # Stop speech. Escape already did this with nothing on screen to say
+        # so, which left the only way to silence a reply undiscoverable.
+        self.stop_btn = ctk.CTkButton(
+            btn_cluster,
+            text="" if self._icon_stop else "■",
+            image=self._icon_stop,
+            width=BTN, height=BTN,
+            fg_color="transparent", hover_color=COLOR_RAISED,
+            corner_radius=8,
+            command=self.stop_voice,
+        )
+        self.stop_btn.pack(side="left", padx=2)
 
         self.send_btn = ctk.CTkButton(
             btn_cluster,

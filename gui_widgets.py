@@ -264,11 +264,22 @@ def _icon_send(size, color):
     return img.resize((size, size), Image.LANCZOS)
 
 
+def _icon_stop(size, color):
+    """Filled square — the conventional 'stop playback' glyph."""
+    img = _supersample(size)
+    d = ImageDraw.Draw(img)
+    s = size * 4
+    d.rounded_rectangle((s * 0.28, s * 0.28, s * 0.72, s * 0.72),
+                        radius=int(s * 0.10), fill=color)
+    return img.resize((size, size), Image.LANCZOS)
+
+
 def make_icon(name, size=20, color=COLOR_ACCENT):
     """Return a CTkImage or None when PIL is unavailable."""
     if not _HAS_PIL:
         return None
     import customtkinter as ctk
-    draw = {"clip": _icon_clip, "mic": _icon_mic, "send": _icon_send}[name]
+    draw = {"clip": _icon_clip, "mic": _icon_mic, "send": _icon_send,
+            "stop": _icon_stop}[name]
     img = draw(size, color)
     return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
