@@ -3672,6 +3672,15 @@ LOCAL FILES & DOCUMENTS
     or uses phrases like "back in 2023" or "last year". NEVER returns
     results from other indexed folders (Downloads, Fire Writing, etc.).
     Example: "lari dari rumah|2023".
+  grep_group_chat(input) — EXACT substring search in the exported group
+    chat. Returns raw lines with timestamps, no interpretation. Format:
+    "keyword" or "keyword|year" or "keyword|YYYY-MM". USE THIS whenever
+    the user asks for a specific quote, date, or "prove X said Y". Never
+    paraphrase from grep results — copy the exact line. Unlike
+    search_group_chat (semantic), grep does not guess or rephrase.
+    When you're about to quote a message or cite a date, run
+    grep_group_chat FIRST. If grep returns no match, you must say "I
+    can't find that exact quote" instead of paraphrasing or inventing one.
   read_file(input) — read an exact full path only; never partial.
   write_file(input) — "filename|content". Creates or FULLY OVERWRITES a file.
     NEVER use write_file to modify an existing file — you will destroy everything
@@ -3885,7 +3894,7 @@ VALID_TOOLS = {
     "crawl_site", "map_site", "fetch_clean", "run_recipe",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
-    "search_group_chat"
+    "search_group_chat", "grep_group_chat"
 }
 
 
@@ -4160,6 +4169,47 @@ def search_group_chat(input_str):
     return "\n\n---\n\n".join(out)
 
 
+def grep_group_chat(input_str):
+    """Exact substring search in the group chat export.
+    Format: "keyword" or "keyword|year" or "keyword|YYYY-MM" """
+    import os, re
+    parts = input_str.split("|", 1)
+    keyword = parts[0].strip().lower()
+    date_filter = parts[1].strip() if len(parts) > 1 else None
+    if not keyword:
+        return "ERROR: needs a search keyword"
+
+    root = r"C:\Users\USER\PrivateExport\biology_bapak_kau"
+    if not os.path.isdir(root):
+        return f"ERROR: export folder not found: {root}"
+
+    matches = []
+    for fname in sorted(os.listdir(root)):
+        if not fname.endswith(".txt"):
+            continue
+        if date_filter and date_filter not in fname:
+            continue
+        path = os.path.join(root, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for lineno, line in enumerate(f, 1):
+                    if keyword in line.lower():
+                        matches.append(line.rstrip())
+                        if len(matches) >= 40:
+                            break
+        except Exception:
+            continue
+        if len(matches) >= 40:
+            break
+
+    if not matches:
+        return f"No exact matches for '{keyword}'" + (
+            f" in {date_filter}" if date_filter else "")
+
+    header = f"Found {len(matches)} exact match(es) for '{keyword}':\n\n"
+    return header + "\n".join(matches)
+
+
 # ---------------------------
 # TOOL EXECUTION
 # ---------------------------
@@ -4251,6 +4301,7 @@ def execute_tool(action):
     elif tool == 'rag_search':             return search_documents(inp)
     elif tool == 'rag_index':              return index_documents(inp)
     elif tool == 'search_group_chat':      return search_group_chat(inp)
+    elif tool == 'grep_group_chat':        return grep_group_chat(inp)
     elif tool == 'deep_research':          return deep_research(inp)
     elif tool == 'hardware_scan':          return hardware_scan()
     elif tool == 'recommend_models':       return recommend_models()
