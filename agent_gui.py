@@ -2599,9 +2599,24 @@ class AgentGUI:
                 "i've sent", "i sent", "i've deleted", "i deleted",
                 "i've found", "i found ", "i've opened", "i opened",
                 "files moved", "folder created",
+                "relabeled", "relabelled", "i've relabeled",
+                "i've removed", "i removed", "i've labeled", "i labeled",
+                "now labeled", "just labeled",
+                "i've updated", "i updated", "i've edited", "i edited",
+                "i've added", "i added", "i've changed", "i changed",
+            )
+            # Verb-led claims with no subject slip past the phrases above
+            # ("Removed the last GIF...", "Deleted it.", "Relabeled it.").
+            claim_verbs = (
+                "moved", "created", "sent", "deleted", "removed", "relabeled",
+                "relabelled", "labeled", "updated", "edited", "added",
+                "changed", "cleared", "saved", "scheduled",
             )
             low = final_message.lower()
-            if any(w in low for w in claim_words) and not tools_ran:
+            stripped = low.lstrip()
+            claims_done = stripped.startswith(("done", "did it", "all set"))
+            claims_verb = stripped.startswith(claim_verbs)
+            if (any(w in low for w in claim_words) or claims_done or claims_verb) and not tools_ran:
                 final_message = (
                     "⚠️ I didn't actually do that — no tool ran. "
                     "Say it again or use /find, /move, /mkdir to run it directly."
