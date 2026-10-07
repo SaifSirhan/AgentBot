@@ -237,7 +237,7 @@ class RAGTool:
     # ----------------------------------------------------------
     # SEARCH
     # ----------------------------------------------------------
-    def search(self, query: str, top_k: int = 3) -> str:
+    def search(self, query: str, top_k: int = 8) -> str:
         """Find the most relevant chunks for a question."""
         if self.collection.count() == 0:
             return "No documents indexed yet."
