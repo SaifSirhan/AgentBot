@@ -13,6 +13,7 @@ Requires: pip install requests
 
 import time
 import os
+import collections
 import tempfile
 import requests
 import io
@@ -45,6 +46,20 @@ conversation_history = []
 
 # One lock so concurrent messages don't corrupt state
 turn_lock = threading.Lock()
+
+# The chat whose message is currently being handled. Tool calls like
+# reply_with_gif() run deep inside agent.run_agent_turn() and have no way to
+# know which chat asked — in a group that's the difference between answering
+# the group and DMing the user. Set for the duration of each turn.
+_chat_ctx = threading.local()
+
+
+def set_current_chat(chat_id):
+    _chat_ctx.chat_id = chat_id
+
+
+def get_current_chat():
+    return getattr(_chat_ctx, "chat_id", None)
 
 
 # ---------------------------
@@ -87,6 +102,40 @@ def send_typing(chat_id):
 
 
 # ---------------------------
+# Recent-chat buffer (for GIF context)
+# ---------------------------
+# The bot answers each message in isolation, so a GIF arriving after "bro look
+# at this" was read with no idea what it was reacting to. Keep the tail of the
+# conversation and hand it to the GIF context pass.
+#
+# Populated from observed messages only — Telegram's getUpdates drops messages
+# older than 24h, so fetching a backlog isn't possible without a persistent
+# offset, and with privacy mode ON the bot never sees ordinary group chatter
+# at all. Bounded so a long-running process can't grow without limit.
+_RECENT_LIMIT = 30
+_recent_messages = collections.deque(maxlen=_RECENT_LIMIT)
+
+
+def record_recent(name, text):
+    """Remember one message for the GIF context pass."""
+    text = (text or "").strip()
+    if text:
+        _recent_messages.append({"name": (name or "").strip(), "text": text})
+
+
+def _recent_excluding_tail(n, tail_text):
+    """The previous n buffered messages, minus the one we're handling now.
+
+    The buffer is appended to before the handler runs, so the trigger message
+    (or a GIF caption) would otherwise show up in its own context block.
+    """
+    items = list(_recent_messages)
+    if items and tail_text and items[-1]["text"] == tail_text.strip():
+        items = items[:-1]
+    return items[-n:]
+
+
+# ---------------------------
 # Images
 # ---------------------------
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
@@ -108,6 +157,41 @@ def send_photo(chat_id, path, caption=""):
     except Exception as e:
         print(f"[Telegram] sendPhoto failed: {e}")
         return False
+
+
+def send_animation(chat_id, url, caption=""):
+    """Send a GIF to a chat by URL. Returns True on success.
+
+    Telegram fetches the URL itself, so there's no download step — but the
+    URL must be publicly reachable, and it decides the filename.
+    """
+    try:
+        r = requests.post(
+            f"{TELEGRAM_API}/sendAnimation",
+            json={"chat_id": chat_id, "animation": url,
+                  "caption": caption[:1024]},
+            timeout=60)
+        if r.status_code != 200:
+            print(f"[Telegram] sendAnimation HTTP {r.status_code}: {r.text[:200]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[Telegram] sendAnimation failed: {e}")
+        return False
+
+
+def send_animation_to_current_chat(url, caption=""):
+    """Send a GIF to the chat being handled right now (used by reply_with_gif).
+
+    Falls back to the owner's DM when there's no chat context — the agent may
+    be driven from the GUI rather than from Telegram.
+    """
+    chat_id = get_current_chat() or ALLOWED_USER_ID
+    if not chat_id:
+        return "ERROR: no current Telegram chat and no ALLOWED_USER_ID set"
+    if send_animation(chat_id, url, caption):
+        return "GIF sent."
+    return "ERROR: Telegram rejected the GIF"
 
 
 def _extract_generated_images(step_log):
@@ -262,6 +346,157 @@ def run_agent_for_telegram(user_input):
 
 
 # ---------------------------
+# Message handler
+# ---------------------------
+def _display_name(message):
+    """Best-effort speaker name. Empty for private chats — the bot only ever
+    talks to its owner there, so a name adds nothing."""
+    chat = message.get("chat") or {}
+    if chat.get("type") not in ("group", "supergroup"):
+        return ""
+    sender = message.get("from") or {}
+    return (sender.get("first_name")
+            or sender.get("username")
+            or str(sender.get("id") or ""))
+
+
+def handle_message(message):
+    """Handle one incoming Telegram message. Returns nothing; never raises.
+
+    The caller wraps this so one bad message can't kill the polling loop.
+    """
+    chat_id = message["chat"]["id"]
+    user_id = message["from"]["id"]
+    text = message.get("text", "").strip()
+    caption = (message.get("caption") or "").strip()
+    message_id = message.get("message_id", 0)
+
+    gif_file_id = detect_gif_file_id(message)
+    has_gif = bool(gif_file_id)
+    # An image/gif document matches both detectors — GIF wins, so
+    # it never falls through to the single-still vision path.
+    image_file_id = None if has_gif else detect_image_file_id(message)
+    has_image = bool(image_file_id)
+    is_other_document = (bool(message.get("document"))
+                         and not has_image and not has_gif)
+
+    if not text and not has_image and not has_gif and not is_other_document:
+        return
+
+    # Access control
+    if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
+        send_message(chat_id, "Unauthorized.")
+        return
+
+    # Keep this message for the context pass of a GIF that follows, and scoped
+    # to this chat so reply_with_gif() answers the right conversation.
+    record_recent(_display_name(message), text or caption)
+    set_current_chat(chat_id)
+
+    # --- GIF / short silent video: decode frames, read them in context ---
+    if has_gif:
+        print(f"\n[Telegram] <{user_id}> [gif] {caption}")
+        send_typing(chat_id)
+        gif_path = None
+        try:
+            import telegram_media
+        except ImportError as e:
+            print(f"[Telegram] GIF support unavailable: {e}")
+            send_message(chat_id, "GIF support needs "
+                                  "`pip install imageio imageio-ffmpeg`.")
+            return
+        try:
+            gif_path, err = download_telegram_image(gif_file_id, message_id)
+            if not gif_path:
+                print(f"[Telegram] gif download failed: {err}")
+                send_message(chat_id, "I couldn't download that GIF — try again?")
+                return
+            recent = _recent_excluding_tail(5, text or caption)
+            reply = telegram_media.describe_gif_in_context(
+                gif_path, recent_messages=recent, caption=caption)
+            conversation_history.append(f"User: [gif] {caption}")
+            conversation_history.append(f"AI: {reply}")
+            send_message(chat_id, reply)
+        finally:
+            if gif_path:
+                try:
+                    os.remove(gif_path)
+                except Exception:
+                    pass
+        return
+
+    # --- Image: download, then route through the vision pipeline ---
+    if has_image:
+        print(f"\n[Telegram] <{user_id}> [image] {caption}")
+        send_typing(chat_id)
+        question = caption or "Describe this image"
+        img_path = None
+        try:
+            img_path, err = download_telegram_image(image_file_id, message_id)
+            if not img_path:
+                print(f"[Telegram] image download failed: {err}")
+                send_message(chat_id, "I couldn't download that image — try again?")
+                return
+            reply = describe_telegram_image(img_path, question)
+            conversation_history.append(f"User: [image] {question}")
+            conversation_history.append(f"AI: {reply}")
+            send_message(chat_id, reply)
+        finally:
+            if img_path:
+                try:
+                    os.remove(img_path)
+                except Exception:
+                    pass
+        return
+
+    # --- Non-image document ---
+    if is_other_document:
+        print(f"\n[Telegram] <{user_id}> [document] {caption or '(no caption)'}")
+        send_message(chat_id, "I can only read text and images right now.")
+        return
+
+    print(f"\n[Telegram] <{user_id}> {text}")
+
+    if text == "/start":
+        send_message(chat_id,
+            "🤖 Agent online.\n"
+            "Send me anything - I'll run it on your PC.\n"
+            "Examples:\n"
+            "  • open youtube and search lofi\n"
+            "  • remind me in 5 minutes to drink water\n"
+            "  • what's on my screen\n"
+            "  • summarize https://example.com\n"
+            "  • send me a photo and I'll tell you what's in it"
+        )
+        return
+
+    if text == "/clear":
+        conversation_history.clear()
+        send_message(chat_id, "🧹 Conversation history cleared.")
+        return
+
+    # Tell the user we're working on it
+    send_typing(chat_id)
+
+    # Run the agent (blocks the loop — fine for a single user)
+                    # Detect if this came from a group chat
+    chat_type = message["chat"]["type"]
+    is_group = chat_type in ("group", "supergroup")
+
+    # Set the flag before running the turn
+    agent.GROUP_MODE = is_group
+    try:
+        reply, gen_images = run_agent_for_telegram(text)
+    finally:
+        agent.GROUP_MODE = False   # always reset
+    print(f"[Telegram] AI: {reply[:100]}...")
+    send_message(chat_id, reply)
+    for img in gen_images:
+        if send_photo(chat_id, img):
+            print(f"[Telegram] sent generated image: {img}")
+
+
+# ---------------------------
 # Main polling loop
 # ---------------------------
 def main():
@@ -294,129 +529,17 @@ def main():
                 if not message:
                     continue
 
-                chat_id = message["chat"]["id"]
-                user_id = message["from"]["id"]
-                text = message.get("text", "").strip()
-                caption = (message.get("caption") or "").strip()
-                message_id = message.get("message_id", 0)
-
-                gif_file_id = detect_gif_file_id(message)
-                has_gif = bool(gif_file_id)
-                # An image/gif document matches both detectors — GIF wins, so
-                # it never falls through to the single-still vision path.
-                image_file_id = None if has_gif else detect_image_file_id(message)
-                has_image = bool(image_file_id)
-                is_other_document = (bool(message.get("document"))
-                                     and not has_image and not has_gif)
-
-                if not text and not has_image and not has_gif and not is_other_document:
-                    continue
-
-                # Access control
-                if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
-                    send_message(chat_id, "Unauthorized.")
-                    continue
-
-                # --- GIF / short silent video: decode frames, one vision call ---
-                if has_gif:
-                    print(f"\n[Telegram] <{user_id}> [gif] {caption}")
-                    send_typing(chat_id)
-                    question = caption or "Describe what's happening in this GIF"
-                    gif_path = None
-                    try:
-                        import telegram_media
-                    except ImportError as e:
-                        print(f"[Telegram] GIF support unavailable: {e}")
-                        send_message(chat_id, "GIF support needs "
-                                              "`pip install imageio imageio-ffmpeg`.")
-                        continue
-                    try:
-                        gif_path, err = download_telegram_image(gif_file_id, message_id)
-                        if not gif_path:
-                            print(f"[Telegram] gif download failed: {err}")
-                            send_message(chat_id, "I couldn't download that GIF — try again?")
-                            continue
-                        reply = telegram_media.describe_gif(gif_path, question)
-                        conversation_history.append(f"User: [gif] {question}")
-                        conversation_history.append(f"AI: {reply}")
-                        send_message(chat_id, reply)
-                    finally:
-                        if gif_path:
-                            try:
-                                os.remove(gif_path)
-                            except Exception:
-                                pass
-                    continue
-
-                # --- Image: download, then route through the vision pipeline ---
-                if has_image:
-                    print(f"\n[Telegram] <{user_id}> [image] {caption}")
-                    send_typing(chat_id)
-                    question = caption or "Describe this image"
-                    img_path = None
-                    try:
-                        img_path, err = download_telegram_image(image_file_id, message_id)
-                        if not img_path:
-                            print(f"[Telegram] image download failed: {err}")
-                            send_message(chat_id, "I couldn't download that image — try again?")
-                            continue
-                        reply = describe_telegram_image(img_path, question)
-                        conversation_history.append(f"User: [image] {question}")
-                        conversation_history.append(f"AI: {reply}")
-                        send_message(chat_id, reply)
-                    finally:
-                        if img_path:
-                            try:
-                                os.remove(img_path)
-                            except Exception:
-                                pass
-                    continue
-
-                # --- Non-image document ---
-                if is_other_document:
-                    print(f"\n[Telegram] <{user_id}> [document] {caption or '(no caption)'}")
-                    send_message(chat_id, "I can only read text and images right now.")
-                    continue
-
-                print(f"\n[Telegram] <{user_id}> {text}")
-
-                if text == "/start":
-                    send_message(chat_id,
-                        "🤖 Agent online.\n"
-                        "Send me anything - I'll run it on your PC.\n"
-                        "Examples:\n"
-                        "  • open youtube and search lofi\n"
-                        "  • remind me in 5 minutes to drink water\n"
-                        "  • what's on my screen\n"
-                        "  • summarize https://example.com\n"
-                        "  • send me a photo and I'll tell you what's in it"
-                    )
-                    continue
-
-                if text == "/clear":
-                    conversation_history.clear()
-                    send_message(chat_id, "🧹 Conversation history cleared.")
-                    continue
-
-                # Tell the user we're working on it
-                send_typing(chat_id)
-
-                # Run the agent (blocks the loop — fine for a single user)
-                                # Detect if this came from a group chat
-                chat_type = message["chat"]["type"]
-                is_group = chat_type in ("group", "supergroup")
-
-                # Set the flag before running the turn
-                agent.GROUP_MODE = is_group
+                # One bad message must not take down the loop, and must not
+                # advance past the rest of this batch without answering them.
                 try:
-                    reply, gen_images = run_agent_for_telegram(text)
-                finally:
-                    agent.GROUP_MODE = False   # always reset
-                print(f"[Telegram] AI: {reply[:100]}...")
-                send_message(chat_id, reply)
-                for img in gen_images:
-                    if send_photo(chat_id, img):
-                        print(f"[Telegram] sent generated image: {img}")
+                    handle_message(message)
+                except Exception as e:
+                    print(f"[Telegram] Message handler error: {type(e).__name__}: {e}")
+                    try:
+                        send_message(message["chat"]["id"],
+                                     "Something went wrong handling that — try again?")
+                    except Exception:
+                        pass
 
             time.sleep(1)
 

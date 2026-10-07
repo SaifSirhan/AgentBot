@@ -3078,6 +3078,30 @@ def send_image_telegram(input_str):
         return f"ERROR: send_image_telegram failed: {e}"
 
 
+def reply_with_gif(input_str):
+    """Reply in the current Telegram chat with a GIF matching an emotion/context.
+
+    Unlike send_telegram_message, this posts to whichever chat asked — so in a
+    group it answers the group rather than DMing the user.
+    """
+    from gif_tool import get_gif_for_emotion
+
+    query = (input_str or "").strip().strip('"').strip("'")
+    if not query:
+        return "ERROR: reply_with_gif needs a search term"
+
+    url = get_gif_for_emotion(query)
+    if not url:
+        return (f"ERROR: no GIF found for '{query}' — try a plainer emotion "
+                "word like 'celebration' or 'facepalm'")
+
+    try:
+        import telegram_bridge
+        return telegram_bridge.send_animation_to_current_chat(url, caption="")
+    except Exception as e:
+        return f"ERROR: reply_with_gif failed: {e}"
+
+
 def whitelist(input_str):
     """Manage the autocorrect whitelist. Format: 'add <word>' / 'remove <word>' / 'list'."""
     try:
@@ -3605,6 +3629,11 @@ COMMUNICATION
   gmail_read(input) — read email by UID.
   gmail_search(input) — search email by keyword.
   whitelist(input) — "add <word>", "remove <word>", or "list".
+  reply_with_gif(input) — reply in the current Telegram chat with a GIF
+    matching an emotion or context. Input: search term like "celebration",
+    "facepalm", "sarcastic clap", "confused". USE THIS sparingly — only when
+    a text reply would feel flat and a GIF would land better. Not every
+    message needs a GIF.
 
 PLACES & MAPS
   verify_places(input) — "place1|place2|place3"; geocode each place and
@@ -3708,7 +3737,7 @@ VALID_TOOLS = {
     "whitelist", "send_maps_list",    "whitelist", "deep_research", "hardware_scan", "recommend_models",
     "crawl_site", "map_site", "fetch_clean", "run_recipe",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
-    "generate_image", "describe_image"
+    "generate_image", "describe_image", "reply_with_gif"
 }
 
 
@@ -3808,7 +3837,12 @@ def describe_image(input_str):
                     {"type": "image_url", "image_url": {"url": data_url}},
                 ],
             }],
-            "max_tokens": 1024,
+            # DeepSeek V4 Flash reasons before answering and reasoning tokens
+            # count against this budget — at 1024 a detailed question (not a
+            # vague one) can burn the whole thing thinking and come back as
+            # HTTP 200 with empty content. Measured 1200-3100 reasoning tokens
+            # on a single image; see describe_images() for the same fix.
+            "max_tokens": 4096,
         }
         r = requests.post(
             "https://api.deepseek.com/v1/chat/completions",
@@ -3821,8 +3855,14 @@ def describe_image(input_str):
         if r.status_code != 200:
             return f"ERROR: DeepSeek HTTP {r.status_code}: {r.text[:200]}"
         data = r.json()
-        content = data["choices"][0]["message"].get("content", "")
-        return content.strip() or "ERROR: empty vision response"
+        choice = data["choices"][0]
+        content = choice["message"].get("content", "")
+        if content.strip():
+            return content.strip()
+        if choice.get("finish_reason") == "length":
+            return ("ERROR: answer truncated — the model spent its whole token "
+                    "budget reasoning before replying (raise max_tokens)")
+        return "ERROR: empty vision response"
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -3980,6 +4020,7 @@ def execute_tool(action):
     elif tool == "telegram_user_delete":   return telegram_user_delete(action.get("input", ""))
     elif tool == "telegram_user_edit":     return telegram_user_edit(action.get("input", ""))
     elif tool == "send_image_telegram":    return send_image_telegram(action.get("input", ""))
+    elif tool == "reply_with_gif":         return reply_with_gif(action.get("input", ""))
     elif tool == 'whitelist':              return whitelist(inp)
     elif tool == 'send_maps_list':         return send_maps_list(inp)
     elif tool == 'verify_places':          return verify_places(inp)
