@@ -66,6 +66,53 @@ COLOR_SELECTED     = gw.COLOR_SELECTED
 SIDEBAR_W = 226
 HEADER_H = 48
 
+SLASH_COMMANDS = [
+    {"cmd": "/help",           "desc": "Show all commands",                 "args": "",                "icon": "❓"},
+    {"cmd": "/send",           "desc": "Send a Telegram message",           "args": "Contact|message", "icon": "✉️"},
+    {"cmd": "/edit",           "desc": "Edit a Telegram message",           "args": "Contact|old|new", "icon": "✏️"},
+    {"cmd": "/del",            "desc": "Delete a Telegram message",         "args": "Contact|text",    "icon": "🗑️"},
+    {"cmd": "/dellast",        "desc": "Delete latest message to a contact","args": "Contact",         "icon": "🗑️"},
+    {"cmd": "/find",           "desc": "Find files by name pattern",        "args": "folder|pat1,pat2","icon": "🔍"},
+    {"cmd": "/move",           "desc": "Move files matching a pattern",     "args": "src|pat|dest",    "icon": "📦"},
+    {"cmd": "/mkdir",          "desc": "Create a folder in Downloads",      "args": "foldername",      "icon": "📁"},
+    {"cmd": "/map",            "desc": "Show repo map of a folder",         "args": "folder|depth",    "icon": "🗺️"},
+    {"cmd": "/symbols",        "desc": "List functions/classes in a file",  "args": "filepath",        "icon": "🔣"},
+    {"cmd": "/scan",           "desc": "Static analysis of a file",         "args": "file_path",       "icon": "🛡️"},
+    {"cmd": "/quarantine",     "desc": "Move a suspicious file to Quarantine","args": "file_path",     "icon": "🔒"},
+    {"cmd": "/quarantine-list","desc": "List quarantined files",            "args": "",                "icon": "📋"},
+    {"cmd": "/rag",            "desc": "Search indexed documents",          "args": "query",           "icon": "📚"},
+]
+
+
+def _fuzzy_score(query, target):
+    """Return a match score (higher = better, 0 = no match)."""
+    if not query:
+        return 1
+    q = query.lower().lstrip("/")
+    t = target.lower().lstrip("/")
+    if not q:
+        return 1
+    # Exact prefix
+    if t.startswith(q):
+        return 1000 - len(t)
+    # Substring anywhere
+    if q in t:
+        return 500 + (100 - t.index(q))
+    # Subsequence with consecutive bonus
+    qi = 0
+    score = 0
+    last_pos = -1
+    for i, ch in enumerate(t):
+        if qi < len(q) and ch == q[qi]:
+            score += 10
+            if i == last_pos + 1:
+                score += 5
+            last_pos = i
+            qi += 1
+    if qi == len(q):
+        return score
+    return 0
+
 FONT_UI = "Segoe UI"
 BUBBLE_FONT_SIZE = 12
 BUBBLE_PAD_X = 12
