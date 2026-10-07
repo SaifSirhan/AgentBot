@@ -2305,13 +2305,15 @@ class AgentGUI:
             self._handle_slash_command(user_input)
             return
 
-        if not self.attachments and self._try_nl_fastpath(user_input):
-            self._clear_entry()
-            try:
-                self.entry.configure(height=30)
-            except Exception:
-                pass
-            return
+        # Natural-language fast-path disabled: regex routing misfired on
+        # free-form text (e.g. "send X to Y"), so every message goes to the LLM.
+        # if not self.attachments and self._try_nl_fastpath(user_input):
+        #     self._clear_entry()
+        #     try:
+        #         self.entry.configure(height=30)
+        #     except Exception:
+        #         pass
+        #     return
 
         attached_paths = list(self.attachments)
         self.attachments.clear()
