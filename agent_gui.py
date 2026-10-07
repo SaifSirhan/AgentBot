@@ -377,6 +377,10 @@ class AgentGUI:
             inner = self.entry._textbox
             inner.bind("<KeyRelease>", lambda e: self._maybe_show_slash_popup(), add="+")
             inner.bind("<FocusOut>", lambda e: self._hide_slash_popup(), add="+")
+            inner.bind("<Up>", self._on_slash_up, add="+")
+            inner.bind("<Down>", self._on_slash_down, add="+")
+            inner.bind("<Tab>", self._on_slash_tab, add="+")
+            inner.bind("<Escape>", self._on_slash_escape, add="+")
         except Exception:
             pass
 
@@ -1059,6 +1063,8 @@ class AgentGUI:
     # Input helpers
     # ------------------------------------------------------------------
     def _on_send_key(self, event=None):
+        if self._slash_visible:
+            return self._on_slash_enter(event)
         self.send()
         return "break"
 
@@ -1257,6 +1263,66 @@ class AgentGUI:
         else:
             self._hide_slash_popup()
 
+    def _on_slash_up(self, event=None):
+        if not self._slash_visible:
+            return None
+        self._slash_index = max(0, self._slash_index - 1)
+        self._highlight_slash_row(self._slash_index)
+        return "break"
+
+    def _on_slash_down(self, event=None):
+        if not self._slash_visible:
+            return None
+        self._slash_index = min(
+            len(self._slash_matches) - 1, self._slash_index + 1
+        )
+        self._highlight_slash_row(self._slash_index)
+        return "break"
+
+    def _on_slash_tab(self, event=None):
+        if not self._slash_visible:
+            return None
+        if 0 <= self._slash_index < len(self._slash_matches):
+            cmd = self._slash_matches[self._slash_index]["cmd"]
+            self._insert_slash_command(cmd, execute_if_no_args=True)
+        return "break"
+
+    def _on_slash_enter(self, event=None):
+        if not self._slash_visible:
+            return None  # let the normal send handler run
+        if 0 <= self._slash_index < len(self._slash_matches):
+            cmd = self._slash_matches[self._slash_index]["cmd"]
+            self._insert_slash_command(cmd)
+        return "break"
+
+    def _on_slash_escape(self, event=None):
+        if not self._slash_visible:
+            return None
+        self._hide_slash_popup()
+        return "break"
+
+    def _insert_slash_command(self, cmd, execute_if_no_args=False):
+        """Insert the command into the entry (with trailing space if it takes args)."""
+        # Find the command item
+        item = next((c for c in SLASH_COMMANDS if c["cmd"] == cmd), None)
+        takes_args = bool(item and item["args"])
+        # Replace the entry's content
+        try:
+            self.entry.delete("1.0", "end")
+            if takes_args:
+                self.entry.insert("1.0", cmd + " ")
+            else:
+                self.entry.insert("1.0", cmd)
+            self.entry.focus()
+        except Exception:
+            pass
+        self._hide_slash_popup()
+        # Record in history
+        _record_slash_use(cmd)
+        # If no args and caller wants execution, trigger send
+        if execute_if_no_args and not takes_args:
+            self.send()
+
     # ------------------------------------------------------------------
     # Slash commands
     # ------------------------------------------------------------------
@@ -1302,7 +1368,8 @@ class AgentGUI:
                 "/scan  File        → scan a file (hash, entropy, verdict)\n"
                 "       e.g.  /scan C:\\Users\\USER\\Downloads\\file.exe\n\n"
                 "/quarantine File   → move a file to Downloads\\Quarantine\\\n\n"
-                "/quarantine-list   → list quarantined files",
+                "/quarantine-list   → list quarantined files\n\n"
+                "/rag   query       → search your indexed documents",
                 "system",
             )
             return True
@@ -1370,6 +1437,14 @@ class AgentGUI:
         if cmd == "/quarantine-list":
             import security_tools
             result = security_tools.list_quarantine()
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/rag":
+            if not args:
+                result = "ERROR: format is /rag <query>"
+            else:
+                from rag_tool import search_documents
+                result = search_documents(args.strip())
             return self._finish_slash_command(text, result)
 
         try:
@@ -1720,6 +1795,7 @@ class AgentGUI:
     def _on_root_configure(self, event=None):
         if event is not None and event.widget is not self.root:
             return
+        self._hide_slash_popup()
         try:
             if hasattr(self, "_resize_after_id"):
                 self.root.after_cancel(self._resize_after_id)
