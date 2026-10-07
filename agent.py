@@ -3842,8 +3842,8 @@ def describe_images(paths, question=None):
 
     question = (question or "").strip() or (
         "These are evenly-spaced frames from a single animated sequence, in "
-        "order. Describe what happens across the sequence in one or two "
-        "sentences."
+        "order. Describe what happens across the sequence in one or two plain "
+        "sentences, no markdown, no bullet points."
     )
 
     content = [{"type": "text", "text": question}]
@@ -3868,10 +3868,11 @@ def describe_images(paths, question=None):
             "model": DEEPSEEK_MODEL,
             "messages": [{"role": "user", "content": content}],
             # deepseek-flash reasons before it answers, and reasoning tokens
-            # count against this budget. At 1024 it can spend the whole thing
-            # thinking and return empty content (finish_reason "length").
-            # Measured on 8 GIF frames: ~1200-2000 reasoning tokens.
-            "max_tokens": 4096,
+            # count against this budget — if it runs out mid-thought we get
+            # HTTP 200 with empty content. Measured on 8 GIF frames: 1200-3100
+            # reasoning tokens depending on the question, so 1024 (what
+            # describe_image uses) and even 4096 both truncate.
+            "max_tokens": 8192,
         }
         r = requests.post(
             "https://api.deepseek.com/v1/chat/completions",

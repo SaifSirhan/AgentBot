@@ -22,6 +22,11 @@ from PIL import Image
 # Long clips decode slowly; past this we sample from the frames we've seen.
 _MAX_SCAN_FRAMES = 1500
 
+# Matches the bot's casual-replies personality: without this the vision model
+# answers a caption with multi-paragraph markdown and a bolded "**Answer:**".
+_REPLY_STYLE = ("Answer in one or two plain sentences, no markdown, "
+                "no bullet points.")
+
 
 def _count_frames(path):
     """Decode-and-discard pass to learn the frame count.
@@ -114,10 +119,15 @@ def describe_gif(gif_path, caption=None):
     try:
         if not paths:
             return "I couldn't read any frames from that GIF."
-        question = (caption or "").strip() or (
-            "These are evenly-spaced frames from one animated sequence, in "
-            "order. Describe what happens across it in one or two sentences."
-        )
+        caption_text = (caption or "").strip()
+        # The sequence preamble matters for the caption case too: without it
+        # the model sees 8 unrelated stills instead of one animation.
+        preamble = ("These are evenly-spaced frames from one animated "
+                    "sequence, in order.")
+        if caption_text:
+            question = f"{preamble}\n\n{caption_text}\n\n{_REPLY_STYLE}"
+        else:
+            question = f"{preamble} Describe what happens across it. {_REPLY_STYLE}"
         # Never let an exception reach the polling loop: it would drop the
         # rest of the batch and leave the user with no reply at all.
         try:
