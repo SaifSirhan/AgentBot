@@ -74,8 +74,13 @@ class RAGTool:
     # ----------------------------------------------------------
     # INDEXING
     # ----------------------------------------------------------
-    def index_file(self, filepath: str) -> str:
-        """Read one file, chunk it, embed it, store in ChromaDB."""
+    def index_file(self, filepath: str, chunk_size: int = None,
+                   overlap: int = None) -> str:
+        """Read one file, chunk it, embed it, store in ChromaDB.
+
+        chunk_size/overlap default to None so callers can pass explicit
+        values; when omitted they are chosen from the filepath.
+        """
         ext = os.path.splitext(filepath)[1].lower()
 
         if ext == ".pdf":
@@ -114,7 +119,15 @@ class RAGTool:
         if len(text) > 500_000:
             return f"Skipped {filepath} (too large: {len(text)} chars)"
 
-        chunks = self._chunk(text, size=1000, overlap=200)
+        # Chat logs need fine-grained chunks: a 1000-char window spans 8-15
+        # messages, so a chunk's date/author blurs across several messages.
+        use_small = "PrivateExport" in filepath
+        if chunk_size is None:
+            chunk_size = 300 if use_small else 1000
+        if overlap is None:
+            overlap = 50 if use_small else 200
+
+        chunks = self._chunk(text, size=chunk_size, overlap=overlap)
         if not chunks:
             return f"No text chunks from {filepath}"
 
@@ -134,7 +147,8 @@ class RAGTool:
         )
         return f"Indexed {len(chunks)} chunks from {filepath}"
 
-    def index_folder(self, folder: str) -> str:
+    def index_folder(self, folder: str, chunk_size: int = None,
+                     overlap: int = None) -> str:
         """Index new/changed files only. Delete chunks for removed files."""
         SUPPORTED = {
             ".pdf", ".txt", ".md", ".py", ".json", ".log",
@@ -192,7 +206,8 @@ class RAGTool:
 
                 print(f"  [new/changed] {path}", flush=True)
                 try:
-                    result = self.index_file(path)
+                    result = self.index_file(path, chunk_size=chunk_size,
+                                             overlap=overlap)
                     if result.startswith("Indexed"):
                         state[path] = {"mtime": sig[0], "size": sig[1]}
                         indexed.append(path)
