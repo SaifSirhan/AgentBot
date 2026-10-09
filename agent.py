@@ -3653,6 +3653,12 @@ exist on", "list all URLs", or "map this site".
   fetch_clean(input) — fetch a URL and return its raw extracted text (no
 summarization). USE THIS when the user wants the actual content of a page, not a
 summary. For summaries, use read_and_summarize instead.
+  crawl_managed(input) — crawl a URL via a managed service (Crawlbase or
+Firecrawl) with JS rendering and anti-bot handling. USE THIS for JavaScript-heavy
+pages, Cloudflare-protected sites, or when you need clean markdown. Falls back to
+crawl_site if no API key is configured. Format: "url|mode" (mode optional,
+default markdown). Modes: markdown | html | screenshot. Examples:
+"https://example.com|markdown", "https://spa-app.com|html".
   run_recipe(input) — run a saved browser recipe by name (input is just the
 name, e.g. "clock_out"). Recipes are fixed click/type/wait scripts the user set
 up in recipes.json. USE THIS when the user asks to "run the X recipe" or repeats
@@ -3909,7 +3915,7 @@ VALID_TOOLS = {
     "find_files", "move_files",
     "patch_file", "list_symbols", "repo_map",
     "whitelist", "send_maps_list",    "whitelist", "deep_research", "hardware_scan", "recommend_models",
-    "crawl_site", "map_site", "fetch_clean", "run_recipe",
+    "crawl_site", "map_site", "fetch_clean", "run_recipe", "crawl_managed",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
     "search_group_chat", "grep_group_chat", "edit_document"
@@ -4286,6 +4292,14 @@ def execute_tool(action):
     elif tool == 'crawl_site':             return crawl_site(inp)
     elif tool == 'map_site':               return map_site(inp)
     elif tool == 'fetch_clean':            return fetch_clean(inp)
+    elif tool == 'crawl_managed':
+        parts = inp.split("|", 1)
+        url = parts[0].strip()
+        mode = parts[1].strip() if len(parts) > 1 else "markdown"
+        if not url:
+            return "ERROR: crawl_managed needs a URL."
+        import crawl_managed as cm
+        return cm.crawl_managed(url, mode)
     elif tool == 'run_recipe':
         from recipes import run_recipe
         return run_recipe(inp.strip())

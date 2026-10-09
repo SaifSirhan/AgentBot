@@ -28,6 +28,8 @@ DEFAULTS = {
     "HUGGINGFACE_API_KEY": "",
     "DEEPSEEK_API_KEY": "",
     "SERPAPI_KEY": "",
+    "CRAWLBASE_KEY": "",
+    "FIRECRAWL_KEY": "",
     "TELEGRAM_BOT_TOKEN": "",
     "TELEGRAM_USER_ID": "",
     "TELEGRAM_API_ID": "",
