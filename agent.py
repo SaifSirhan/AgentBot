@@ -3762,7 +3762,7 @@ If the user typed "Jeffrey Edward Epstein", your JSON must contain
 If a previous tool result said "no chat found matching 'Jefrrey'", that means
 YOU misspelled it — look back at what the user actually typed and use that.
 
-Never type a maps URL from memory. Use maps_link, send_maps_url, or
+Never type a maps URL from memory. Use send_maps_url or
 send_maps_list — they build real, working Google Maps links. Hand-typed
 maps.google.com / maps.app.goo.gl links are always wrong or dead.
 
@@ -3850,9 +3850,8 @@ B. WHICH TOOL?
      data rules).
  17. Telegram/WhatsApp/email → the matching communication tool.
  18. Places/maps → verify_places when specific locations are involved;
-     then maps_link for a URL to embed in your own message, send_maps_url
-     for one link sent now, or send_maps_list for several places in one
-     message.
+     then send_maps_url for one link sent now, or send_maps_list for
+     several places in one message.
  19. Tasks/desktop notification/misc → todo, notify, beep, list_brains.
  20. Nothing fits → plain text; state clearly it's outside the toolset.
 
@@ -4162,9 +4161,6 @@ COMMUNICATION
 PLACES & MAPS
   verify_places(input) — "place1|place2|place3"; geocode each place and
     report whether it's real and locatable, BEFORE you name it.
-  maps_link(input) — return ONE real Google Maps URL for a place name or
-    address. Does NOT send anything. Use this to embed a map link inside a
-    message you compose yourself. NEVER type a maps URL from memory.
   send_maps_url(input) — build and send ONE Google Maps link via the
     user's own bot, to the user.
   send_maps_list(input) — "Contact|place1|place2|place3"; build a real
