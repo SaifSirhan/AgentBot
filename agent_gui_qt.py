@@ -32,6 +32,7 @@ import os
 import re
 import sys
 import threading
+import time
 
 from PySide6.QtCore import (
     Qt,
@@ -150,7 +151,10 @@ CARD_SPACING = 12
 
 # Phase 6b — panel card heights + refresh cadence (all timers live on the GUI
 # thread; Phase 5a showed a QTimer created off-thread never fires).
-H_NOW_PLAYING = 96
+# H_NOW_PLAYING was 96 when the card was a one-line placeholder; the 6b
+# follow-up adds a 60x60 thumbnail plus a transport-button row, which needs
+# ~150px to avoid clipping the art against the buttons.
+H_NOW_PLAYING = 150
 H_SYSTEM = 110
 H_WEATHER = 80
 H_NOTIFICATIONS = 150
@@ -219,6 +223,18 @@ _ICON_SVGS = {
     # right-panel toggle (Phase 6a): double chevrons pointing toward the panel
     "chevrons_right": '<path d="M8 6.5l6 6-6 6"/><path d="M15 6.5l6 6-6 6"/>',
     "chevrons_left": '<path d="M16 6.5l-6 6 6 6"/><path d="M9 6.5l-6 6 6 6"/>',
+    # media transport (Phase 6b follow-up) — solid glyphs, {c} = tint
+    "media_prev": '<rect x="6" y="6" width="2.2" height="12" rx="1" '
+                  'fill="{c}" stroke="none"/>'
+                  '<path d="M19 6.8v10.4L10.5 12z" fill="{c}" stroke="none"/>',
+    "media_next": '<rect x="15.8" y="6" width="2.2" height="12" rx="1" '
+                  'fill="{c}" stroke="none"/>'
+                  '<path d="M5 6.8v10.4L13.5 12z" fill="{c}" stroke="none"/>',
+    "media_play": '<path d="M8 5.5v13l10-6.5z" fill="{c}" stroke="none"/>',
+    "media_pause": '<rect x="7.5" y="5.5" width="3" height="13" rx="1" '
+                   'fill="{c}" stroke="none"/>'
+                   '<rect x="13.5" y="5.5" width="3" height="13" rx="1" '
+                   'fill="{c}" stroke="none"/>',
     # input row
     "clip": '<path d="M8 12.5l6.5-6.5a3 3 0 0 1 4.2 4.2l-8 8a5 5 0 0 1-7-7'
             'l8-8"/>',
@@ -229,8 +245,13 @@ _ICON_SVGS = {
 
 
 def _svg_pixmap(name: str, size: int, color: str) -> QPixmap:
-    """Rasterise a named line icon at `size` px in `color`."""
-    body = _ICON_SVGS[name]
+    """Rasterise a named icon at `size` px in `color`.
+
+    Line icons inherit the root stroke. Filled glyphs (media transport) use a
+    literal `{c}` in their body, substituted for the tint color here so they
+    can be solid while still being recoloured on hover.
+    """
+    body = _ICON_SVGS[name].replace("{c}", color)
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
         f'fill="none" stroke="{color}" stroke-width="1.9" '
@@ -339,6 +360,126 @@ def parse_weather(text: str):
             break
     return detail, location
 
+
+# ----------------------------------------------------------------------
+# Media (Phase 6b follow-up) — Windows media session via winsdk
+# ----------------------------------------------------------------------
+# winsdk (NOT winrt — a different package) exposes the Windows
+# GlobalSystemMediaTransportControls API. Imported lazily so the GUI still
+# starts if it is missing; the NOW PLAYING card then shows a placeholder.
+_media_manager_module = None
+_media_import_error = None
+
+
+def get_media_manager_cls():
+    """Lazy import of MediaManager, or None if winsdk is unavailable."""
+    global _media_manager_module, _media_import_error
+    if _media_manager_module is not None:
+        return _media_manager_module
+    if _media_import_error is not None:
+        return None
+    try:
+        from winsdk.windows.media.control import (
+            GlobalSystemMediaTransportControlsSessionManager as MediaManager,
+        )
+        _media_manager_module = MediaManager
+        return MediaManager
+    except Exception as e:
+        _media_import_error = e
+        return None
+
+
+MEDIA_NO_SESSION = "__none__"  # sentinel: nothing is playing
+
+
+class MediaStatus:
+    """GlobalSystemMediaTransportControlsSessionPlaybackStatus values.
+
+    Kept as plain ints so the worker needs no winsdk import to compare.
+    """
+    CLOSED = 0
+    OPENED = 1
+    CHANGING = 2
+    STOPPED = 3
+    PLAYING = 4
+    PAUSED = 5
+
+
+async def _read_thumbnail_bytes(ref):
+    from winsdk.windows.storage.streams import DataReader
+    stream = await ref.open_read_async()
+    size = stream.size
+    if not size:
+        return None
+    reader = DataReader(stream)
+    await reader.load_async(size)
+    buf = bytearray(size)
+    reader.read_bytes(buf)
+    return bytes(buf)
+
+
+def media_poll_once():
+    """Blocking media poll for a worker thread.
+
+    Returns a dict describing the current session, or {"state": "none"} when
+    nothing is playing / winsdk is unavailable. Never raises into the caller.
+    """
+    MediaManager = get_media_manager_cls()
+    if MediaManager is None:
+        return {"state": "unavailable"}
+    import asyncio
+    try:
+        async def _poll():
+            mgr = await MediaManager.request_async()
+            session = mgr.get_current_session()
+            if session is None:
+                return {"state": "none"}
+            props = await session.try_get_media_properties_async()
+            info = session.get_playback_info()
+            status = int(info.playback_status)
+            art = None
+            if props.thumbnail is not None:
+                art = await _read_thumbnail_bytes(props.thumbnail)
+            return {
+                "state": "playing",
+                "title": props.title or "",
+                "artist": props.artist or "",
+                "album": props.album_title or "",
+                "status": status,
+                "playing": status == MediaStatus.PLAYING,
+                "art": art,
+            }
+
+        return asyncio.run(_poll())
+    except Exception as e:
+        return {"state": "error", "error": str(e)}
+
+
+def media_transport(action: str):
+    """Send a transport command ('prev' | 'toggle' | 'next') on a worker thread.
+
+    Returns the winsdk call's boolean, or False on any failure.
+    """
+    MediaManager = get_media_manager_cls()
+    if MediaManager is None:
+        return False
+    import asyncio
+    try:
+        async def _do():
+            mgr = await MediaManager.request_async()
+            session = mgr.get_current_session()
+            if session is None:
+                return False
+            if action == "prev":
+                return bool(await session.try_skip_previous_async())
+            if action == "next":
+                return bool(await session.try_skip_next_async())
+            return bool(await session.try_toggle_play_pause_async())
+
+        return asyncio.run(_do())
+    except Exception as e:
+        print(f"[media] transport {action} failed: {e}")
+        return False
 
 
 def get_voice():
@@ -635,6 +776,68 @@ class AgentWorker(QObject):
             return f"{block}\n\nUser question: {question}"
         except Exception as e:
             return f"[attachment read failed: {e}]\n\n{self._user_input}"
+
+
+class MediaPoller(QObject):
+    """Polls the Windows media session off the GUI thread (Phase 6b follow-up).
+
+    The winsdk calls are async and must not run on the Qt event loop, so each
+    tick runs on a short-lived daemon thread and posts the result back with a
+    signal. The QTimer that drives it lives in AgentWindow (main thread).
+
+    One poll is in flight at a time: `busy` guards against overlap when a call
+    takes longer than the 1s interval.
+    """
+
+    result = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self._busy = False
+        self._stopped = False
+
+    def stop(self):
+        """Mark the poller dead so in-flight threads stop emitting.
+
+        Called from AgentWindow.quit_app: a worker finishing after the window
+        is torn down would otherwise raise 'Signal source has been deleted'.
+        """
+        self._stopped = True
+
+    def poll(self):
+        if self._busy or self._stopped:
+            return
+        self._busy = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _emit(self, data):
+        if self._stopped:
+            return
+        try:
+            self.result.emit(data)
+        except RuntimeError:
+            pass  # source deleted during teardown — nothing to do
+
+    def _run(self):
+        try:
+            data = media_poll_once()
+        except Exception as e:
+            data = {"state": "error", "error": str(e)}
+        finally:
+            self._busy = False
+        self._emit(data)
+
+    def transport(self, action: str):
+        """Send a transport command off-thread, then trigger a refresh."""
+        def work():
+            media_transport(action)
+            if self._stopped:
+                return
+            # Give the OS a moment to apply the change, then re-poll so the
+            # play/pause icon reflects reality.
+            time.sleep(0.15)
+            self._emit(media_poll_once())
+        threading.Thread(target=work, daemon=True).start()
 
 
 def _icon_button(icon: str, tooltip: str = "", size: int = 30,
@@ -1690,9 +1893,143 @@ class RightPanel(QFrame):
     # -- NOW PLAYING ----------------------------------------------------
     def _build_now_playing(self):
         card = self.cards["NOW PLAYING"]
-        self.media_available = False
-        self.now_playing_placeholder = "Requires winsdk \u2014 ask user"
-        card.set_placeholder(self.now_playing_placeholder)
+        self.media_available = get_media_manager_cls() is not None
+        card.placeholder.setVisible(False)
+        self._art_cache = {}  # key -> QPixmap (avoids re-decoding every second)
+
+        # Idle placeholder (shown when nothing plays or the dep is missing).
+        self.media_placeholder = _dim_label(
+            "" if self.media_available else "Requires winsdk \u2014 ask user",
+            size=13, color=COLOR_TEXT_LOW)
+        self.media_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.media_placeholder.setWordWrap(True)
+        card.body_layout.insertWidget(0, self.media_placeholder)
+
+        # Row: album art + (title / artist / album).
+        self.media_row = QWidget()
+        mrow = QHBoxLayout(self.media_row)
+        mrow.setContentsMargins(0, 0, 0, 0)
+        mrow.setSpacing(10)
+
+        self.media_art = QLabel()
+        self.media_art.setFixedSize(60, 60)
+        self.media_art.setStyleSheet(
+            f"background: {COLOR_RAISED}; border-radius: 6px;")
+        self.media_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mrow.addWidget(self.media_art)
+
+        text_col = QWidget()
+        tcol = QVBoxLayout(text_col)
+        tcol.setContentsMargins(0, 2, 0, 2)
+        tcol.setSpacing(2)
+        self.media_title = _dim_label("", size=12, color=COLOR_TEXT_HI)
+        self.media_title.setStyleSheet(
+            f'background: transparent; color: {COLOR_TEXT_HI}; '
+            f'font-family: "{FONT_UI}"; font-size: 12px; font-weight: bold;')
+        self.media_artist = _dim_label("", size=11, color=COLOR_TEXT_MID)
+        self.media_album = _dim_label("", size=10, color=COLOR_TEXT_LOW)
+        for w in (self.media_title, self.media_artist, self.media_album):
+            w.setMinimumWidth(0)
+            tcol.addWidget(w)
+        tcol.addStretch(1)
+        mrow.addWidget(text_col, 1)
+        card.body_layout.insertWidget(1, self.media_row)
+
+        # Transport row: previous / play-pause / next.
+        self.media_controls = QWidget()
+        ct = QHBoxLayout(self.media_controls)
+        ct.setContentsMargins(0, 2, 0, 0)
+        ct.setSpacing(6)
+        ct.addStretch(1)
+        self.media_prev_btn = _icon_button("media_prev", "Previous", size=26,
+                                           icon_size=16)
+        self.media_prev_btn.clicked.connect(lambda: self._media_command("prev"))
+        self.media_play_btn = _icon_button("media_play", "Play/pause", size=26,
+                                           icon_size=16)
+        self.media_play_btn.clicked.connect(
+            lambda: self._media_command("toggle"))
+        self.media_next_btn = _icon_button("media_next", "Next", size=26,
+                                           icon_size=16)
+        self.media_next_btn.clicked.connect(lambda: self._media_command("next"))
+        for b in (self.media_prev_btn, self.media_play_btn, self.media_next_btn):
+            ct.addWidget(b)
+        ct.addStretch(1)
+        card.body_layout.insertWidget(2, self.media_controls)
+
+        self._media_command_cb = None  # set by AgentWindow (transport hook)
+        self._render_media(None)
+
+    def set_media_command_callback(self, cb):
+        """AgentWindow injects the off-thread transport sender."""
+        self._media_command_cb = cb
+
+    def _media_command(self, action: str):
+        if self._media_command_cb is not None:
+            self._media_command_cb(action)
+
+    def update_media(self, data):
+        """Slot for MediaPoller.result — repaint the card from a poll dict."""
+        self._render_media(data)
+
+    def _render_media(self, data):
+        available = self.media_available
+        state = (data or {}).get("state") if data else "none"
+        if not available or state in (None, "none", "unavailable", "error"):
+            if not available:
+                self.media_placeholder.setText(
+                    "Requires winsdk \u2014 ask user")
+            else:
+                self.media_placeholder.setText("Nothing playing")
+            self.media_placeholder.setVisible(True)
+            self.media_row.setVisible(False)
+            self.media_controls.setVisible(False)
+            return
+
+        self.media_placeholder.setVisible(False)
+        self.media_row.setVisible(True)
+        self.media_controls.setVisible(True)
+
+        title = data.get("title") or "(unknown title)"
+        artist = data.get("artist") or ""
+        album = data.get("album") or ""
+        self.media_title.setText(self._ellipsize(title, 26))
+        self.media_title.setToolTip(title)
+        self.media_artist.setText(self._ellipsize(artist, 28) if artist else "")
+        self.media_album.setText(self._ellipsize(album, 30) if album else "")
+
+        # Play/pause glyph reflects real playback state.
+        playing = bool(data.get("playing"))
+        self.media_play_btn.setIcon(_svg_icon(
+            "media_pause" if playing else "media_play", 16, COLOR_TEXT_MID))
+        self.media_play_btn.setToolTip("Pause" if playing else "Play")
+
+        self._set_media_art(data.get("art"), title, artist)
+
+    def _set_media_art(self, art_bytes, title, artist):
+        """Show album art, caching the decoded pixmap by (title, artist)."""
+        key = f"{title}\x00{artist}"
+        if art_bytes:
+            if key not in self._art_cache:
+                pm = QPixmap()
+                if pm.loadFromData(art_bytes):
+                    self._art_cache[key] = pm.scaled(
+                        60, 60, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation)
+                else:
+                    self._art_cache[key] = None
+            # Keep the cache small — only the current track matters.
+            if len(self._art_cache) > 8:
+                self._art_cache = {key: self._art_cache.get(key)}
+            pm = self._art_cache.get(key)
+            if pm is not None:
+                self.media_art.setPixmap(pm)
+                self.media_art.setText("")
+                return
+        self.media_art.setPixmap(QPixmap())
+        self.media_art.setText("\u266b")  # music note fallback
+        self.media_art.setStyleSheet(
+            f"background: {COLOR_RAISED}; border-radius: 6px; "
+            f"color: {COLOR_TEXT_LOW}; font-size: 22px;")
 
     # -- SYSTEM ---------------------------------------------------------
     def _build_system(self):
@@ -1888,6 +2225,8 @@ class AgentWindow(QMainWindow):
         # Phase 6b panel timers (all created here, on the main thread) + state.
         self._system_timer = None
         self._weather_timer = None
+        self._media_timer = None
+        self._media_poller = None
         self._gpu_unavailable = True
         self._command_done.connect(self._on_command_done)
         self._scheduled_triggered.connect(self._on_scheduled_trigger)
@@ -1978,6 +2317,32 @@ class AgentWindow(QMainWindow):
         self._weather_timer.timeout.connect(self._refresh_weather)
         self._weather_timer.start()
         QTimer.singleShot(200, self._refresh_weather)  # first fetch soon after show
+
+        # Phase 6b follow-up — NOW PLAYING media poll (1s). The poll runs on a
+        # worker thread (winsdk calls are async); the timer just kicks it.
+        self.panel.set_media_command_callback(self._media_command)
+        self._media_poller = MediaPoller()
+        self._media_poller.result.connect(self._on_media_result)
+        self._media_timer = QTimer(self)
+        self._media_timer.setInterval(MEDIA_REFRESH_MS)
+        self._media_timer.timeout.connect(self._refresh_media)
+        self._media_timer.start()
+        self._refresh_media()
+
+    def _refresh_media(self):
+        # Skip polling (and its thread) while the panel is hidden or minimized.
+        if not self._right_panel_visible or self._minimized:
+            return
+        if getattr(self, "_media_poller", None) is not None:
+            self._media_poller.poll()
+
+    def _on_media_result(self, data):
+        self.panel.update_media(data)
+
+    def _media_command(self, action: str):
+        """Transport button -> off-thread winsdk command (from the card)."""
+        if getattr(self, "_media_poller", None) is not None:
+            self._media_poller.transport(action)
 
     # ------------------------------------------------------------------
     # Phase 6c — motion startup
@@ -4129,6 +4494,12 @@ class AgentWindow(QMainWindow):
             get_agent().save_conversation_history(self.conversation_history)
         except Exception:
             pass
+        # Stop the media poller so an in-flight thread can't emit into a
+        # deleted window during teardown (Phase 6b follow-up).
+        if getattr(self, "_media_poller", None) is not None:
+            self._media_poller.stop()
+        if getattr(self, "_media_timer", None) is not None:
+            self._media_timer.stop()
         # Stop any in-flight recording / speech before tearing down.
         if self._recording and _voice_module is not None:
             try:
