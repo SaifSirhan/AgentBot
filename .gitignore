@@ -18,6 +18,8 @@ rag_db/
 AgentMemory/
 *.log
 research_*.md
+# Timestamped backups written next to a file by document_tools before editing.
+*.bak_*
 
 # ---- Python ----
 __pycache__/

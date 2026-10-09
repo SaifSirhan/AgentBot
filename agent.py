@@ -3832,6 +3832,17 @@ SECURITY
     and confirm with the user before calling this.
   list_quarantine() — list files currently in quarantine.
 
+DOCUMENT EDITING
+  edit_document(input) — edit an existing DOCX, XLSX, PPTX, or PDF file.
+    Format: "filepath|instruction" where filepath is an absolute path and
+    instruction is natural language describing the edit. The tool backs the
+    file up automatically before changing it. Examples:
+      "C:\\Users\\USER\\report.docx|add paragraph: This is a new finding."
+      "C:\\Users\\USER\\budget.xlsx|set cell B2 to 1500"
+      "C:\\Users\\USER\\deck.pptx|add slide: Q4 Results"
+      "C:\\Users\\USER\\contract.pdf|extract text"
+    ALWAYS tell the user what you changed. NEVER invent an edit you did not run.
+
 =====================================================================
 10. EXAMPLES
 =====================================================================
@@ -3894,7 +3905,7 @@ VALID_TOOLS = {
     "crawl_site", "map_site", "fetch_clean", "run_recipe",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
-    "search_group_chat", "grep_group_chat"
+    "search_group_chat", "grep_group_chat", "edit_document"
 }
 
 
@@ -4235,6 +4246,25 @@ def execute_tool(action):
             filename, content = inp, ""
         return write_file(filename, content, folder)
     elif tool == 'read_file':              return read_file(inp)
+    elif tool == 'edit_document':
+        parts = inp.split("|", 1)
+        if len(parts) < 2:
+            return "ERROR: edit_document needs filepath|instruction."
+        filepath, instruction = parts[0].strip(), parts[1].strip()
+        ext = os.path.splitext(filepath)[1].lower()
+        try:
+            import document_tools as dt
+            if ext == ".docx":
+                return dt.edit_docx(filepath, instruction)
+            elif ext in (".xlsx", ".xlsm", ".csv"):
+                return dt.edit_xlsx(filepath, instruction)
+            elif ext == ".pptx":
+                return dt.edit_pptx(filepath, instruction)
+            elif ext == ".pdf":
+                return dt.edit_pdf(filepath, instruction)
+            return f"ERROR: unsupported format '{ext}'."
+        except ImportError as e:
+            return f"ERROR: missing dependency for {ext}: {e}. Run: pip install python-pptx"
     elif tool == 'patch_file':             return patch_file(inp)
     elif tool == 'list_symbols':           return list_symbols(inp)
     elif tool == 'repo_map':               return repo_map(inp)

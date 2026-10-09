@@ -24,6 +24,8 @@ pypdf
 # --- Documents & OCR ---
 python-docx
 openpyxl
+python-pptx          # PowerPoint editing (document_tools.edit_pptx)
+reportlab            # PDF creation (document_tools.edit_pdf)
 pytesseract          # also requires the Tesseract binary installed on the system
 
 # --- GIF / short video frame extraction (Telegram animations) ---
