@@ -174,10 +174,16 @@ def run_suite(suite_name: str, force_provider: str = None) -> dict:
             }
         actual_tool = (preview.get("action") or {}).get("tool")
         actual_input = (preview.get("action") or {}).get("input", "") or ""
-        passed = _case_passed(case, actual_tool, actual_input)
+        # An errored or empty preview proves nothing about selection — the
+        # provider never answered. It must not be able to pass, even a
+        # null-expected case (where action=None would otherwise look like
+        # "correctly chose no tool").
+        errored = bool(preview.get("empty_reply")) or preview.get("error") is not None
+        passed = (not errored) and _case_passed(case, actual_tool, actual_input)
         results.append({
             "case_id": case["id"],
             "passed": passed,
+            "errored": errored,
             "actual_tool": actual_tool,
             "expected_tool": case.get("expected_tool"),
             "provider": preview.get("provider"),
@@ -193,6 +199,7 @@ def run_suite(suite_name: str, force_provider: str = None) -> dict:
         "force_provider": force_provider,
         "commit": _current_commit(),
         "results": results,
+        "errors": sum(1 for r in results if r.get("errored")),
         "pass_rate": sum(1 for r in results if r["passed"]) / max(len(results), 1),
     }
     (RUNS_DIR / f"{run['timestamp'].replace(':', '-')}_{run['run_id']}.json").write_text(
