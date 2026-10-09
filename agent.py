@@ -3767,7 +3767,7 @@ send_maps_list — they build real, working Google Maps links. Hand-typed
 maps.google.com / maps.app.goo.gl links are always wrong or dead.
 
 Every place you NAME in a reply must appear in the step log as either:
-  - a search_web / verify_places result this turn, OR
+  - a search_web result this turn, OR
   - an item the user themselves mentioned.
 If you can't point to where you learned it, don't name it. Say
 "not sure where that is exactly, want me to check?"
@@ -3849,9 +3849,8 @@ B. WHICH TOOL?
  16. Persistent personal fact → remember or forget (subject to sensitive-
      data rules).
  17. Telegram/WhatsApp/email → the matching communication tool.
- 18. Places/maps → verify_places when specific locations are involved;
-     then send_maps_url for one link sent now, or send_maps_list for
-     several places in one message.
+ 18. Places/maps → send_maps_url for one link sent now, or send_maps_list
+     for several places in one message.
  19. Tasks/desktop notification/misc → todo, notify, beep, list_brains.
  20. Nothing fits → plain text; state clearly it's outside the toolset.
 
@@ -3936,8 +3935,6 @@ Respect every tool's documented input format exactly.
   - Non-English input → reply in that language, preserving natural
     code-switching.
   - Image path supplied → use read_file; the agent handles image content.
-  - Previously mentioned place → re-run verify_places rather than trusting
-    memory for current location details.
   - Repeated request → do not fabricate a new result; give the prior
     answer or explicitly re-check.
 
@@ -4120,8 +4117,6 @@ COMMUNICATION
     should describe the emotion or context, not literal scenes.
 
 PLACES & MAPS
-  verify_places(input) — "place1|place2|place3"; geocode each place and
-    report whether it's real and locatable, BEFORE you name it.
   send_maps_url(input) — build and send ONE Google Maps link via the
     user's own bot, to the user.
   send_maps_list(input) — "Contact|place1|place2|place3"; build a real
@@ -4249,7 +4244,7 @@ VALID_TOOLS = {
     "crawl_site", "map_site", "fetch_clean", "run_recipe", "crawl_managed",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
-    "search_group_chat", "grep_group_chat", "rag_search", "verify_places",
+    "search_group_chat", "grep_group_chat", "rag_search",
     "edit_document", "post_to_social",
     "skill_manage",
 }
@@ -4707,7 +4702,6 @@ def execute_tool(action):
     elif tool == 'send_gif':               return send_gif(inp)
     elif tool == 'whitelist':              return whitelist(inp)
     elif tool == 'send_maps_list':         return send_maps_list(inp)
-    elif tool == 'verify_places':          return verify_places(inp)
     elif tool == 'rag_search':             return search_documents(inp)
     elif tool == 'rag_index':              return index_documents(inp)
     elif tool == 'search_group_chat':      return search_group_chat(inp)
@@ -4837,7 +4831,7 @@ def _run_agent_turn_impl(user_input, conversation_history):
                 next_input = (
                     f"USER IS PUSHING BACK: '{user_input}'.\n"
                     f"Your previous answer is being challenged. DO NOT DEFEND IT.\n"
-                    f"Call a tool (search_web / verify_places) to recheck the facts, "
+                    f"Call a tool (search_web) to recheck the facts, "
                     f"then correct yourself if the new results differ.\n"
                     f"First line of your reply must be the correction — no apology "
                     f"preamble, no 'I'm not sure where you got that idea', no "

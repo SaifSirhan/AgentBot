@@ -15,6 +15,7 @@ tokens.json
 ig_session.json
 ig_state.json
 ig_activity.log
+APIs.txt
 
 # ---- Local data / caches ----
 rag_db/

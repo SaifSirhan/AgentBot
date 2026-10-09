@@ -13,9 +13,9 @@ CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 DEFAULTS = {
     "RAG_AUTO_INDEX_FOLDERS": [
         "C:\\Users\\USER\\Downloads\\Fire Writing",
-        "C:\\Users\\USER\\Downloads\\Telegram Desktop",
         "C:\\Users\\USER\\Downloads\\AgentBot",
         "C:\\Users\\USER\\Downloads\\sistem-dc-v2"
+        
     ],
     "GROQ_API_KEY": "",
     "GEMINI_API_KEY": "",

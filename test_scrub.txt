@@ -1,0 +1,6 @@
+﻿Test message with IC 031215-14-0234
+My phone is +60123456789
+Email me at test@example.com
+My address is 123 Jalan Ampang, 50450 KL
+Account number is 1234567890123
+Just a normal message here
