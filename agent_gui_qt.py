@@ -1,28 +1,35 @@
 """
 AgentBot GUI — PySide6 port.
 
-Phase 2: chat rendering. User and assistant messages, markdown, code blocks
-with copy buttons, and scroll-lock behaviour. Demo messages only — no agent
-wiring (that is Phase 3).
+Phase 3: agent integration. Input box, send button and a background worker
+that calls agent.run_agent_turn. The agent loop blocks for 1-30s, so it runs
+off the GUI thread; results return via Qt signals.
 
 This file will eventually replace agent_gui.py. Until the port is complete,
 agent_gui.py remains the live GUI and this file is only run manually.
 
 Palette values are inlined from gui_widgets.py (the mint accent has been
 shifted greener for this port). That module imports tkinter, so it must NOT
-be imported here — the Qt port stays free of tkinter.
+be imported here — the Qt port stays free of tkinter. agent_gui.py is NOT
+imported either; the one piece of logic shared with it (the hallucination
+guard) is replicated below as pure Python.
 """
 from __future__ import annotations
+import contextlib
+import io
 import re
 import sys
+import threading
 
 from PySide6.QtCore import (
     Qt,
     QEasingCurve,
+    QObject,
     QPropertyAnimation,
     QTimer,
+    Signal,
 )
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -30,6 +37,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -53,6 +61,8 @@ COLOR_TEXT_HI    = "#e8eaef"
 COLOR_TEXT_MID   = "#9aa1af"
 COLOR_TEXT_LOW   = "#5f6673"
 
+COLOR_WARN       = "#eab308"
+
 # mint accent — shifted greener (was #3ecf8e / #2fb87c / #1f4d3a)
 COLOR_ACCENT       = "#4fe08f"
 COLOR_ACCENT_HOVER = "#3bc476"
@@ -69,6 +79,9 @@ CONTENT_PAD = 24
 MSG_SPACING = 28
 FADE_MS = 150
 
+INPUT_LINE_H = 22     # single-line height for the input field
+INPUT_MAX_LINES = 6   # auto-grow ceiling (~150px)
+
 _CODE_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+.-]*)\n?(.*?)```", re.DOTALL)
 
 # CSS injected into QTextDocument HTML so the markdown typography matches the
@@ -84,6 +97,160 @@ code {{ font-family: "{FONT_MONO}"; font-size: 13px;
         background-color: {COLOR_RAISED}; color: {COLOR_ACCENT}; }}
 a {{ color: {COLOR_ACCENT}; }}
 """
+
+
+# ----------------------------------------------------------------------
+# Agent bridge — extraction + hallucination guard (pure Python)
+# ----------------------------------------------------------------------
+_agent_module = None
+_agent_import_error = None
+
+
+def get_agent():
+    """Import agent.py lazily. Heavy (ChromaDB, sentence-transformers, Kokoro)
+    and must never break GUI startup — failures surface on first send."""
+    global _agent_module, _agent_import_error
+    if _agent_module is not None:
+        return _agent_module
+    if _agent_import_error is not None:
+        raise _agent_import_error
+    try:
+        import agent as _agent
+        _agent_module = _agent
+        return _agent_module
+    except Exception as e:  # remember so repeated sends fail fast and visibly
+        _agent_import_error = e
+        raise
+
+
+def extract_final_message(step_log):
+    """Pull the reply out of run_agent_turn's step_log (list[str]).
+
+    Mirrors agent_gui.handle_result's scan order: chat() result, Done:, any
+    'AI: ' line, then the last non-status line.
+    """
+    if not step_log:
+        return None
+    for line in reversed(step_log):
+        if not isinstance(line, str):
+            continue
+        if line.startswith("Action: chat(") and "-> Result: " in line:
+            candidate = line.split("-> Result: ", 1)[-1]
+            if candidate.startswith("AI: "):
+                candidate = candidate[4:]
+            if candidate.strip():
+                return candidate
+        if line.startswith("Done:"):
+            return line[5:].strip()
+    for line in reversed(step_log):
+        if isinstance(line, str) and "AI: " in line:
+            candidate = line.split("AI: ", 1)[-1].strip()
+            if candidate:
+                return candidate
+    for line in reversed(step_log):
+        if not isinstance(line, str):
+            continue
+        s = line.strip()
+        if s and not s.startswith(("Action:", "System:", "Done:")):
+            return s
+    return None
+
+
+def apply_hallucination_guard(final_message, step_log):
+    """Replicate agent_gui.handle_result's guard verbatim (pure Python).
+
+    The LLM sometimes claims it performed an action when no tool ran. If the
+    reply asserts a completed action and step_log shows no non-chat tool ran,
+    replace it with a warning.
+    """
+    if not final_message:
+        return final_message
+
+    tools_ran = any(
+        isinstance(l, str) and l.startswith("Action: ") and "-> Result:" in l
+        and not l.startswith("Action: chat(")
+        for l in (step_log or [])
+    )
+    claim_words = (
+        "i've moved", "i moved", "i've created", "i created",
+        "i've sent", "i sent", "i've deleted", "i deleted",
+        "i've found", "i found ", "i've opened", "i opened",
+        "files moved", "folder created",
+        "relabeled", "relabelled", "i've relabeled",
+        "i've removed", "i removed", "i've labeled", "i labeled",
+        "now labeled", "just labeled",
+        "i've updated", "i updated", "i've edited", "i edited",
+        "i've added", "i added", "i've changed", "i changed",
+    )
+    claim_verbs = (
+        "moved", "created", "sent", "deleted", "removed", "relabeled",
+        "relabelled", "labeled", "updated", "edited", "added",
+        "changed", "cleared", "saved", "scheduled",
+    )
+    low = final_message.lower()
+    stripped = low.lstrip()
+    claims_done = stripped.startswith(("done", "did it", "all set"))
+    claims_verb = stripped.startswith(claim_verbs)
+    if (any(w in low for w in claim_words) or claims_done or claims_verb) and not tools_ran:
+        return (
+            "⚠️ I didn't actually do that — no tool ran. "
+            "Say it again or use /find, /move, /mkdir to run it directly."
+        )
+    return final_message
+
+
+# ----------------------------------------------------------------------
+# Worker — runs the blocking agent call off the GUI thread
+# ----------------------------------------------------------------------
+class AgentWorker(QObject):
+    """Runs one agent turn on a plain Python thread and emits Qt signals.
+
+    threading.Thread + a QObject signal emitter is used instead of
+    QThread/moveToThread: the agent call is a single blocking function with no
+    event loop of its own, so a plain thread is simpler and the queued
+    connection (worker living in the main thread, unlike a QThread) still
+    delivers signals to the GUI thread automatically.
+    """
+
+    completed = Signal(object)   # (final_message, step_log)
+    failed = Signal(str)         # error text
+
+    def __init__(self, user_input, conversation_history):
+        super().__init__()
+        self._user_input = user_input
+        self._history = conversation_history
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        log_capture = io.StringIO()
+        try:
+            agent = get_agent()
+            self._history.append(f"User: {self._user_input}")
+            with contextlib.redirect_stdout(log_capture):
+                step_log = agent.run_agent_turn(self._user_input, self._history)
+        except Exception as e:
+            self.failed.emit(f"⚠️ Agent error: {e}")
+            return
+
+        if step_log is None:
+            step_log = ["System: agent returned None — check the terminal for a traceback."]
+
+        message = extract_final_message(step_log)
+        if message:
+            message = apply_hallucination_guard(message, step_log)
+
+        if not message:
+            message = "(no reply produced — check the terminal log)"
+
+        try:
+            agent = get_agent()
+            agent.save_conversation_history(self._history)
+        except Exception:
+            pass
+
+        self.completed.emit((message, step_log))
 
 
 def _icon_button(glyph: str, tooltip: str = "", size: int = 30) -> QPushButton:
@@ -567,6 +734,15 @@ class AgentWindow(QMainWindow):
         self.setStyleSheet(f"background: {COLOR_BG};")
 
         self._sidebar_anim = None
+        self._worker = None
+        self._processing = False
+
+        # Conversation history shared with agent.run_agent_turn, loaded once.
+        self.conversation_history = []
+        try:
+            self.conversation_history = get_agent().load_conversation_history()
+        except Exception:
+            self.conversation_history = []
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -596,6 +772,7 @@ class AgentWindow(QMainWindow):
 
         self.chat = ChatView()
         layout.addWidget(self.chat, 1)
+        layout.addWidget(self._build_input_area())
         return col
 
     def _build_header(self) -> QWidget:
@@ -619,21 +796,164 @@ class AgentWindow(QMainWindow):
         row.addWidget(title)
         row.addSpacing(6)
 
-        dot = QLabel("\u25cf")
-        dot.setStyleSheet(f"color: {COLOR_ACCENT}; font-size: 10px;")
-        row.addWidget(dot)
+        self.status_dot = QLabel("\u25cf")
+        self.status_dot.setStyleSheet(f"color: {COLOR_ACCENT}; font-size: 10px;")
+        row.addWidget(self.status_dot)
 
-        status = QLabel("Ready")
-        status.setStyleSheet(
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet(
             f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; font-size: 11px;'
         )
-        row.addWidget(status)
+        row.addWidget(self.status_label)
         row.addStretch(1)
 
         row.addWidget(_icon_button("\u21bb", "New chat", size=28))
         row.addWidget(_icon_button("\u2699", "Settings"))
 
         return header
+
+    def _build_input_area(self) -> QWidget:
+        outer = QWidget()
+        outer.setStyleSheet(f"background: {COLOR_BG};")
+        col = QVBoxLayout(outer)
+        col.setContentsMargins(CONTENT_PAD, 8, CONTENT_PAD, 16)
+        col.setSpacing(0)
+
+        self.input_pill = QFrame()
+        self.input_pill.setObjectName("inputPill")
+        self.input_pill.setStyleSheet(
+            f"""
+            QFrame#inputPill {{
+                background: {COLOR_INPUT_BG};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 18px;
+            }}
+            """
+        )
+        pill_row = QHBoxLayout(self.input_pill)
+        pill_row.setContentsMargins(14, 8, 8, 8)
+        pill_row.setSpacing(8)
+
+        self.input_field = QPlainTextEdit()
+        self.input_field.setPlaceholderText("Message AgentBot…")
+        self.input_field.setFrameShape(QFrame.Shape.NoFrame)
+        self.input_field.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.input_field.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.input_field.setFixedHeight(INPUT_LINE_H)
+        self.input_field.setStyleSheet(
+            f'background: transparent; color: {COLOR_TEXT_HI}; '
+            f'border: none; font-size: 14px;'
+        )
+        self.input_field.textChanged.connect(self._on_input_changed)
+        self.input_field.installEventFilter(self)
+        pill_row.addWidget(self.input_field, 1)
+
+        self.send_btn = QPushButton("\u2191")
+        self.send_btn.setToolTip("Send")
+        self.send_btn.setFixedSize(32, 32)
+        self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_btn.clicked.connect(self.send)
+        pill_row.addWidget(self.send_btn, 0, Qt.AlignmentFlag.AlignBottom)
+
+        col.addWidget(self.input_pill)
+        self._refresh_send_btn()
+        return outer
+
+    def _refresh_send_btn(self):
+        has_text = bool(self._get_input_text())
+        enabled = has_text and not self._processing
+        self.send_btn.setEnabled(enabled)
+        self.send_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {COLOR_ACCENT if enabled else COLOR_RAISED};
+                border: none;
+                border-radius: 16px;
+                color: {COLOR_BG if enabled else COLOR_TEXT_LOW};
+                font-size: 16px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background: {COLOR_ACCENT_HOVER if enabled else COLOR_RAISED};
+            }}
+            """
+        )
+
+    # ------------------------------------------------------------------
+    # Input helpers
+    # ------------------------------------------------------------------
+    def _get_input_text(self) -> str:
+        return self.input_field.toPlainText().strip()
+
+    def _clear_input(self):
+        self.input_field.clear()
+
+    def _on_input_changed(self):
+        self._autogrow_input()
+        self._refresh_send_btn()
+
+    def _autogrow_input(self):
+        doc = self.input_field.document()
+        lines = int(doc.size().height())
+        target = max(1, min(INPUT_MAX_LINES, lines))
+        height = target * INPUT_LINE_H + 4
+        if abs(self.input_field.height() - height) > 2:
+            self.input_field.setFixedHeight(height)
+
+    def eventFilter(self, obj, event):
+        # Enter sends, Shift+Enter inserts a newline.
+        if obj is self.input_field and event.type() == QKeyEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    return False  # let QPlainTextEdit insert the newline
+                self.send()
+                return True
+        return super().eventFilter(obj, event)
+
+    # ------------------------------------------------------------------
+    # Send / receive
+    # ------------------------------------------------------------------
+    def set_status(self, text, busy=False):
+        self.status_label.setText(text)
+        self.status_dot.setStyleSheet(
+            f"color: {COLOR_ACCENT if not busy else COLOR_WARN}; font-size: 10px;"
+        )
+
+    def send(self):
+        if self._processing:
+            return
+        text = self._get_input_text()
+        if not text:
+            return
+
+        self._clear_input()
+        self.chat.add_message(UserMessage(text))
+
+        self._processing = True
+        self.input_field.setEnabled(False)
+        self._refresh_send_btn()
+        self.set_status("Thinking…", busy=True)
+
+        self._worker = AgentWorker(text, self.conversation_history)
+        self._worker.completed.connect(self._on_turn_completed)
+        self._worker.failed.connect(self._on_turn_failed)
+        self._worker.start()
+
+    def _end_turn(self):
+        self._processing = False
+        self.input_field.setEnabled(True)
+        self.input_field.setFocus()
+        self._refresh_send_btn()
+        self.set_status("Ready", busy=False)
+
+    def _on_turn_completed(self, payload):
+        message, step_log = payload
+        self.chat.add_message(AssistantMessage(message))
+        self._end_turn()
+
+    def _on_turn_failed(self, error_text):
+        self.chat.add_message(AssistantMessage(error_text))
+        self._end_turn()
 
     # ------------------------------------------------------------------
     def toggle_sidebar(self):
@@ -654,47 +974,21 @@ class AgentWindow(QMainWindow):
         anim.start()
         self._sidebar_anim = anim
 
-    def load_demo_messages(self):
-        self.chat.add_message(
-            UserMessage("What does the retry helper in agent.py do?")
-        )
-        self.chat.add_message(
-            AssistantMessage(
-                "## Short answer\n\n"
-                "It wraps a callable and retries it a fixed number of times with a "
-                "**backoff delay** between attempts.\n\n"
-                "### How it works\n\n"
-                "- Catches the configured exception types\n"
-                "- Sleeps `base_delay * attempt` seconds\n"
-                "- Re-raises on the final attempt so failures are not swallowed"
-            )
-        )
-        self.chat.add_message(
-            AssistantMessage(
-                "Here is the shape of it:\n\n"
-                "```python\n"
-                "def retry(fn, attempts=3, base_delay=0.5):\n"
-                "    for i in range(attempts):\n"
-                "        try:\n"
-                "            return fn()\n"
-                "        except Exception:\n"
-                "            if i == attempts - 1:\n"
-                "                raise\n"
-                "            time.sleep(base_delay * (i + 1))\n"
-                "```\n\n"
-                "Call it with `retry(fetch_page, attempts=5)` to raise the ceiling."
-            )
-        )
-        self.chat.add_message(
-            UserMessage("Got it — where is it used?")
-        )
-        self.chat.force_scroll_bottom()
+    def show_greeting(self):
+        if self.conversation_history:
+            self.chat.add_message(AssistantMessage(
+                f"Resumed — {len(self.conversation_history)} messages from last session."
+            ), fade=False)
+        else:
+            self.chat.add_message(AssistantMessage(
+                "Hi! Ask me anything. Type a message below and press Enter."
+            ), fade=False)
 
 
 def main():
     app = QApplication(sys.argv)
     window = AgentWindow()
-    window.load_demo_messages()
+    window.show_greeting()
     window.show()
     sys.exit(app.exec())
 
