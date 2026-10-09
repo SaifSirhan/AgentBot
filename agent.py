@@ -3970,12 +3970,8 @@ Format: name(input) — description. Invoke as {"tool":"name","input":"..."}.
 INFORMATION & WEB
   search_web(input) — web search for current/external facts.
   serp_search(input) — structured web search via SerpApi (Google, News, Images,
-Scholar, Maps, Flights, Hotels, Shopping, YouTube). Use for current facts, news,
-prices, places, and travel options. Falls back to search_web if no API key is set.
-Format: "query|engine" (engine optional, default google). Engines: google,
-google_news, google_images, google_scholar, google_maps, google_flights,
-google_hotels, youtube. Examples: "latest AI news|google_news",
-"best restaurants in KL|google_maps", "python 3.13 features".
+Scholar, Maps, Flights, Hotels, Shopping, YouTube). Format: "query|engine"
+(engine optional, default google). Falls back to search_web if no API key is set.
   show_last_result() — show the previous search result.
   read_and_summarize(input) — fetch and summarize a URL.
   google_search_and_open(input) — Google search, open the top result.
@@ -3985,57 +3981,40 @@ google_hotels, youtube. Examples: "latest AI news|google_news",
   weather(input) — current weather.
   air_quality(input) — current AQI (different from weather).
   news(input) — current headlines by topic.
-  crawl_site(input) — crawl a website starting from a URL, following links on the
-same domain. Returns combined text from up to N pages. Format: "url|max_pages"
-(default 10, max 50). USE THIS when the user asks to "crawl", "read the whole
-site", "get all pages from", or research a documentation site thoroughly.
-  map_site(input) — return a list of all URLs on a website without reading
-content. Tries sitemap.xml first. USE THIS when the user wants to see "what pages
-exist on", "list all URLs", or "map this site".
+  crawl_site(input) — crawl a site following same-domain links; returns text
+from up to N pages. Format: "url|max_pages" (default 10, max 50).
+  map_site(input) — list all URLs on a site without reading content. Tries
+sitemap.xml first.
   fetch_clean(input) — fetch a URL and return its raw extracted text (no
-summarization). USE THIS when the user wants the actual content of a page, not a
-summary. For summaries, use read_and_summarize instead.
-  crawl_managed(input) — crawl a URL via a managed service (Crawlbase or
-Firecrawl) with JS rendering and anti-bot handling. USE THIS for JavaScript-heavy
-pages, Cloudflare-protected sites, or when you need clean markdown. Falls back to
-crawl_site if no API key is configured. Format: "url|mode" (mode optional,
-default markdown). Modes: markdown | html | screenshot. Examples:
-"https://example.com|markdown", "https://spa-app.com|html".
-  run_recipe(input) — run a saved browser recipe by name (input is just the
-name, e.g. "clock_out"). Recipes are fixed click/type/wait scripts the user set
-up in recipes.json. USE THIS when the user asks to "run the X recipe" or repeats
-a browser task that already has a recipe. A wrong name returns the real names.
-  deep_research(input) — multi-step research on a topic. Searches the web, reads
-the top sources, writes a structured report, saves as .md to Downloads. USE THIS
-when the user asks to "research X", "do a deep dive on X", "give me a report on
-X", or "find everything about X". Takes 1-3 minutes.
+summarization). For summaries, use read_and_summarize instead.
+  crawl_managed(input) — crawl via a managed service (Crawlbase or Firecrawl)
+with JS rendering and anti-bot handling; falls back to crawl_site if no API
+key is set. Format: "url|mode" (mode optional, default markdown). Modes:
+markdown | html | screenshot.
+  run_recipe(input) — run a saved browser recipe by name (a fixed
+click/type/wait script from recipes.json). A wrong name returns the real names.
+  deep_research(input) — multi-step research: searches the web, reads the top
+sources, writes a structured report, saves as .md to Downloads. Takes 1-3 minutes.
 hardware_scan() — report the user's GPU, VRAM, RAM, CPU cores.
 recommend_models() — recommend Ollama models that fit the user's hardware.
 
 MUSIC & MEDIA
   play_on_youtube(input) — play a song on YouTube Music via URL autoplay.
-Input: song and/or artist, e.g. "50/50 the strokes". Opens in Opera,
-autoplays. USE THIS when the user says "play X on youtube" or "play X
-on youtube music".
+Input: song and/or artist, e.g. "50/50 the strokes". Opens in Opera, autoplays.
 
 LOCAL FILES & DOCUMENTS
   rag_search(input) — search indexed user documents; 2–5 keywords.
     Returns snippets tagged [From: path].
   search_group_chat(input) — search the exported Telegram group chat.
-    Format: "query" or "query|year" or "query|YYYY-MM". USE THIS when the
-    user asks about old conversations, wants messages from a specific time,
-    or uses phrases like "back in 2023" or "last year". NEVER returns
+    Format: "query" or "query|year" or "query|YYYY-MM". NEVER returns
     results from other indexed folders (Downloads, Fire Writing, etc.).
-    Example: "lari dari rumah|2023".
   grep_group_chat(input) — EXACT substring search in the exported group
     chat. Returns raw lines with timestamps, no interpretation. Format:
-    "keyword" or "keyword|year" or "keyword|YYYY-MM". USE THIS whenever
-    the user asks for a specific quote, date, or "prove X said Y". Never
-    paraphrase from grep results — copy the exact line. Unlike
-    search_group_chat (semantic), grep does not guess or rephrase.
-    When you're about to quote a message or cite a date, run
-    grep_group_chat FIRST. If grep returns no match, you must say "I
-    can't find that exact quote" instead of paraphrasing or inventing one.
+    "keyword" or "keyword|year" or "keyword|YYYY-MM". Never paraphrase from
+    grep results — copy the exact line. When you're about to quote a message
+    or cite a date, run grep_group_chat FIRST. If grep returns no match, you
+    must say "I can't find that exact quote" instead of paraphrasing or
+    inventing one.
   read_file(input) — read an exact full path only; never partial.
   write_file(input) — "filename|content". Creates or FULLY OVERWRITES a file.
     NEVER use write_file to modify an existing file — you will destroy everything
@@ -4048,20 +4027,16 @@ CODE EDITING (use these whenever the user asks to change or inspect code)
     indentation. It MUST appear exactly ONCE. If it is missing or ambiguous the
     tool changes nothing and tells you why — then read the file and retry.
     ALWAYS use this instead of write_file when editing an existing file.
-    Example: patch_file("C:\\Users\\USER\\AgentBot\\config.py|||OLD = 1|||OLD = 2")
   list_symbols(input) — map ONE .py file without loading it: every class and
-    function with line numbers. Input is just the path or filename.
-    YOU MUST call this whenever the user asks what is inside a file, e.g.
-    "what functions are in config.py", "show me the methods of agent_gui.py",
-    "what's defined in X". A bare filename like "config.py" is enough — the tool
-    searches Downloads, Desktop and Documents for it. NEVER ask the user which
-    folder the file is in; just call list_symbols and let it resolve the path.
-    Also ALWAYS call this before patch_file if you have not read the file.
+    function with line numbers. Input is just the path or filename. A bare
+    filename like "config.py" is enough — the tool searches Downloads, Desktop
+    and Documents for it. NEVER ask the user which folder the file is in; just
+    call list_symbols and let it resolve the path. Also ALWAYS call this before
+    patch_file if you have not read the file.
   repo_map(input) — map a WHOLE folder. Format: 'folder' or 'folder|max_files'.
     Returns a compact per-file symbol summary. ALWAYS call this FIRST when the
     user asks about a codebase, or when you do not know which file to edit.
     NEVER ask the user "which file?" — call repo_map and find out yourself.
-    Example: repo_map("agentbot|40")
   make_folder(input) — create a folder.
   find_and_open_folder(input) — find an existing folder by name.
   watch_folder(input) — start watching a folder.
@@ -4070,17 +4045,11 @@ CODE EDITING (use these whenever the user asks to change or inspect code)
 The pattern list is COMMA-SEPARATED and case-insensitive. A file matches if its
 name contains ANY of the patterns. Folder shortcuts: 'downloads', 'desktop',
 'documents', 'telegram desktop', or a full path. ALWAYS use this when the user
-asks to find or list files by name — never guess. Example: user says "find files
-with SPM, CTU or LCC in Telegram Desktop" → call
-find_files("telegram desktop|SPM,CTU,LCC").
-
+asks to find or list files by name — never guess.
 move_files(input) — move files matching one or more patterns. Format:
 'source|pat1,pat2|dest' to preview, 'source|pat1,pat2|dest|confirm' to execute.
 Patterns are comma-separated, case-insensitive. ALWAYS preview first, show the
-list to the user, and only call again with |confirm after they say yes. Example:
-user says "move all SPM/CTU/LCC files to a folder called delete" →
-1st call: move_files("telegram desktop|SPM,CTU,LCC|delete")
-2nd call (after user confirms): move_files("telegram desktop|SPM,CTU,LCC|delete|confirm")
+list to the user, and only call again with |confirm after they say yes.
 
 PC CONTROL
   run_command(input) — run a system command.
@@ -4115,12 +4084,8 @@ REMINDERS & MEMORY
     repeatedly. A one-shot "in 10 minutes" is set_reminder, not this.
     Format: "when|what", where "when" is natural language ("every day at 8am",
     "every 30 minutes", "every monday at 9:00") and "what" is the request to
-    run each time. Examples:
-      "every day at 8am|give me the weather and top news"
-      "every 30 minutes|check system status"
-      "every monday at 9:00|summarize my unread email"
-    Also accepts a raw 5-field cron: "*/15 * * * *|check disk space".
-    Use "list" alone to list recurring jobs, and "remove|<n>" to delete one.
+    run each time. Also accepts a raw 5-field cron: "*/15 * * * *|check disk
+    space". Use "list" alone to list recurring jobs, and "remove|<n>" to delete.
   list_reminders() — list pending reminders and daily tasks.
   remember(input) — save a lasting personal fact; never secrets.
   forget(input) — remove a lasting personal fact.
@@ -4138,9 +4103,7 @@ COMMUNICATION
     the user's personal account. Format: "contact|image_path". Use "me" for
     Saved Messages. Path can be a full path or just a filename (assumes
     Downloads). USE THIS after generate_image when the user wants the image
-    sent to someone. Example chain:
-        generate_image("a red apple|apple.png")
-        send_image_telegram("me|apple.png")
+    sent to someone.
   whatsapp_send(input) — "contact|message".
   gmail_unread(input) — list unread email.
   gmail_read(input) — read email by UID.
@@ -4148,15 +4111,13 @@ COMMUNICATION
   whitelist(input) — "add <word>", "remove <word>", or "list".
   reply_with_gif(input) — reply in the CURRENT Telegram chat with a GIF
     matching an emotion or context. Input: search term like "celebration",
-    "facepalm", "sarcastic clap", "confused". Use this when you want to react
-    in this conversation. USE IT sparingly — only when a text reply would feel
-    flat and a GIF would land better. Not every message needs a GIF.
+    "facepalm", "sarcastic clap", "confused". USE IT sparingly — only when a
+    text reply would feel flat and a GIF would land better.
   send_gif(input) — send a GIF to a NAMED Telegram contact as the user. Format:
     "contact|search_term". Use "me" for Saved Messages. Prefers the group's
     own GIF library (matched by emotion labels), falls back to Giphy. USE THIS
     when told to SEND someone a GIF ("send a funny GIF to JEE"). Search terms
-    should describe the emotion or context ("facepalm", "celebration", "bro is
-    done"), not literal scenes.
+    should describe the emotion or context, not literal scenes.
 
 PLACES & MAPS
   verify_places(input) — "place1|place2|place3"; geocode each place and
@@ -4179,18 +4140,16 @@ IMAGE
   generate_image(input) — generate an AI image from a text prompt. Format:
     "prompt|filename" (filename optional). Saves to Downloads. Free, no API key.
   describe_image(input) — read and describe an image using vision. Format:
-    "path|question" (question optional, defaults to a full description). Handles
-    photos, screenshots, diagrams, and charts. USE THIS instead of OCR for
-    anything other than plain text in an image.
+    "path|question" (question optional, defaults to a full description).
+    Handles photos, screenshots, diagrams, and charts.
 
 SECURITY
   scan_file(input) — static analysis of a file. Computes SHA256, entropy,
     suspicious string patterns, and returns a verdict (LIKELY CLEAN /
-    SUSPICIOUS / LIKELY MALICIOUS). Input: full file path. USE THIS when the
-    user asks to scan, check, or analyze a file for safety.
+    SUSPICIOUS / LIKELY MALICIOUS). Input: full file path.
   scan_process(input) — inspect a running process. Shows path, command line,
     user, network connections. Input: process name (partial, e.g. "svchost") or
-    PID number. USE THIS when the user asks about a suspicious process.
+    PID number.
   quarantine_file(input) — move a suspicious file to Downloads\Quarantine\.
     Reversible. Input: full file path. ALWAYS show the scan_file result first
     and confirm with the user before calling this.
@@ -4213,10 +4172,7 @@ SOCIAL MEDIA POSTING
     Mastodon. Format: "action|content|schedule_time" where action is post|queue,
     content is the post text, and schedule_time is an ISO 8601 timestamp, "now",
     or "next-free-slot" (optional — if omitted, creates a draft without
-    scheduling). Examples:
-      "post|Just shipped a new feature!|next-free-slot"
-      "post|Hello world|now"
-      "queue"
+    scheduling).
     ALWAYS confirm the content with the user before posting. Never post without
     explicit confirmation.
 
@@ -4228,11 +4184,6 @@ SKILL MANAGEMENT
       action: create | update | list | search | read | delete
       name:   skill slug (lowercase_underscores) or search query
       content: full SKILL.md text (required for create/update only)
-    Examples:
-      "list"                            → list all skills
-      "search|youtube"                  → find skills mentioning youtube
-      "read|play_jazz_on_youtube"       → load the full skill text
-      "create|my_skill|---\nname: my_skill\ndescription: does X\n---\n\n## Steps\n1. ..."
     NEVER invent a skill body. Only create skills from procedures you actually
     executed.
 
