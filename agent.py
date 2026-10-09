@@ -122,6 +122,12 @@ BRAIN_PRIORITY = [
 ]
 print(f"[BRAIN] Priority: {' -> '.join(BRAIN_PRIORITY)}")
 LAST_BRAIN = None
+# Outcome tracking for the most recent _call_llm call. Used by the eval
+# harness (evals.py) to label traces and by /eval. _LAST_PROVIDER is the
+# provider that answered; _LAST_FAILURE_REASON explains the last failed
+# attempt: "empty" | "error" | None.
+_LAST_PROVIDER = None
+_LAST_FAILURE_REASON = None
 
 # ---------- Credentials and model endpoints ----------
 GROQ_API_KEY        = _c.get("GROQ_API_KEY", "")
@@ -821,13 +827,20 @@ def _dispatch_call(name, prompt, force_json, max_tokens):
         return f"Error: unknown brain '{name}'"
 
 
-def _call_llm(prompt, force_json=False, max_tokens=None):
-    """Try each brain in priority order until one succeeds."""
-    global LAST_BRAIN
+def _call_llm(prompt, force_json=False, max_tokens=None, force_provider=None):
+    """Try each brain in priority order until one succeeds.
+
+    force_provider: when set, walk only that provider (no failover). Used by
+    the eval harness to pin a provider; default None preserves the existing
+    full-chain behaviour.
+    """
+    global LAST_BRAIN, _LAST_PROVIDER, _LAST_FAILURE_REASON
     tried = []
     now = time.time()
 
-    for name in BRAIN_PRIORITY:
+    providers_to_try = [force_provider] if force_provider else BRAIN_PRIORITY
+
+    for name in providers_to_try:
         with _brain_lock:
             st = _get_brain_state(name)
             if st["dead"]:
@@ -851,10 +864,22 @@ def _call_llm(prompt, force_json=False, max_tokens=None):
                     _mark_dead(name, result)
                 elif cooldown > 0:
                     _mark_cooled(name, cooldown, result)
+            _LAST_FAILURE_REASON = "error"
             tried.append(f"{name}({result[:40]})")
             continue
 
+        # An empty or whitespace-only reply is NOT success: reasoning models
+        # (e.g. groq openai/gpt-oss-120b at low max_tokens) return '' and
+        # would otherwise short-circuit the failover chain, leaving the caller
+        # with '' and no error. Treat it as a failed attempt and keep going.
+        if not (isinstance(result, str) and result.strip()):
+            _LAST_FAILURE_REASON = "empty"
+            tried.append(f"{name}(empty)")
+            continue
+
         LAST_BRAIN = name
+        _LAST_PROVIDER = name
+        _LAST_FAILURE_REASON = None
         print(f"[BRAIN] OK: {name}")
         return result
 
