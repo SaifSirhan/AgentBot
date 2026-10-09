@@ -30,6 +30,7 @@ DEFAULTS = {
     "SERPAPI_KEY": "",
     "CRAWLBASE_KEY": "",
     "FIRECRAWL_KEY": "",
+    "TYPEFULLY_KEY": "",
     "TELEGRAM_BOT_TOKEN": "",
     "TELEGRAM_USER_ID": "",
     "TELEGRAM_API_ID": "",

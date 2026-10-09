@@ -3856,6 +3856,19 @@ DOCUMENT EDITING
       "C:\\Users\\USER\\contract.pdf|extract text"
     ALWAYS tell the user what you changed. NEVER invent an edit you did not run.
 
+SOCIAL MEDIA POSTING
+  post_to_social(input) — create and optionally schedule a social media post via
+    Typefully. Publishes to X (Twitter), LinkedIn, Threads, Bluesky, and
+    Mastodon. Format: "action|content|schedule_time" where action is post|queue,
+    content is the post text, and schedule_time is an ISO 8601 timestamp, "now",
+    or "next-free-slot" (optional — if omitted, creates a draft without
+    scheduling). Examples:
+      "post|Just shipped a new feature!|next-free-slot"
+      "post|Hello world|now"
+      "queue"
+    ALWAYS confirm the content with the user before posting. Never post without
+    explicit confirmation.
+
 =====================================================================
 10. EXAMPLES
 =====================================================================
@@ -3918,7 +3931,7 @@ VALID_TOOLS = {
     "crawl_site", "map_site", "fetch_clean", "run_recipe", "crawl_managed",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
-    "search_group_chat", "grep_group_chat", "edit_document"
+    "search_group_chat", "grep_group_chat", "edit_document", "post_to_social"
 }
 
 
@@ -4303,6 +4316,18 @@ def execute_tool(action):
     elif tool == 'run_recipe':
         from recipes import run_recipe
         return run_recipe(inp.strip())
+    elif tool == 'post_to_social':
+        parts = inp.split("|", 2)
+        act = parts[0].strip().lower()
+        if act == "queue":
+            import typefully_tool
+            return typefully_tool.list_queue()
+        content = parts[1].strip() if len(parts) > 1 else ""
+        schedule = parts[2].strip() if len(parts) > 2 else None
+        if not content:
+            return "ERROR: post_to_social needs content."
+        import typefully_tool
+        return typefully_tool.post_to_social(content, schedule)
     elif tool == 'run_command':            return run_command(inp)
     elif tool == 'search_web':             return search_web(inp)
     elif tool == 'show_last_result':       return show_last_result()
