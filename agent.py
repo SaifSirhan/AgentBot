@@ -491,7 +491,7 @@ def _call_gemini(prompt, force_json, max_tokens):
         # correct; before this it said "unexpected response: {...}" which
         # looked like a parser bug rather than an empty reply.
         if finish == "MAX_TOKENS":
-            return "Error: gemini returned empty content (hit maxOutputTokens)"
+            return "Error: gemini empty response — output token limit reached"
         if finish and finish not in ("STOP",):
             return f"Error: gemini produced no text (finishReason={finish})"
         return f"Error: gemini unexpected response: {str(data)[:200]}"
