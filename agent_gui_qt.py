@@ -115,11 +115,33 @@ COLOR_ACCENT       = "#4fe08f"
 COLOR_ACCENT_HOVER = "#3bc476"
 COLOR_ACCENT_DIM   = "#1c5a3f"
 
+# Phase 6a — right info panel
+# A subtle step up from the chat bg (#0d0f14) and the input pill (#14171f), so
+# the cards read as raised panels without a border-heavy look. Reuses the
+# existing border colour (no new border token needed).
+COLOR_CARD         = "#14171d"
+# Card header accent: the mint dimmed toward the background. Base mint #4fe08f
+# at ~40% lightness -> #2a6b52; nudged one step to #2f7d5e so it stays legible
+# against the card bg at 11px.
+COLOR_HEAD_ACCENT  = "#2f7d5e"
+
 FONT_UI = "Segoe UI"
 FONT_MONO = "Consolas"
 
 SIDEBAR_W = 226
 HEADER_H = 48
+
+# Phase 6a — right panel geometry + auto-hide breakpoints. MIN_W is far enough
+# above HIDE_BELOW that the hidden->shown transition has hysteresis (a resize
+# just under 1100 then a fragment back above cannot flap the panel); at 1100
+# the 720px chat column still gets its full width (1100-226-320 = 554 < 720 it
+# clamps, 1380-226-320 = 834 > 720 so the default already clears it).
+RIGHT_PANEL_W = 320
+HIDE_PANEL_BELOW = 1100
+SHOW_PANEL_AT = 1180
+CARD_RADIUS = 10
+CARD_PAD = 14
+CARD_SPACING = 12
 
 CONTENT_MAX_W = 720
 CONTENT_PAD = 24
@@ -160,6 +182,9 @@ _ICON_SVGS = {
     "newchat": '<path d="M20 11.5A8 8 0 1 1 12 3.5"/>'
                '<path d="M20 4l-7.5 7.5"/>',
     "back": '<path d="M15 5l-7 7 7 7"/>',
+    # right-panel toggle (Phase 6a): double chevrons pointing toward the panel
+    "chevrons_right": '<path d="M8 6.5l6 6-6 6"/><path d="M15 6.5l6 6-6 6"/>',
+    "chevrons_left": '<path d="M16 6.5l-6 6 6 6"/><path d="M9 6.5l-6 6 6 6"/>',
     # input row
     "clip": '<path d="M8 12.5l6.5-6.5a3 3 0 0 1 4.2 4.2l-8 8a5 5 0 0 1-7-7'
             'l8-8"/>',
@@ -1185,6 +1210,117 @@ class Sidebar(QFrame):
 
 
 # ----------------------------------------------------------------------
+# Right info panel (Phase 6a)
+# ----------------------------------------------------------------------
+class InfoCard(QFrame):
+    """A titled, empty card for the right panel.
+
+    Phase 6a renders structure only: a small uppercase header and a dim
+    placeholder body. Phase 6b fills `body` with live widgets. The body is a
+    real QWidget with its own layout so 6b can just addWidget into it.
+    """
+
+    def __init__(self, title: str, placeholder: str = "\u2014"):
+        super().__init__()
+        self.title = title
+        self.setObjectName("infoCard")
+        self.setStyleSheet(
+            f"""
+            QFrame#infoCard {{
+                background: {COLOR_CARD};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: {CARD_RADIUS}px;
+            }}
+            QFrame#infoCard QLabel {{ background: transparent; }}
+            """
+        )
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(CARD_PAD, CARD_PAD, CARD_PAD, CARD_PAD)
+        outer.setSpacing(8)
+
+        head = QLabel(title)
+        head.setStyleSheet(
+            f'color: {COLOR_HEAD_ACCENT}; font-family: "{FONT_UI}"; '
+            f"font-size: 11px; font-weight: bold; letter-spacing: 0.5px;"
+        )
+        outer.addWidget(head)
+
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(4)
+        self.body_layout.addStretch(1)
+
+        self.placeholder = QLabel(placeholder)
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; font-size: 13px;'
+        )
+        self.body_layout.insertWidget(0, self.placeholder)
+        outer.addWidget(self.body, 1)
+
+
+class RightPanel(QFrame):
+    """Fixed-width column of stacked info cards, scrollable.
+
+    Wrapped in an internal QScrollArea so Phase 6b can fill the cards without
+    any layout restructuring — at five empty cards it never actually scrolls.
+    """
+
+    CARD_TITLES = ("ACTIVITY", "NOW PLAYING", "SYSTEM", "WEATHER",
+                   "NOTIFICATIONS")
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedWidth(RIGHT_PANEL_W)
+        self.setStyleSheet(f"background: {COLOR_BG};")
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea {{ background: {COLOR_BG}; border: none; }}
+            QScrollBar:vertical {{
+                background: {COLOR_BG}; width: 10px; margin: 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #22262f; border-radius: 5px; min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: #313745; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0;
+            }}
+            """
+        )
+
+        body = QWidget()
+        body.setStyleSheet(f"background: {COLOR_BG};")
+        self.cards_layout = QVBoxLayout(body)
+        # 0 left / 16 right: the chat column already carries its own 24px right
+        # padding, so this keeps a total 40px gutter without over-padding.
+        self.cards_layout.setContentsMargins(0, 16, 16, 16)
+        self.cards_layout.setSpacing(CARD_SPACING)
+
+        self.cards = {}
+        for title in self.CARD_TITLES:
+            card = InfoCard(title)
+            self.cards[title] = card
+            self.cards_layout.addWidget(card)
+        self.cards_layout.addStretch(1)
+
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+
+
+# ----------------------------------------------------------------------
 # Main window
 # ----------------------------------------------------------------------
 class AgentWindow(QMainWindow):
@@ -1197,7 +1333,8 @@ class AgentWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Agent")
-        self.resize(1100, 720)
+        self.resize(1380, 720)
+        self.setMinimumWidth(900)
         self.setStyleSheet(f"background: {COLOR_BG};")
 
         self._sidebar_anim = None
@@ -1215,6 +1352,10 @@ class AgentWindow(QMainWindow):
         self._log_panel = None
         self._main_col_layout = None
         self._last_step_log = None
+        # Phase 6a: right panel state is in-memory only (never persisted), so a
+        # fresh launch always opens with the panel visible.
+        self._right_panel_visible = True
+        self._right_panel_auto = True  # not user-toggled — safe to auto-hide
         self._command_done.connect(self._on_command_done)
         self._scheduled_triggered.connect(self._on_scheduled_trigger)
         self._reminder_result.connect(self._reminder_done)
@@ -1238,7 +1379,34 @@ class AgentWindow(QMainWindow):
         root.addWidget(self.sidebar)
 
         root.addWidget(self._build_main_column(), 1)
+
+        # Phase 6a — right info panel. Added after the chat column so the chat
+        # owns the flex (stretch 1) and the panel is a fixed 320px at the far
+        # right. The border divider lives on the panel's inner wrapper (in
+        # _build_right_panel), not on the panel itself, so it survives a
+        # hide/show toggle.
+        self.right_panel = self._build_right_panel()
+        root.addWidget(self.right_panel)
+
         self.setCentralWidget(central)
+
+    def _build_right_panel(self) -> QWidget:
+        self._right_panel_inner = RightPanel()
+        wrapper = QWidget()
+        wrapper.setFixedWidth(RIGHT_PANEL_W)
+        wrap_layout = QVBoxLayout(wrapper)
+        wrap_layout.setContentsMargins(0, 0, 0, 0)
+        wrap_layout.setSpacing(0)
+        border = QFrame()
+        border.setFixedWidth(1)
+        border.setStyleSheet(f"background: {COLOR_BORDER};")
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(border)
+        row.addWidget(self._right_panel_inner, 1)
+        wrap_layout.addLayout(row)
+        return wrapper
 
     def _wire_sidebar(self):
         """Connect the sidebar nav + New chat buttons (Phase 5d).
@@ -1262,6 +1430,42 @@ class AgentWindow(QMainWindow):
         if self._settings_overlay is not None:
             self._settings_overlay.setGeometry(self.rect())
         self._sync_input_column_width()
+        self._apply_panel_autohide()
+
+    def _apply_panel_autohide(self):
+        """Auto-hide the right panel below HIDE_PANEL_BELOW, re-show above
+        SHOW_PANEL_AT (hysteresis so a resize can't flap it).
+
+        Only acts while the panel is in auto mode — once the user toggles it by
+        hand, their choice wins until they toggle back.
+        """
+        if not self._right_panel_auto:
+            return
+        w = self.width()
+        if self._right_panel_visible and w < HIDE_PANEL_BELOW:
+            self._set_right_panel_visible(False)
+        elif not self._right_panel_visible and w >= SHOW_PANEL_AT:
+            self._set_right_panel_visible(True)
+
+    def _set_right_panel_visible(self, visible: bool):
+        self._right_panel_visible = visible
+        self.right_panel.setVisible(visible)
+        self.panel_toggle_btn.setIcon(_svg_icon(
+            "chevrons_left" if visible else "chevrons_right", 18, COLOR_TEXT_MID))
+        self.panel_toggle_btn.setToolTip(
+            "Hide info panel" if visible else "Show info panel")
+
+    def toggle_right_panel(self):
+        """Header chevron -> show/hide the right info panel (Phase 6a).
+
+        The first manual toggle switches the panel into manual mode; a manual
+        toggle that re-shows it at a very narrow width just flips back to auto
+        so a subsequent resize can still hide it (otherwise a stray click at
+        900px would pin an overlapping panel).
+        """
+        show = not self._right_panel_visible
+        self._set_right_panel_visible(show)
+        self._right_panel_auto = not (show and self.width() < HIDE_PANEL_BELOW)
 
     def _sync_input_column_width(self):
         # Match the input column to the message column: cap at CONTENT_MAX_W,
@@ -1336,6 +1540,10 @@ class AgentWindow(QMainWindow):
         self.header_new_chat = _icon_button("newchat", "New chat", size=28)
         self.header_new_chat.clicked.connect(self.new_chat)
         row.addWidget(self.header_new_chat)
+        # Phase 6a — right-panel toggle, sitting between New chat and the gear.
+        self.panel_toggle_btn = _icon_button("chevrons_left", "Hide info panel")
+        self.panel_toggle_btn.clicked.connect(self.toggle_right_panel)
+        row.addWidget(self.panel_toggle_btn)
         gear = _icon_button("settings", "Settings")
         gear.clicked.connect(self.open_settings)
         row.addWidget(gear)
