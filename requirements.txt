@@ -15,6 +15,7 @@ winotify
 requests
 beautifulsoup4
 feedparser
+serpapi-search-tools # structured web search (serpapi_tool.serp_search); optional, falls back to search_web
 
 # --- LLM / RAG ---
 chromadb

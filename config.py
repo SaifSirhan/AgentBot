@@ -27,6 +27,7 @@ DEFAULTS = {
     "COHERE_API_KEY": "",
     "HUGGINGFACE_API_KEY": "",
     "DEEPSEEK_API_KEY": "",
+    "SERPAPI_KEY": "",
     "TELEGRAM_BOT_TOKEN": "",
     "TELEGRAM_USER_ID": "",
     "TELEGRAM_API_ID": "",

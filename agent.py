@@ -182,7 +182,7 @@ GROUP_MODE = False
 # read/write, code editing, shell commands, memory writes, Telegram
 # sends as the user — is blocked. Groups get information-only tools.
 SAFE_GROUP_TOOLS = {
-    "chat", "search_web", "weather", "air_quality", "news",
+    "chat", "search_web", "serp_search", "weather", "air_quality", "news",
     "current_time", "show_last_result", "read_and_summarize",
     "generate_image", "list_reminders", "list_brains",
 }
@@ -3627,6 +3627,13 @@ Format: name(input) — description. Invoke as {"tool":"name","input":"..."}.
 
 INFORMATION & WEB
   search_web(input) — web search for current/external facts.
+  serp_search(input) — structured web search via SerpApi (Google, News, Images,
+Scholar, Maps, Flights, Hotels, Shopping, YouTube). Use for current facts, news,
+prices, places, and travel options. Falls back to search_web if no API key is set.
+Format: "query|engine" (engine optional, default google). Engines: google,
+google_news, google_images, google_scholar, google_maps, google_flights,
+google_hotels, youtube. Examples: "latest AI news|google_news",
+"best restaurants in KL|google_maps", "python 3.13 features".
   show_last_result() — show the previous search result.
   read_and_summarize(input) — fetch and summarize a URL.
   google_search_and_open(input) — Google search, open the top result.
@@ -3883,7 +3890,7 @@ Confirmation:
 # TOOL REGISTRY
 # ---------------------------
 VALID_TOOLS = {
-    "chat", "search_web", "show_last_result", "read_and_summarize",
+    "chat", "search_web", "serp_search", "show_last_result", "read_and_summarize",
     "google_search_and_open", "youtube_search", "get_video_links",
     "play_on_youtube",
     "open_app", "open_website", "run_command", "make_folder",
@@ -4265,6 +4272,14 @@ def execute_tool(action):
             return f"ERROR: unsupported format '{ext}'."
         except ImportError as e:
             return f"ERROR: missing dependency for {ext}: {e}. Run: pip install python-pptx"
+    elif tool == 'serp_search':
+        parts = inp.split("|", 1)
+        query = parts[0].strip()
+        engine = parts[1].strip() if len(parts) > 1 else "google"
+        if not query:
+            return "ERROR: serp_search needs a query."
+        import serpapi_tool
+        return serpapi_tool.serp_search(query, engine)
     elif tool == 'patch_file':             return patch_file(inp)
     elif tool == 'list_symbols':           return list_symbols(inp)
     elif tool == 'repo_map':               return repo_map(inp)
