@@ -27,7 +27,9 @@ from PySide6.QtCore import (
     Qt,
     QEasingCurve,
     QObject,
+    QParallelAnimationGroup,
     QPropertyAnimation,
+    QSize,
     QTimer,
     Signal,
 )
@@ -536,7 +538,20 @@ class CodeBlock(QFrame):
             f'font-family: "{FONT_MONO}"; font-size: 13px;'
         )
         self.code_label.setContentsMargins(14, 0, 14, 12)
-        outer.addWidget(self.code_label)
+        # Long code lines must scroll inside the block, not widen the whole
+        # chat column (an unwrapped QLabel reports its full text width as a
+        # minimum, which bled content past the window edges).
+        self._code_scroll = QScrollArea()
+        self._code_scroll.setWidget(self.code_label)
+        self._code_scroll.setWidgetResizable(True)
+        self._code_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._code_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._code_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._code_scroll.setStyleSheet("background: transparent; border: none;")
+        self._code_scroll.setMinimumWidth(0)
+        outer.addWidget(self._code_scroll)
 
         self._copy_timer = QTimer(self)
         self._copy_timer.setSingleShot(True)
@@ -653,7 +668,22 @@ class ActivityChip(QWidget):
 # ----------------------------------------------------------------------
 # Messages
 # ----------------------------------------------------------------------
-class MessageBase(QWidget):
+class ShrinkableWidget(QWidget):
+    """A widget that never imposes a horizontal minimum on its parent.
+
+    Word-wrapped QLabels report their full unwrapped width as a minimum size
+    hint, which would otherwise force this widget wider than its viewport and
+    let content bleed past both window edges.
+    """
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+    def sizeHint(self):
+        return QSize(0, super().sizeHint().height())
+
+
+class MessageBase(ShrinkableWidget):
     """One chat message, laid out in a centred max-width column."""
 
     def __init__(self):
@@ -686,6 +716,7 @@ class MessageBase(QWidget):
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setText(markdown_to_html(text))
         lbl.setWordWrap(True)
+        lbl.setMinimumWidth(0)
         lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
             | Qt.TextInteractionFlag.LinksAccessibleByMouse
@@ -731,6 +762,7 @@ class UserMessage(MessageBase):
                 lbl.setTextFormat(Qt.TextFormat.RichText)
                 lbl.setText(markdown_to_html(seg[1]))
                 lbl.setWordWrap(True)
+                lbl.setMinimumWidth(0)
                 lbl.setTextInteractionFlags(
                     Qt.TextInteractionFlag.TextSelectableByMouse
                 )
@@ -871,8 +903,9 @@ class Sidebar(QFrame):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumWidth(0)
-        self.setMaximumWidth(SIDEBAR_W)
+        # Fixed at rest so the layout never shrinks it below its content
+        # (which clipped the nav labels). toggle_sidebar drives min+max together.
+        self.setFixedWidth(SIDEBAR_W)
         self.setStyleSheet(f"background: {COLOR_SIDEBAR};")
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
@@ -969,6 +1002,7 @@ class AgentWindow(QMainWindow):
         self._worker = None
         self._processing = False
         self._settings_overlay = None
+        self._input_outer = None
         self._command_done.connect(self._on_command_done)
 
         # Conversation history shared with agent.run_agent_turn, loaded once.
@@ -995,6 +1029,15 @@ class AgentWindow(QMainWindow):
         super().resizeEvent(event)
         if self._settings_overlay is not None:
             self._settings_overlay.setGeometry(self.rect())
+        self._sync_input_column_width()
+
+    def _sync_input_column_width(self):
+        # Match the input column to the message column: cap at CONTENT_MAX_W,
+        # shrink when the window is narrower than that.
+        if self._input_outer is None:
+            return
+        avail = self._input_outer.width() - 2 * CONTENT_PAD
+        self._input_column.setFixedWidth(max(0, min(CONTENT_MAX_W, avail)))
 
     def keyPressEvent(self, event):
         if (event.key() == Qt.Key.Key_Escape
@@ -1069,6 +1112,22 @@ class AgentWindow(QMainWindow):
         col.setContentsMargins(CONTENT_PAD, 8, CONTENT_PAD, 16)
         col.setSpacing(0)
 
+        # Centre the pill in the same max-width column as the messages.
+        holder = ShrinkableWidget()
+        holder_row = QHBoxLayout(holder)
+        holder_row.setContentsMargins(0, 0, 0, 0)
+        holder_row.setSpacing(0)
+        holder_row.addStretch(1)
+        self._input_column = QWidget()
+        self._input_column.setMaximumWidth(CONTENT_MAX_W)
+        self._input_column.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        self._input_col_layout = QVBoxLayout(self._input_column)
+        self._input_col_layout.setContentsMargins(0, 0, 0, 0)
+        self._input_col_layout.setSpacing(0)
+        holder_row.addWidget(self._input_column, 0)
+        holder_row.addStretch(1)
+
         self.input_pill = QFrame()
         self.input_pill.setObjectName("inputPill")
         self.input_pill.setStyleSheet(
@@ -1105,7 +1164,9 @@ class AgentWindow(QMainWindow):
         self.send_btn.clicked.connect(self.send)
         pill_row.addWidget(self.send_btn, 0, Qt.AlignmentFlag.AlignBottom)
 
-        col.addWidget(self.input_pill)
+        self._input_col_layout.addWidget(self.input_pill)
+        col.addWidget(holder)
+        self._input_outer = holder
         self._refresh_send_btn()
         return outer
 
@@ -1923,15 +1984,20 @@ class AgentWindow(QMainWindow):
             self.sidebar.setVisible(True)
             start, end = 0, SIDEBAR_W
 
-        anim = QPropertyAnimation(self.sidebar, b"maximumWidth", self)
-        anim.setDuration(200)
-        anim.setStartValue(start)
-        anim.setEndValue(end)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        # Drive min and max together: the sidebar is fixed-width at rest, so
+        # animating only one bound would leave the other pinning the width.
+        group = QParallelAnimationGroup(self)
+        for prop in (b"minimumWidth", b"maximumWidth"):
+            anim = QPropertyAnimation(self.sidebar, prop, self)
+            anim.setDuration(200)
+            anim.setStartValue(start)
+            anim.setEndValue(end)
+            anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            group.addAnimation(anim)
         if visible:
-            anim.finished.connect(lambda: self.sidebar.setVisible(False))
-        anim.start()
-        self._sidebar_anim = anim
+            group.finished.connect(lambda: self.sidebar.setVisible(False))
+        group.start()
+        self._sidebar_anim = group
 
     def show_greeting(self):
         if self.conversation_history:
