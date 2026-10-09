@@ -3,7 +3,8 @@ AgentBot GUI — PySide6 port.
 
 Phase 4a: slash commands, settings overlay, memory reset — faithful ports of
 the same features in agent_gui.py. Phase 4b: per-turn collapsible activity
-chips showing the step log.
+chips showing the step log. Phase 5a: system tray, F9 hotkey (stub) and
+scheduler notifications.
 
 This file will eventually replace agent_gui.py. Until the port is complete,
 agent_gui.py remains the live GUI and this file is only run manually.
@@ -12,7 +13,8 @@ Palette values are inlined from gui_widgets.py (the mint accent has been
 shifted greener for this port). That module imports tkinter, so it must NOT
 be imported here — the Qt port stays free of tkinter. agent_gui.py is NOT
 imported either; the logic shared with it (the hallucination guard, the slash
-command dispatch) is replicated below as pure Python.
+command dispatch) is replicated below as pure Python. tray.py and scheduler.py
+are plain-Python and safe to import.
 """
 from __future__ import annotations
 import contextlib
@@ -44,6 +46,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -52,6 +55,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+try:
+    import keyboard
+except ImportError:
+    keyboard = None
+
+try:
+    import tray
+except Exception:
+    tray = None
+
+try:
+    import scheduler
+except Exception:
+    scheduler = None
 
 # --------------------------- palette ---------------------------
 # Mirrors gui_widgets.py, with the mint accent shifted greener (hue 153->147,
@@ -990,7 +1008,10 @@ class Sidebar(QFrame):
 # Main window
 # ----------------------------------------------------------------------
 class AgentWindow(QMainWindow):
-    _command_done = Signal(str)   # background slash-command result
+    _command_done = Signal(str)      # background slash-command result
+    _scheduled_triggered = Signal(str)  # scheduler fired (from its own thread)
+    _reminder_result = Signal(str, str)  # (result, reminder_text)
+    _hotkey_changed = Signal(bool)   # F9 pressed/released (from keyboard thread)
 
     def __init__(self):
         super().__init__()
@@ -1003,7 +1024,12 @@ class AgentWindow(QMainWindow):
         self._processing = False
         self._settings_overlay = None
         self._input_outer = None
+        self._tray_icon = None
+        self._hotkey_installed = False
         self._command_done.connect(self._on_command_done)
+        self._scheduled_triggered.connect(self._on_scheduled_trigger)
+        self._reminder_result.connect(self._reminder_done)
+        self._hotkey_changed.connect(self._on_hotkey_changed)
 
         # Conversation history shared with agent.run_agent_turn, loaded once.
         self.conversation_history = []
@@ -1244,7 +1270,10 @@ class AgentWindow(QMainWindow):
             return
 
         self.chat.add_message(UserMessage(text))
+        self._start_agent_turn(text)
 
+    def _start_agent_turn(self, text):
+        """Kick off a background agent turn for `text`."""
         self._processing = True
         self.input_field.setEnabled(False)
         self._refresh_send_btn()
@@ -1956,7 +1985,6 @@ class AgentWindow(QMainWindow):
 
         Touches AgentMemory/conversation.json only — NOT facts.json.
         """
-        from PySide6.QtWidgets import QMessageBox
         reply = QMessageBox.question(
             self, "Reset memory",
             "Forget the saved conversation (memory)?\n\n"
@@ -2009,12 +2037,169 @@ class AgentWindow(QMainWindow):
                 "Hi! Ask me anything. Type a message below and press Enter."
             ), fade=False)
 
+    # ------------------------------------------------------------------
+    # Background services — tray, hotkey, scheduler
+    # ------------------------------------------------------------------
+    def start_services(self):
+        """Wire tray, hotkey and scheduler. Call after the window is shown.
+
+        The scheduler's callback fires on its own daemon thread, so it routes
+        through a Qt signal rather than touching widgets directly. The tray
+        callbacks likewise arrive off the GUI thread.
+        """
+        if scheduler is not None:
+            try:
+                scheduler.start_scheduler(self._scheduled_triggered.emit)
+            except Exception as e:
+                print(f"[scheduler] failed to start: {e}")
+        else:
+            print("[scheduler] module unavailable; skipped")
+
+        self._setup_global_hotkey()
+
+        # Delay the tray like the old GUI (root.after(800, _start_tray)):
+        # pystray needs the Qt event loop to be up and running first.
+        QTimer.singleShot(800, self._start_tray)
+
+    # -- tray -----------------------------------------------------------
+    def _start_tray(self):
+        if tray is None:
+            print("[tray] module unavailable; skipped")
+            return
+        try:
+            self._tray_icon = tray.start_tray(
+                on_show=self._tray_show,
+                on_quit=self._tray_quit,
+            )
+            print(f"[tray] icon = {self._tray_icon}")
+        except Exception as e:
+            print(f"[tray] failed: {e}")
+            self._tray_icon = None
+
+    def _tray_show(self):
+        # Runs on the pystray thread — hop back to the GUI thread.
+        if threading.current_thread() is threading.main_thread():
+            self.show_window()
+        else:
+            QTimer.singleShot(0, self.show_window)
+
+    def _tray_quit(self):
+        if threading.current_thread() is threading.main_thread():
+            self.quit_app()
+        else:
+            QTimer.singleShot(0, self.quit_app)
+
+    def hide_to_tray(self):
+        """Close button: save history and withdraw (match the old GUI)."""
+        try:
+            get_agent().save_conversation_history(self.conversation_history)
+        except Exception:
+            pass
+        self.hide()
+
+    def show_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def quit_app(self):
+        try:
+            get_agent().save_conversation_history(self.conversation_history)
+        except Exception:
+            pass
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+        if self._hotkey_installed and keyboard is not None:
+            try:
+                keyboard.unhook_all()
+            except Exception:
+                pass
+            self._hotkey_installed = False
+        QApplication.instance().quit()
+
+    def closeEvent(self, event):
+        # Match the old GUI: closing the window hides to tray, it does not exit.
+        event.ignore()
+        self.hide_to_tray()
+
+    # -- global hotkey (F9) ---------------------------------------------
+    def _setup_global_hotkey(self):
+        if keyboard is None:
+            print("[hotkey] 'keyboard' not installed. Run: pip install keyboard")
+            return
+        try:
+            keyboard.on_press_key("f9", self._hotkey_press, suppress=False)
+            keyboard.on_release_key("f9", self._hotkey_release, suppress=False)
+            self._hotkey_installed = True
+            print("[hotkey] F9 registered (stub — voice is Phase 5b)")
+        except Exception as e:
+            print(f"[hotkey] failed to register: {e}")
+
+    def _hotkey_press(self, event=None):
+        # Runs on the keyboard library's thread — never touch widgets here.
+        print("[hotkey] F9 pressed")
+        self._hotkey_changed.emit(True)
+
+    def _hotkey_release(self, event=None):
+        print("[hotkey] F9 released")
+        self._hotkey_changed.emit(False)
+
+    def _on_hotkey_changed(self, pressed):
+        if pressed:
+            self.set_status("Voice (Phase 5b)", busy=True)
+        else:
+            self.set_status("Ready", busy=False)
+
+    # -- scheduler notifications ----------------------------------------
+    def _on_scheduled_trigger(self, request_text):
+        """Slot for _scheduled_triggered. Runs on the GUI thread."""
+        if request_text.startswith("REMINDER:"):
+            reminder_text = request_text[len("REMINDER:"):].strip()
+            self._fire_reminder_direct(reminder_text)
+            return
+        # A scheduled task runs a full agent turn.
+        self.chat.add_message(AssistantMessage(f"[scheduled] {request_text}"))
+        if not self._processing:
+            self._start_agent_turn(request_text)
+
+    def _fire_reminder_direct(self, reminder_text):
+        self.chat.add_message(AssistantMessage(f"[REMINDER] {reminder_text}"))
+
+        def work():
+            try:
+                result = get_agent().execute_reminder(reminder_text)
+            except Exception as e:
+                result = f"ERROR: {e}"
+            # Emit rather than QTimer.singleShot: a timer created on a worker
+            # thread has no event loop and never fires. A signal is delivered
+            # to the GUI thread by Qt's queued connection.
+            self._reminder_result.emit(result, reminder_text)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _reminder_done(self, result, reminder_text):
+        try:
+            from winotify import Notification
+            Notification(
+                app_id="Agent",
+                title="⏰ Reminder",
+                msg=reminder_text,
+                duration="long",
+            ).show()
+        except Exception:
+            pass
+
 
 def main():
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)  # app lives in the tray
     window = AgentWindow()
     window.show_greeting()
     window.show()
+    window.start_services()
     sys.exit(app.exec())
 
 
