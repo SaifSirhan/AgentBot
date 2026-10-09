@@ -11,7 +11,6 @@ import datetime
 import urllib.parse
 import winsound
 import weather_news
-import whatsapp_tool
 from bs4 import BeautifulSoup
 from pathlib import Path
 from PIL import ImageGrab
@@ -203,7 +202,6 @@ KNOWN_WEB_APPS = {
     "gmail": "https://mail.google.com",
     "google docs": "https://docs.google.com",
     "google sheets": "https://sheets.google.com",
-    "whatsapp": "https://web.whatsapp.com",
     "discord": "https://discord.com/app",
     "netflix": "https://netflix.com",
     "chatgpt": "https://chat.openai.com",
@@ -1698,16 +1696,6 @@ def news(input_str):
             cnt = 5
         return weather_news.get_news(cat.strip(), cnt)
     return weather_news.get_news(input_str.strip(), 5)
-
-
-# ---------------------------
-# WHATSAPP
-# ---------------------------
-def whatsapp_send(input_str):
-    if '|' not in input_str:
-        return "ERROR: whatsapp_send needs 'contact|message'."
-    contact, msg = input_str.split('|', 1)
-    return whatsapp_tool.send_message(contact.strip(), msg.strip())
 
 
 # ---------------------------
@@ -3848,7 +3836,7 @@ B. WHICH TOOL?
  15. Reminder → set_reminder, set_reminder_at, or list_reminders.
  16. Persistent personal fact → remember or forget (subject to sensitive-
      data rules).
- 17. Telegram/WhatsApp/email → the matching communication tool.
+ 17. Telegram/email → the matching communication tool.
  18. Places/maps → send_maps_url for one link sent now, or send_maps_list
      for several places in one message.
  19. Tasks/desktop notification/misc → todo, notify, beep, list_brains.
@@ -4101,7 +4089,6 @@ COMMUNICATION
     Saved Messages. Path can be a full path or just a filename (assumes
     Downloads). USE THIS after generate_image when the user wants the image
     sent to someone.
-  whatsapp_send(input) — "contact|message".
   gmail_unread(input) — list unread email.
   gmail_read(input) — read email by UID.
   gmail_search(input) — search email by keyword.
@@ -4235,7 +4222,7 @@ VALID_TOOLS = {
     "close_window", "watch_folder", "stop_watching",
     "gmail_unread", "gmail_read", "gmail_search",
     "send_maps_url",
-    "weather", "air_quality", "news", "whatsapp_send", "describe_screen",
+    "weather", "air_quality", "news", "describe_screen",
     "set_name", "current_time", "send_telegram_message",
     "telegram_user_send", "telegram_user_delete", "telegram_user_edit", "send_image_telegram",
     "find_files", "move_files",
@@ -4689,7 +4676,6 @@ def execute_tool(action):
     elif tool == 'weather':                return weather(inp)
     elif tool == 'air_quality':            return air_quality(inp)
     elif tool == 'news':                   return news(inp)
-    elif tool == 'whatsapp_send':          return whatsapp_send(inp)
     elif tool == 'describe_screen':        return describe_screen()
     elif tool == 'set_name':               return set_name(inp)
     elif tool == 'current_time':           return current_time()
