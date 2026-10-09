@@ -143,6 +143,22 @@ CARD_RADIUS = 10
 CARD_PAD = 14
 CARD_SPACING = 12
 
+# Phase 6b — panel card heights + refresh cadence (all timers live on the GUI
+# thread; Phase 5a showed a QTimer created off-thread never fires).
+H_NOW_PLAYING = 96
+H_SYSTEM = 110
+H_WEATHER = 80
+H_NOTIFICATIONS = 150
+ACTIVITY_MAX_LINES = 6
+SYSTEM_REFRESH_MS = 2000
+WEATHER_REFRESH_MS = 10 * 60 * 1000
+MEDIA_REFRESH_MS = 1000
+
+# Notification type -> dot colour (Phase 6b).
+COLOR_NOTIF_SCHEDULED = COLOR_ACCENT
+COLOR_NOTIF_WATCHER = COLOR_WARN
+COLOR_NOTIF_REMINDER = COLOR_DANGER
+
 CONTENT_MAX_W = 720
 CONTENT_PAD = 24
 MSG_SPACING = 28
@@ -260,6 +276,51 @@ def get_agent():
 
 _voice_module = None
 _voice_output_module = None
+
+
+def get_psutil():
+    """Lazy psutil import (Phase 6b SYSTEM card). Already a project dep."""
+    import psutil as _psutil
+    return _psutil
+
+
+def get_weather_news():
+    """Lazy weather_news import (Phase 6b WEATHER card). Plain module."""
+    import weather_news as _wn
+    return _wn
+
+
+def parse_weather(text: str):
+    """Parse weather_news.get_weather()'s human text into (line1, location).
+
+    The source returns a fixed multi-line block:
+        Weather for Batu Gugup, Malaysia:
+        - Mist, 26°C (feels like 30°C)
+        - Humidity: 85%
+        ...
+    We only want "26°C · Mist" and the place name. Returns (None, None) on
+    anything unexpected so the caller can fall back to dim text.
+    """
+    if not text or not isinstance(text, str) or text.startswith("ERROR"):
+        return None, None
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    location = None
+    detail = None
+    for line in lines:
+        if line.startswith("Weather for "):
+            location = line[len("Weather for "):].rstrip(":").strip()
+        elif line.startswith("- ") and "°C" in line:
+            # "- Mist, 26°C (feels like 30°C)" -> ("Mist", "26°C")
+            body = line[2:]
+            body = body.split(" (feels")[0]
+            if "," in body:
+                desc, temp = body.rsplit(",", 1)
+                detail = f"{temp.strip()} \u00b7 {desc.strip()}"
+            else:
+                detail = body.strip()
+            break
+    return detail, location
+
 
 
 def get_voice():
@@ -638,6 +699,72 @@ def _nav_button(icon: str, label: str, active: bool = False) -> QPushButton:
         btn.enterEvent = _enter
         btn.leaveEvent = _leave
     return btn
+
+
+# ----------------------------------------------------------------------
+# Panel card content widgets (Phase 6b)
+# ----------------------------------------------------------------------
+def _dim_label(text: str, size: int = 11, color: str = COLOR_TEXT_LOW,
+               mono: bool = False, wrap: bool = False) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet(
+        f'background: transparent; color: {color}; '
+        f'font-family: "{FONT_MONO if mono else FONT_UI}"; font-size: {size}px;'
+    )
+    if wrap:
+        lbl.setWordWrap(True)
+    return lbl
+
+
+class MeterRow(QWidget):
+    """One labelled meter: name, a thin fill bar, and a right-aligned value.
+
+    A QFrame fill inside a QFrame trough is used rather than QProgressBar —
+    QProgressBar's groove/chunk needs chunk-margin fiddling and its text
+    overlay fights the mint styling, whereas a fixed-width fill is exact and
+    reuses the same rounded-rect look as the rest of the app.
+    """
+
+    TRACK_W = 96
+
+    def __init__(self, name: str):
+        super().__init__()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        self._name = _dim_label(name, size=11, color=COLOR_TEXT_MID)
+        self._name.setFixedWidth(34)
+        row.addWidget(self._name)
+
+        self._track = QFrame()
+        self._track.setFixedSize(self.TRACK_W, 6)
+        self._track.setStyleSheet(
+            f"background: {COLOR_BORDER}; border-radius: 3px;")
+        self._fill = QFrame(self._track)
+        self._fill.setGeometry(0, 0, 0, 6)
+        self._fill.setStyleSheet(
+            f"background: {COLOR_ACCENT}; border-radius: 3px;")
+        row.addWidget(self._track)
+
+        self._value = _dim_label("", size=11, color=COLOR_TEXT_HI, mono=True)
+        self._value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self._value, 1)
+
+    def set_value(self, text: str, fraction: float):
+        self._value.setText(text)
+        frac = max(0.0, min(1.0, fraction))
+        self._fill.setFixedWidth(int(self.TRACK_W * frac))
+
+    def set_value_text(self, text: str):
+        """Value text with no bar (e.g. the no-GPU row)."""
+        self._value.setText(text)
+        self._fill.setFixedWidth(0)
+        self._track.setVisible(False)
+
+    def set_bar_visible(self, visible: bool):
+        self._track.setVisible(visible)
 
 
 # ----------------------------------------------------------------------
@@ -1238,12 +1365,20 @@ class InfoCard(QFrame):
         outer.setContentsMargins(CARD_PAD, CARD_PAD, CARD_PAD, CARD_PAD)
         outer.setSpacing(8)
 
+        # Header is a row (not a bare label) so a card can add a trailing
+        # control — Phase 6b's NOTIFICATIONS "clear" button uses this slot.
+        head_row = QHBoxLayout()
+        head_row.setContentsMargins(0, 0, 0, 0)
+        head_row.setSpacing(6)
         head = QLabel(title)
         head.setStyleSheet(
             f'color: {COLOR_HEAD_ACCENT}; font-family: "{FONT_UI}"; '
             f"font-size: 11px; font-weight: bold; letter-spacing: 0.5px;"
         )
-        outer.addWidget(head)
+        head_row.addWidget(head)
+        head_row.addStretch(1)
+        self.header_layout = head_row
+        outer.addLayout(head_row)
 
         self.body = QWidget()
         self.body_layout = QVBoxLayout(self.body)
@@ -1253,11 +1388,30 @@ class InfoCard(QFrame):
 
         self.placeholder = QLabel(placeholder)
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder.setWordWrap(True)
         self.placeholder.setStyleSheet(
             f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; font-size: 13px;'
         )
         self.body_layout.insertWidget(0, self.placeholder)
         outer.addWidget(self.body, 1)
+
+    def set_placeholder(self, text: str):
+        """Replace the body with a single centred dim message.
+
+        Used both for the idle state and the "unavailable" states, so callers
+        never have to juggle the placeholder widget's visibility themselves.
+        """
+        if self.placeholder is None:
+            self.placeholder = QLabel()
+            self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.placeholder.setWordWrap(True)
+            self.placeholder.setStyleSheet(
+                f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+                f"font-size: 13px;"
+            )
+            self.body_layout.insertWidget(0, self.placeholder)
+        self.placeholder.setText(text)
+        self.placeholder.setVisible(True)
 
 
 class RightPanel(QFrame):
@@ -1314,10 +1468,227 @@ class RightPanel(QFrame):
             card = InfoCard(title)
             self.cards[title] = card
             self.cards_layout.addWidget(card)
+            if title in (self._FIXED_HEIGHTS):
+                card.setFixedHeight(self._FIXED_HEIGHTS[title])
         self.cards_layout.addStretch(1)
+
+        # NOTIFICATIONS and ACTIVITY are flexible; NOTIFICATIONS keeps a floor.
+        self.cards["NOTIFICATIONS"].setMinimumHeight(H_NOTIFICATIONS)
+        # ACTIVITY shows at most ACTIVITY_MAX_LINES single-line steps, so cap it
+        # rather than letting the scroll area stretch it into a tall log pane.
+        self.cards["ACTIVITY"].setMaximumHeight(
+            CARD_PAD * 2 + 16 + ACTIVITY_MAX_LINES * 17 + 12)
 
         scroll.setWidget(body)
         outer.addWidget(scroll)
+
+        self._build_activity()
+        self._build_now_playing()
+        self._build_system()
+        self._build_weather()
+        self._build_notifications()
+
+    _FIXED_HEIGHTS = {
+        "NOW PLAYING": H_NOW_PLAYING,
+        "SYSTEM": H_SYSTEM,
+        "WEATHER": H_WEATHER,
+    }
+
+    # -- ACTIVITY -------------------------------------------------------
+    def _build_activity(self):
+        card = self.cards["ACTIVITY"]
+        card.placeholder.setVisible(False)
+        self.activity_lines = []
+        self.activity_earlier = _dim_label("", size=10, color=COLOR_TEXT_LOW)
+        self.activity_earlier.setVisible(False)
+        card.body_layout.insertWidget(0, self.activity_earlier)
+        # Labels are created once and only re-texted, so no widget churn/flicker.
+        self.activity_labels = []
+        for _ in range(ACTIVITY_MAX_LINES):
+            lbl = _dim_label("", size=11, mono=True, color=COLOR_TEXT_MID)
+            lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            lbl.setVisible(False)
+            card.body_layout.insertWidget(card.body_layout.count() - 1, lbl)
+            self.activity_labels.append(lbl)
+        self.set_activity_idle()
+
+    def set_activity_idle(self):
+        self.activity_lines = []
+        self._render_activity()
+
+    def set_activity(self, step_log):
+        """Show the turn's tool steps, most recent ACTIVITY_MAX_LINES."""
+        lines = [l for l in (step_log or []) if isinstance(l, str)]
+        lines = [l for l in lines if l.strip()]
+        self.activity_lines = lines
+        self._render_activity()
+
+    def _render_activity(self):
+        total = len(self.activity_lines)
+        shown = self.activity_lines[-ACTIVITY_MAX_LINES:]
+        more = total - len(shown)
+        if total == 0:
+            self.activity_earlier.setVisible(False)
+            for lbl in self.activity_labels:
+                lbl.setVisible(False)
+            # Idle text lives in the placeholder slot.
+            self.cards["ACTIVITY"].placeholder.setText("Idle")
+            self.cards["ACTIVITY"].placeholder.setVisible(True)
+            return
+        self.cards["ACTIVITY"].placeholder.setVisible(False)
+        if more > 0:
+            self.activity_earlier.setText(f"\u2026{more} earlier")
+            self.activity_earlier.setVisible(True)
+        else:
+            self.activity_earlier.setVisible(False)
+        for i, lbl in enumerate(self.activity_labels):
+            if i < len(shown):
+                lbl.setText(self._ellipsize(shown[i]))
+                lbl.setVisible(True)
+            else:
+                lbl.setVisible(False)
+
+    @staticmethod
+    def _ellipsize(text: str, limit: int = 46) -> str:
+        text = " ".join(text.split())
+        return text if len(text) <= limit else text[:limit - 1] + "\u2026"
+
+    # -- NOW PLAYING ----------------------------------------------------
+    def _build_now_playing(self):
+        card = self.cards["NOW PLAYING"]
+        self.media_available = False
+        self.now_playing_placeholder = "Requires winsdk \u2014 ask user"
+        card.set_placeholder(self.now_playing_placeholder)
+
+    # -- SYSTEM ---------------------------------------------------------
+    def _build_system(self):
+        card = self.cards["SYSTEM"]
+        card.placeholder.setVisible(False)
+        self.cpu_row = MeterRow("CPU")
+        self.ram_row = MeterRow("RAM")
+        self.gpu_row = MeterRow("GPU")
+        for row in (self.cpu_row, self.ram_row, self.gpu_row):
+            card.body_layout.insertWidget(card.body_layout.count() - 1, row)
+        self.cpu_row.set_value("\u2014", 0.0)
+        self.ram_row.set_value("\u2014", 0.0)
+        self.gpu_row.set_value_text("no GPU detected")
+
+    def update_system(self, cpu_pct, ram_used, ram_total, gpu=None):
+        self.cpu_row.set_value(f"{cpu_pct:4.1f}%", cpu_pct / 100.0)
+        used_gb = ram_used / (1024 ** 3)
+        total_gb = ram_total / (1024 ** 3)
+        frac = (ram_used / ram_total) if ram_total else 0.0
+        self.ram_row.set_value(f"{used_gb:.1f}/{total_gb:.1f} GB", frac)
+        if gpu is None:
+            self.gpu_row.set_value_text("no GPU")
+        else:
+            util, mem_used, mem_total = gpu
+            self.gpu_row.set_bar_visible(True)
+            self.gpu_row.set_value(
+                f"{util:.0f}%  {mem_used / 1024:.1f}/{mem_total / 1024:.1f} GB",
+                util / 100.0)
+
+    # -- WEATHER --------------------------------------------------------
+    def _build_weather(self):
+        card = self.cards["WEATHER"]
+        card.placeholder.setVisible(False)
+        self.weather_main = _dim_label("\u2014", size=14, color=COLOR_TEXT_HI)
+        self.weather_loc = _dim_label("", size=11, color=COLOR_TEXT_LOW)
+        card.body_layout.insertWidget(card.body_layout.count() - 1, self.weather_main)
+        card.body_layout.insertWidget(card.body_layout.count() - 1, self.weather_loc)
+        self._weather_last = None  # last successful (main, loc)
+
+    def update_weather(self, main_text, location_text):
+        if main_text:
+            self._weather_last = (main_text, location_text or "")
+            self.weather_main.setText(main_text)
+            self.weather_loc.setText(location_text or "")
+        elif self._weather_last:
+            # Keep the last good reading on a failed refresh.
+            self.weather_main.setText(self._weather_last[0])
+            self.weather_loc.setText(self._weather_last[1] + "  (stale)")
+        else:
+            self.weather_main.setText("unavailable")
+            self.weather_loc.setText("")
+
+    # -- NOTIFICATIONS --------------------------------------------------
+    def _build_notifications(self):
+        card = self.cards["NOTIFICATIONS"]
+        card.placeholder.setVisible(False)
+
+        self.notif_clear_btn = QPushButton("clear")
+        self.notif_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.notif_clear_btn.setFixedHeight(16)
+        self.notif_clear_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent; border: none;
+                color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}";
+                font-size: 10px; padding: 0 2px;
+            }}
+            QPushButton:hover {{ color: {COLOR_TEXT_HI}; }}
+            """
+        )
+        card.header_layout.addWidget(self.notif_clear_btn)
+
+        self.notif_events = []
+        self.notif_labels = []  # (dot, text) row widgets
+        self.notif_empty = _dim_label("no events yet", size=11,
+                                      color=COLOR_TEXT_LOW)
+        self.notif_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card.body_layout.insertWidget(0, self.notif_empty)
+        for _ in range(5):
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(6)
+            dot = QLabel("\u25cf")
+            dot.setFixedWidth(10)
+            rl.addWidget(dot)
+            txt = _dim_label("", size=11, color=COLOR_TEXT_MID, mono=True)
+            txt.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            rl.addWidget(txt, 1)
+            row.setVisible(False)
+            card.body_layout.insertWidget(card.body_layout.count() - 1, row)
+            self.notif_labels.append((dot, txt, row))
+        self._render_notifications()
+
+    def add_notification(self, kind: str, text: str, when=None):
+        """Push one event. kind: 'scheduled' | 'watcher' | 'reminder'."""
+        ts = (when or datetime.datetime.now()).strftime("%H:%M")
+        self.notif_events.insert(0, (kind, ts, text))
+        del self.notif_events[5:]
+        self._render_notifications()
+
+    def clear_notifications(self):
+        self.notif_events = []
+        self._render_notifications()
+
+    def _render_notifications(self):
+        if not self.notif_events:
+            self.notif_empty.setVisible(True)
+            for _dot, _txt, row in self.notif_labels:
+                row.setVisible(False)
+            return
+        self.notif_empty.setVisible(False)
+        colors = {
+            "scheduled": COLOR_NOTIF_SCHEDULED,
+            "watcher": COLOR_NOTIF_WATCHER,
+            "reminder": COLOR_NOTIF_REMINDER,
+        }
+        for i, (dot, txt, row) in enumerate(self.notif_labels):
+            if i < len(self.notif_events):
+                kind, ts, text = self.notif_events[i]
+                dot.setStyleSheet(
+                    f"background: transparent; "
+                    f"color: {colors.get(kind, COLOR_TEXT_LOW)}; font-size: 9px;")
+                txt.setText(f"{ts}  {self._ellipsize(text, 34)}")
+                row.setVisible(True)
+            else:
+                row.setVisible(False)
+
 
 
 # ----------------------------------------------------------------------
@@ -1329,6 +1700,7 @@ class AgentWindow(QMainWindow):
     _reminder_result = Signal(str, str)  # (result, reminder_text)
     _hotkey_changed = Signal(bool)   # F9 pressed/released (from keyboard thread)
     _voice_event = Signal(str)       # recording/transcription status from worker
+    _weather_ready = Signal(str)     # parsed weather text (from worker thread)
 
     def __init__(self):
         super().__init__()
@@ -1356,11 +1728,16 @@ class AgentWindow(QMainWindow):
         # fresh launch always opens with the panel visible.
         self._right_panel_visible = True
         self._right_panel_auto = True  # not user-toggled — safe to auto-hide
+        # Phase 6b panel timers (all created here, on the main thread) + state.
+        self._system_timer = None
+        self._weather_timer = None
+        self._gpu_unavailable = True
         self._command_done.connect(self._on_command_done)
         self._scheduled_triggered.connect(self._on_scheduled_trigger)
         self._reminder_result.connect(self._reminder_done)
         self._hotkey_changed.connect(self._on_hotkey_changed)
         self._voice_event.connect(self._on_voice_event)
+        self._weather_ready.connect(self._on_weather_ready)
 
         # Conversation history shared with agent.run_agent_turn, loaded once.
         self.conversation_history = []
@@ -1387,6 +1764,7 @@ class AgentWindow(QMainWindow):
         # hide/show toggle.
         self.right_panel = self._build_right_panel()
         root.addWidget(self.right_panel)
+        self.panel.notif_clear_btn.clicked.connect(self.panel.clear_notifications)
 
         self.setCentralWidget(central)
 
@@ -1407,6 +1785,95 @@ class AgentWindow(QMainWindow):
         row.addWidget(self._right_panel_inner, 1)
         wrap_layout.addLayout(row)
         return wrapper
+
+    @property
+    def panel(self) -> "RightPanel":
+        """The cards' controller (the RightPanel inside the fixed wrapper)."""
+        return self._right_panel_inner
+
+    # ------------------------------------------------------------------
+    # Phase 6b — panel data wiring (SYSTEM / WEATHER / NOTIFICATIONS)
+    # ------------------------------------------------------------------
+    def start_panel_timers(self):
+        """Start the panel polling timers. Called once the window is shown.
+
+        All timers are created here (main thread) — Phase 5a established that a
+        QTimer made on a worker thread never fires.
+        """
+        try:
+            psutil = get_psutil()
+            psutil.cpu_percent(interval=None)  # prime: first call returns 0.0
+            self._gpu_unavailable = not self._nvidia_available()
+        except Exception as e:
+            print(f"[system] psutil unavailable: {e}")
+            psutil = None
+        self._psutil = psutil
+
+        self._system_timer = QTimer(self)
+        self._system_timer.setInterval(SYSTEM_REFRESH_MS)
+        self._system_timer.timeout.connect(self._refresh_system)
+        self._system_timer.start()
+        self._refresh_system()  # paint immediately, don't wait 2s
+
+        self._weather_timer = QTimer(self)
+        self._weather_timer.setInterval(WEATHER_REFRESH_MS)
+        self._weather_timer.timeout.connect(self._refresh_weather)
+        self._weather_timer.start()
+        QTimer.singleShot(200, self._refresh_weather)  # first fetch soon after show
+
+    @staticmethod
+    def _nvidia_available() -> bool:
+        import shutil
+        return shutil.which("nvidia-smi") is not None
+
+    def _refresh_system(self):
+        psutil = getattr(self, "_psutil", None)
+        if psutil is None:
+            return
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+            vm = psutil.virtual_memory()
+            gpu = None
+            if not self._gpu_unavailable:
+                gpu = self._read_gpu()
+            self.panel.update_system(cpu, vm.used, vm.total, gpu)
+        except Exception as e:
+            print(f"[system] refresh failed: {e}")
+
+    @staticmethod
+    def _read_gpu():
+        """Query nvidia-smi for (util%, mem_used_MB, mem_total_MB), or None."""
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["nvidia-smi",
+                 "--query-gpu=utilization.gpu,memory.used,memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if out.returncode != 0 or not out.stdout.strip():
+                return None
+            util_s, used_s, total_s = [
+                p.strip() for p in out.stdout.strip().splitlines()[0].split(",")
+            ]
+            return float(util_s), float(used_s), float(total_s)
+        except Exception:
+            return None
+
+    def _refresh_weather(self):
+        """Fetch weather off the GUI thread; result posted via _weather_ready."""
+        def work():
+            try:
+                text = get_weather_news().get_weather("Shah Alam")
+            except Exception as e:
+                text = f"ERROR: {e}"
+            self._weather_ready.emit(text)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_weather_ready(self, raw_text):
+        detail, location = parse_weather(raw_text)
+        self.panel.update_weather(detail, location)
 
     def _wire_sidebar(self):
         """Connect the sidebar nav + New chat buttons (Phase 5d).
@@ -1905,6 +2372,8 @@ class AgentWindow(QMainWindow):
         self._refresh_send_btn()
         self.set_status("Reading attachments…" if attached_paths else "Thinking…",
                         busy=True)
+        # Clear the previous turn's steps when a new turn starts (Phase 6b).
+        self.panel.set_activity_idle()
 
         self._worker = AgentWorker(text, self.conversation_history, attached_paths)
         self._worker.completed.connect(self._on_turn_completed)
@@ -1924,6 +2393,10 @@ class AgentWindow(QMainWindow):
         message, step_log = payload
         self._last_step_log = step_log
         self.chat.add_message(AssistantMessage(message, step_log=step_log))
+        # Keep the finished turn's steps on the ACTIVITY card until the next
+        # turn starts. AgentWorker only emits the captured log at completion
+        # (stdout redirect), so there is no per-step signal to stream from.
+        self.panel.set_activity(step_log)
         self._speak_reply(message)
         self._end_turn()
 
@@ -3007,6 +3480,13 @@ class AgentWindow(QMainWindow):
 
         self._setup_global_hotkey()
 
+        # Phase 6b — start the panel polling timers (SYSTEM 2s, WEATHER 10min).
+        # Guarded so a panel-data hiccup can never stop the app from booting.
+        try:
+            self.start_panel_timers()
+        except Exception as e:
+            print(f"[panel] timers failed to start: {e}")
+
         # Delay the tray like the old GUI (root.after(800, _start_tray)):
         # pystray needs the Qt event loop to be up and running first.
         QTimer.singleShot(800, self._start_tray)
@@ -3186,12 +3666,16 @@ class AgentWindow(QMainWindow):
         """
         if request_text.startswith("REMINDER:"):
             reminder_text = request_text[len("REMINDER:"):].strip()
+            self.panel.add_notification("reminder", reminder_text)
             self._fire_reminder_direct(reminder_text)
             return
         # A scheduled task or watcher event runs a full agent turn. If one is
         # already running, queue it (the old GUI overlapped two racing turns
         # instead — that is the bug this fixes).
-        label = "[watcher]" if request_text.startswith("FILE WATCHER:") else "[scheduled]"
+        is_watcher = request_text.startswith("FILE WATCHER:")
+        label = "[watcher]" if is_watcher else "[scheduled]"
+        self.panel.add_notification(
+            "watcher" if is_watcher else "scheduled", request_text)
         self.chat.add_message(AssistantMessage(f"{label} {request_text}"))
         if self._processing:
             self._queue_scheduled(request_text)
