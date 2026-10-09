@@ -914,7 +914,12 @@ def get_last_brain():
 # ---------------------------
 # PUBLIC WRAPPERS
 # ---------------------------
-def ask_ai_for_plan(user_request, context, correction=None):
+def _build_plan_prompt(user_request, context, correction=None):
+    """Build the exact prompt run_agent_turn's step 1 sends to the LLM.
+
+    Extracted verbatim from ask_ai_for_plan so the eval harness can reuse the
+    SAME prompt assembly (byte-identical) without duplicating it.
+    """
     correction_block = (f"\n\nYour previous response was invalid: {correction}\n"
                         f"Respond with ONLY a corrected JSON object.") if correction else ""
 
@@ -963,6 +968,11 @@ Context (recent conversation and tool results):
 User: {user_request}{correction_block}
 
 Your response (either a plain-text reply or a single JSON tool call):"""
+    return prompt
+
+
+def ask_ai_for_plan(user_request, context, correction=None):
+    prompt = _build_plan_prompt(user_request, context, correction)
 
     return _call_llm(prompt, force_json=False)
 
@@ -4754,6 +4764,69 @@ def execute_tool(action):
 # AGENT TURN ORCHESTRATION
 # ---------------------------
 def run_agent_turn(user_input, conversation_history):
+    """Run a turn and record an eval trace around it.
+
+    Returns the same step_log (list[str]) as _run_agent_turn_impl. The trace
+    write is best-effort and double-guarded: a disk failure must never break
+    a turn.
+    """
+    import time as _time
+    t_start = _time.time()
+    try:
+        import evals as _evals
+    except Exception:
+        _evals = None
+    try:
+        prompt_for_hash = _build_plan_prompt(user_input, "[turn]")
+    except Exception:
+        prompt_for_hash = ""
+
+    step_log = _run_agent_turn_impl(user_input, conversation_history)
+
+    if _evals is not None:
+        try:
+            tool_calls = []
+            parse_ok = True
+            for line in (step_log or []):
+                if isinstance(line, str) and line.startswith("System:") and "invalid" in line.lower():
+                    parse_ok = False
+                if isinstance(line, str) and line.startswith("Action: ") and "-> Result:" in line \
+                        and not line.startswith("Action: chat("):
+                    head = line[len("Action: "):].split(") -> Result:", 1)[0]
+                    tname, _, tinp = head.partition("(")
+                    tool_calls.append({"tool": tname.strip(), "input": tinp.strip()})
+            final_reply = ""
+            for line in reversed(step_log or []):
+                if not isinstance(line, str):
+                    continue
+                if line.startswith("Action: chat(") and "-> Result: " in line:
+                    final_reply = line.split("-> Result: ", 1)[-1]
+                    if final_reply.startswith("AI: "):
+                        final_reply = final_reply[4:]
+                    break
+                if line.startswith("Done:"):
+                    final_reply = line[len("Done:"):].strip()
+                    break
+            _evals.record_trace(
+                user_request=user_input,
+                tool_calls=tool_calls,
+                final_reply=final_reply,
+                duration_ms=int((_time.time() - t_start) * 1000),
+                prompt_text=prompt_for_hash,
+                provider=_LAST_PROVIDER,
+                failure_reason=_LAST_FAILURE_REASON,
+                parse_ok=parse_ok,
+                empty_reply=not (final_reply and final_reply.strip()),
+                source="cli",
+                commit="",
+            )
+        except Exception as e:
+            print(f"[evals] trace failed: {e}")
+
+    return step_log
+
+
+def _run_agent_turn_impl(user_input, conversation_history):
     # Request setup and bounded tool-call loop.
     step_log = []
     last_signature = None

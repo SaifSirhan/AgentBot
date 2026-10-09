@@ -1403,6 +1403,12 @@ class AgentGUI:
                 "Instagram gateway (needs INSTAGRAM_ENABLED in config.json):\n\n"
                 "/ig status         → is the DM gateway running?\n"
                 "/ig restart        → stop and re-login the gateway\n\n"
+                "Evaluation harness (developer surface, selection-only):\n\n"
+                "/eval run Suite [provider] → run a suite, compare tool choice\n"
+                "/eval list         → list suites\n"
+                "/eval traces [n]   → recent turn traces\n"
+                "/eval label Id good|bad    → label a trace\n"
+                "/eval diff RunA RunB       → which cases changed\n\n"
                 "Telegram group export (private, stays outside the repo):\n\n"
                 "/import-chat <result.json>\n"
                 "       → parse a Telegram Desktop export into scrubbed monthly\n"
@@ -1632,6 +1638,57 @@ class AgentGUI:
 
             threading.Thread(target=work, daemon=True).start()
             return True
+
+        if cmd == "/eval":
+            parts = (args or "").strip().split()
+            sub = parts[0] if parts else "help"
+            import evals
+
+            if sub == "run":
+                if len(parts) < 2:
+                    return self._finish_slash_command(text, "Usage: /eval run <suite> [<provider>]")
+                suite = parts[1]
+                provider = parts[2] if len(parts) > 2 else None
+                run = evals.run_suite(suite, force_provider=provider)
+                passed = sum(1 for r in run["results"] if r["passed"])
+                return self._finish_slash_command(
+                    text,
+                    f"Suite {suite} — pass rate {run['pass_rate']:.2f} "
+                    f"({passed}/{len(run['results'])}) "
+                    f"provider={provider or 'chain'} run={run['run_id']}")
+
+            if sub == "list":
+                suites = sorted(p.stem for p in evals.SUITES_DIR.glob("*.json"))
+                return self._finish_slash_command(
+                    text, "Suites: " + (", ".join(suites) if suites else "(none)"))
+
+            if sub == "traces":
+                try:
+                    n = int(parts[1]) if len(parts) > 1 else 20
+                except ValueError:
+                    n = 20
+                rows = evals.list_traces(n)
+                if not rows:
+                    return self._finish_slash_command(text, "No traces.")
+                return self._finish_slash_command(text, "\n".join(
+                    f"[{r['id']}] {r['provider']} parse={r['parse_ok']} "
+                    f"empty={r['empty_reply']} — {r['request']}" for r in rows))
+
+            if sub == "label":
+                if len(parts) < 3:
+                    return self._finish_slash_command(text, "Usage: /eval label <trace_id> <good|bad>")
+                return self._finish_slash_command(
+                    text, evals.label_trace(parts[1], "user_feedback", parts[2]))
+
+            if sub == "diff":
+                if len(parts) < 3:
+                    return self._finish_slash_command(text, "Usage: /eval diff <run_a> <run_b>")
+                return self._finish_slash_command(text, evals.diff_runs(parts[1], parts[2]))
+
+            return self._finish_slash_command(
+                text,
+                "Usage: /eval run <suite> [<provider>] | list | traces [n] | "
+                "label <trace_id> <good|bad> | diff <run_a> <run_b>")
 
         if cmd == "/ig":
             import gateway
