@@ -4,7 +4,10 @@ AgentBot GUI — PySide6 port.
 Phase 4a: slash commands, settings overlay, memory reset — faithful ports of
 the same features in agent_gui.py. Phase 4b: per-turn collapsible activity
 chips showing the step log. Phase 5a: system tray, F9 hotkey (stub) and
-scheduler notifications.
+scheduler notifications. Phase 5b: voice (F9 push-to-talk STT, auto-speak TTS)
+and a scheduler queue so overlapping turns no longer race. Phase 5c: TTS
+warmup at startup, proactive file-watcher callbacks, and file attachments
+(paperclip picker, chip strip, contents inlined into the agent turn).
 
 This file will eventually replace agent_gui.py. Until the port is complete,
 agent_gui.py remains the live GUI and this file is only run manually.
@@ -399,10 +402,11 @@ class AgentWorker(QObject):
     completed = Signal(object)   # (final_message, step_log)
     failed = Signal(str)         # error text
 
-    def __init__(self, user_input, conversation_history):
+    def __init__(self, user_input, conversation_history, attached_paths=None):
         super().__init__()
         self._user_input = user_input
         self._history = conversation_history
+        self._attached_paths = list(attached_paths or [])
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -411,9 +415,14 @@ class AgentWorker(QObject):
         log_capture = io.StringIO()
         try:
             agent = get_agent()
-            self._history.append(f"User: {self._user_input}")
+            effective_input = self._user_input
+            if self._attached_paths:
+                effective_input = self._build_attachment_input()
+            suffix = (f" [attached: {len(self._attached_paths)} file(s)]"
+                      if self._attached_paths else "")
+            self._history.append(f"User: {self._user_input}{suffix}")
             with contextlib.redirect_stdout(log_capture):
-                step_log = agent.run_agent_turn(self._user_input, self._history)
+                step_log = agent.run_agent_turn(effective_input, self._history)
         except Exception as e:
             self.failed.emit(f"⚠️ Agent error: {e}")
             return
@@ -435,6 +444,17 @@ class AgentWorker(QObject):
             pass
 
         self.completed.emit((message, step_log))
+
+    def _build_attachment_input(self):
+        """Prefix the user message with file contents, exactly as
+        agent_gui.run_turn_background does."""
+        try:
+            import file_tools
+            block = file_tools.build_attachment_block(self._attached_paths)
+            question = self._user_input or "(none — analyze the attached files)"
+            return f"{block}\n\nUser question: {question}"
+        except Exception as e:
+            return f"[attachment read failed: {e}]\n\n{self._user_input}"
 
 
 def _icon_button(glyph: str, tooltip: str = "", size: int = 30) -> QPushButton:
@@ -1054,6 +1074,7 @@ class AgentWindow(QMainWindow):
         self._hotkey_installed = False
         self._recording = False
         self._scheduled_queue = []
+        self.attachments = []
         self._command_done.connect(self._on_command_done)
         self._scheduled_triggered.connect(self._on_scheduled_trigger)
         self._reminder_result.connect(self._reminder_done)
@@ -1183,6 +1204,16 @@ class AgentWindow(QMainWindow):
         holder_row.addWidget(self._input_column, 0)
         holder_row.addStretch(1)
 
+        # Attachment chips sit above the pill, inside the same column.
+        self.attach_strip = QWidget()
+        self.attach_strip.setStyleSheet("background: transparent;")
+        self.attach_strip_row = QHBoxLayout(self.attach_strip)
+        self.attach_strip_row.setContentsMargins(4, 0, 4, 6)
+        self.attach_strip_row.setSpacing(6)
+        self.attach_strip_row.addStretch(1)
+        self.attach_strip.setVisible(False)
+        self._input_col_layout.addWidget(self.attach_strip)
+
         self.input_pill = QFrame()
         self.input_pill.setObjectName("inputPill")
         self.input_pill.setStyleSheet(
@@ -1212,6 +1243,24 @@ class AgentWindow(QMainWindow):
         self.input_field.installEventFilter(self)
         pill_row.addWidget(self.input_field, 1)
 
+        self.attach_btn = QPushButton("\U0001f4ce")
+        self.attach_btn.setToolTip("Attach files")
+        self.attach_btn.setFixedSize(30, 30)
+        self.attach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.attach_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent; border: none; border-radius: 8px;
+                color: {COLOR_TEXT_MID}; font-size: 14px;
+            }}
+            QPushButton:hover {{
+                background: {COLOR_HOVER}; color: {COLOR_TEXT_HI};
+            }}
+            """
+        )
+        self.attach_btn.clicked.connect(self._pick_files)
+        pill_row.addWidget(self.attach_btn, 0, Qt.AlignmentFlag.AlignBottom)
+
         self.send_btn = QPushButton("\u2191")
         self.send_btn.setToolTip("Send")
         self.send_btn.setFixedSize(32, 32)
@@ -1226,7 +1275,7 @@ class AgentWindow(QMainWindow):
         return outer
 
     def _refresh_send_btn(self):
-        has_text = bool(self._get_input_text())
+        has_text = bool(self._get_input_text()) or bool(self.attachments)
         enabled = has_text and not self._processing
         self.send_btn.setEnabled(enabled)
         self.send_btn.setStyleSheet(
@@ -1266,6 +1315,101 @@ class AgentWindow(QMainWindow):
         if abs(self.input_field.height() - height) > 2:
             self.input_field.setFixedHeight(height)
 
+    # ------------------------------------------------------------------
+    # Attachments — faithful port of agent_gui._pick_files /
+    # _render_attachments / _remove_attachment
+    # ------------------------------------------------------------------
+    def _pick_files(self):
+        from PySide6.QtWidgets import QFileDialog
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Attach files", "",
+            "All supported (*.txt *.md *.py *.js *.ts *.json *.csv *.log "
+            "*.html *.xml *.yaml *.yml *.ini *.cfg *.sh *.bat *.ps1 *.sql "
+            "*.pdf *.docx *.xlsx *.png *.jpg *.jpeg *.bmp *.gif *.webp);;"
+            "Documents (*.pdf *.docx *.xlsx);;"
+            "Text / code (*.txt *.md *.py *.js *.ts *.json *.csv *.log "
+            "*.html *.xml *.yaml *.yml);;"
+            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;"
+            "All files (*.*)",
+        )
+        if not paths:
+            return
+        for p in paths:
+            if p not in self.attachments:
+                self.attachments.append(p)
+        self._render_attachments()
+
+    def _render_attachments(self):
+        # Rebuild the chip strip. Unlike the old GUI we do not draw thumbnails
+        # (Phase 4a keeps the input area simple); the name + remove button is
+        # enough and avoids a PIL dependency in the GUI.
+        while self.attach_strip_row.count() > 1:
+            item = self.attach_strip_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                # Reparent off the strip before deleting: deleteLater() is
+                # deferred, and a widget that is still a child of attach_strip
+                # keeps showing up (and rendering) until the event loop runs.
+                w.setParent(None)
+                w.deleteLater()
+
+        if not self.attachments:
+            self.attach_strip.setVisible(False)
+            self._refresh_send_btn()
+            return
+
+        for i, path in enumerate(self.attachments):
+            chip = QFrame()
+            chip.setObjectName("attachChip")
+            chip.setStyleSheet(
+                f"""
+                QFrame#attachChip {{
+                    background: {COLOR_HOVER};
+                    border-radius: 14px;
+                }}
+                """
+            )
+            ch = QHBoxLayout(chip)
+            ch.setContentsMargins(10, 3, 4, 3)
+            ch.setSpacing(4)
+
+            name = os.path.basename(path)
+            if len(name) > 32:
+                name = name[:29] + "…"
+            label = QLabel(f"\U0001f4ce {name}")
+            label.setToolTip(path)
+            label.setStyleSheet(
+                f'background: transparent; color: {COLOR_TEXT_MID}; '
+                f'font-family: "{FONT_UI}"; font-size: 11px;'
+            )
+            ch.addWidget(label)
+
+            remove = QPushButton("\u2715")
+            remove.setFixedSize(20, 20)
+            remove.setCursor(Qt.CursorShape.PointingHandCursor)
+            remove.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: transparent; border: none; border-radius: 10px;
+                    color: {COLOR_TEXT_LOW}; font-size: 11px;
+                }}
+                QPushButton:hover {{ background: {COLOR_SELECTED}; color: {COLOR_TEXT_HI}; }}
+                """
+            )
+            remove.clicked.connect(lambda _=False, idx=i: self._remove_attachment(idx))
+            ch.addWidget(remove)
+
+            self.attach_strip_row.insertWidget(self.attach_strip_row.count() - 1, chip)
+
+        self.attach_strip.setVisible(True)
+        self._refresh_send_btn()
+
+    def _remove_attachment(self, idx):
+        # Only drops from the list — the file on disk is left alone.
+        if 0 <= idx < len(self.attachments):
+            self.attachments.pop(idx)
+        self._render_attachments()
+
     def eventFilter(self, obj, event):
         # Enter sends, Shift+Enter inserts a newline.
         if obj is self.input_field and event.type() == QKeyEvent.Type.KeyPress:
@@ -1289,26 +1433,38 @@ class AgentWindow(QMainWindow):
         if self._processing:
             return
         text = self._get_input_text()
-        if not text:
+        attached = list(self.attachments)
+        if not text and not attached:
             return
 
-        self._clear_input()
-
-        if text.startswith("/"):
+        # Slash commands bypass attachments (match agent_gui.send).
+        if text.startswith("/") and not attached:
+            self._clear_input()
             self._handle_slash_command(text)
             return
 
-        self.chat.add_message(UserMessage(text))
-        self._start_agent_turn(text)
+        self._clear_input()
+        self.attachments.clear()
+        self._render_attachments()
 
-    def _start_agent_turn(self, text):
+        # Show the attachment names in the user bubble, as the old GUI does.
+        if attached:
+            names = ", ".join(os.path.basename(p) for p in attached)
+            display = f"\U0001f4ce {names}\n{text}" if text else f"\U0001f4ce {names}"
+        else:
+            display = text
+        self.chat.add_message(UserMessage(display))
+        self._start_agent_turn(text, attached)
+
+    def _start_agent_turn(self, text, attached_paths=None):
         """Kick off a background agent turn for `text`."""
         self._processing = True
         self.input_field.setEnabled(False)
         self._refresh_send_btn()
-        self.set_status("Thinking…", busy=True)
+        self.set_status("Reading attachments…" if attached_paths else "Thinking…",
+                        busy=True)
 
-        self._worker = AgentWorker(text, self.conversation_history)
+        self._worker = AgentWorker(text, self.conversation_history, attached_paths)
         self._worker.completed.connect(self._on_turn_completed)
         self._worker.failed.connect(self._on_turn_failed)
         self._worker.start()
@@ -2094,11 +2250,12 @@ class AgentWindow(QMainWindow):
     # Background services — tray, hotkey, scheduler
     # ------------------------------------------------------------------
     def start_services(self):
-        """Wire tray, hotkey and scheduler. Call after the window is shown.
+        """Wire tray, hotkey, scheduler, watchers and TTS warmup. Call after
+        the window is shown.
 
-        The scheduler's callback fires on its own daemon thread, so it routes
-        through a Qt signal rather than touching widgets directly. The tray
-        callbacks likewise arrive off the GUI thread.
+        The scheduler and watcher callbacks fire on their own daemon threads,
+        so they route through a Qt signal rather than touching widgets. The
+        tray callbacks likewise arrive off the GUI thread.
         """
         if scheduler is not None:
             try:
@@ -2108,11 +2265,27 @@ class AgentWindow(QMainWindow):
         else:
             print("[scheduler] module unavailable; skipped")
 
+        # Proactive watchers reuse the same handler as the scheduler, exactly
+        # as the old GUI does (agent_gui.py:459).
+        try:
+            get_agent().register_watcher_callback(self._scheduled_triggered.emit)
+        except Exception as e:
+            print(f"[watcher] registration failed: {e}")
+
         self._setup_global_hotkey()
 
         # Delay the tray like the old GUI (root.after(800, _start_tray)):
         # pystray needs the Qt event loop to be up and running first.
         QTimer.singleShot(800, self._start_tray)
+
+        # Warm up TTS so the first spoken reply is instant. warmup() starts its
+        # own daemon thread and returns immediately, so this never blocks the
+        # window; failures are logged, not fatal.
+        try:
+            get_voice_output().warmup()
+            print("[tts] warmup requested")
+        except Exception as e:
+            print(f"[tts] warmup skipped: {e}")
 
     # -- tray -----------------------------------------------------------
     def _start_tray(self):
@@ -2269,15 +2442,20 @@ class AgentWindow(QMainWindow):
 
     # -- scheduler notifications ----------------------------------------
     def _on_scheduled_trigger(self, request_text):
-        """Slot for _scheduled_triggered. Runs on the GUI thread."""
+        """Slot for _scheduled_triggered. Runs on the GUI thread.
+
+        Handles both scheduler fires and proactive watcher events; watchers
+        send "FILE WATCHER: <event> -> <path>" strings.
+        """
         if request_text.startswith("REMINDER:"):
             reminder_text = request_text[len("REMINDER:"):].strip()
             self._fire_reminder_direct(reminder_text)
             return
-        # A scheduled task runs a full agent turn. If one is already running,
-        # queue it (the old GUI overlapped two racing turns instead — that is
-        # the bug this fixes).
-        self.chat.add_message(AssistantMessage(f"[scheduled] {request_text}"))
+        # A scheduled task or watcher event runs a full agent turn. If one is
+        # already running, queue it (the old GUI overlapped two racing turns
+        # instead — that is the bug this fixes).
+        label = "[watcher]" if request_text.startswith("FILE WATCHER:") else "[scheduled]"
+        self.chat.add_message(AssistantMessage(f"{label} {request_text}"))
         if self._processing:
             self._queue_scheduled(request_text)
         else:
