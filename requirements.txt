@@ -4,6 +4,7 @@
 
 # --- GUI ---
 customtkinter
+PySide6
 pillow
 pystray
 keyboard
