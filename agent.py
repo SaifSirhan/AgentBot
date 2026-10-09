@@ -1935,6 +1935,142 @@ def set_reminder_at(input_str):
         return f"ERROR: {e}"
 
 
+def _nl_to_cron(phrase):
+    """Translate a natural-language recurrence phrase into a 5-field cron
+    expression. Falls back to the LLM for anything the regexes don't cover.
+    Returns (cron_expr, description) or (None, error_message)."""
+    import re
+    p = (phrase or "").strip().lower()
+    if not p:
+        return None, "ERROR: empty schedule phrase."
+
+    # Already a raw 5-field cron expression?
+    if len(p.split()) == 5 and scheduler.validate_cron(p):
+        return p, scheduler.describe_cron(p)
+
+    DAYS = {
+        "sunday": 0, "sun": 0, "monday": 1, "mon": 1, "tuesday": 2, "tue": 2,
+        "wednesday": 3, "wed": 3, "thursday": 4, "thu": 4, "friday": 5,
+        "fri": 5, "saturday": 6, "sat": 6,
+    }
+
+    def _time_parts(s):
+        m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", s)
+        if not m:
+            return None
+        hh = int(m.group(1))
+        mm = int(m.group(2) or 0)
+        ampm = m.group(3)
+        if ampm == "pm" and hh < 12:
+            hh += 12
+        elif ampm == "am" and hh == 12:
+            hh = 0
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            return None
+        return hh, mm
+
+    # "every N minutes" / "every N hours"
+    m = re.match(r"every\s+(\d+)\s*(min|minute|minutes)\b", p)
+    if m:
+        n = max(1, min(59, int(m.group(1))))
+        return f"*/{n} * * * *", f"every {n} minutes"
+    m = re.match(r"every\s+(\d+)\s*(hour|hours|hr|hrs)\b", p)
+    if m:
+        n = max(1, min(23, int(m.group(1))))
+        return f"0 */{n} * * *", f"every {n} hours"
+
+    # "every day/night/morning/evening at H[:MM]" and plain "every day at ..."
+    m = re.search(r"every\s+(?:day|night|morning|evening|afternoon)\s+at\s+(.+)", p)
+    if m:
+        tp = _time_parts(m.group(1))
+        if tp:
+            return f"{tp[1]} {tp[0]} * * *", f"daily at {tp[0]:02d}:{tp[1]:02d}"
+    m = re.match(r"daily\s+at\s+(.+)", p)
+    if m:
+        tp = _time_parts(m.group(1))
+        if tp:
+            return f"{tp[1]} {tp[0]} * * *", f"daily at {tp[0]:02d}:{tp[1]:02d}"
+
+    # "every <weekday> at H[:MM]"
+    m = re.search(r"every\s+([a-z]+)\s+at\s+(.+)", p)
+    if m and m.group(1) in DAYS:
+        tp = _time_parts(m.group(2))
+        if tp:
+            d = DAYS[m.group(1)]
+            return f"{tp[1]} {tp[0]} * * {d}", f"weekly on {m.group(1)} at {tp[0]:02d}:{tp[1]:02d}"
+
+    # "every hour"
+    if re.match(r"every\s+hour\b", p):
+        return "0 * * * *", "every hour"
+
+    # LLM fallback
+    prompt = (
+        "Convert this schedule request into a single standard 5-field cron "
+        "expression (minute hour day-of-month month day-of-week).\n"
+        "Reply with ONLY the cron expression, nothing else.\n"
+        f"Request: {phrase}"
+    )
+    try:
+        raw = _call_llm(prompt, force_json=False, max_tokens=32)
+    except Exception as e:
+        return None, f"ERROR: could not translate schedule: {e}"
+    cand = (raw or "").strip().splitlines()[0].strip() if raw else ""
+    cand = cand.strip("`").strip()
+    if scheduler.validate_cron(cand):
+        return cand, scheduler.describe_cron(cand)
+    return None, (f"ERROR: couldn't parse the schedule '{phrase}'. "
+                  "Try 'every day at 8am' or a 5-field cron like '*/15 * * * *'.")
+
+
+def schedule_task(input_str):
+    """Create, list, or remove a recurring job. Input: 'when|what' | 'list' |
+    'remove|<n>'."""
+    try:
+        raw = (input_str or "").strip()
+        if not raw:
+            return "ERROR: schedule_task needs 'when|what' (or 'list')."
+        low = raw.lower()
+
+        if low == "list":
+            jobs = scheduler.load_cron_jobs()
+            if not jobs:
+                return "No recurring jobs."
+            lines = ["Recurring jobs:"]
+            for i, j in enumerate(jobs):
+                desc = scheduler.describe_cron(j["cron"]) or j["cron"]
+                lines.append(f"  [{i}] {desc} — {j['request']}  (cron: {j['cron']})")
+            return "\n".join(lines)
+
+        if low.startswith("remove"):
+            parts = raw.split("|", 1) if "|" in raw else raw.split(None, 1)
+            if len(parts) < 2 or not parts[1].strip().isdigit():
+                return "ERROR: format is 'remove|<n>'. Use 'list' to see numbers."
+            idx = int(parts[1].strip())
+            jobs = scheduler.load_cron_jobs()
+            if idx < 0 or idx >= len(jobs):
+                return f"ERROR: no job at index {idx}."
+            removed = jobs[idx]
+            scheduler.remove_cron_job(idx)
+            return f"Removed recurring job: {removed['cron']} — {removed['request']}"
+
+        if "|" not in raw:
+            return "ERROR: schedule_task needs 'when|what', e.g. 'every day at 8am|weather'."
+        when, what = raw.split("|", 1)
+        when, what = when.strip(), what.strip()
+        if not what:
+            return "ERROR: schedule_task needs something to do after '|'."
+
+        cron_expr, desc = _nl_to_cron(when)
+        if cron_expr is None:
+            return desc
+        ok, info = scheduler.add_cron_job(cron_expr, what, label=desc)
+        if not ok:
+            return f"ERROR: {info}"
+        return f"Scheduled recurring job [{info}]: {desc} — {what}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
 def list_reminders():
     try:
         lines = []
@@ -3767,6 +3903,18 @@ WINDOWS & APPS
 REMINDERS & MEMORY
   set_reminder(input) — "duration|text" such as 30s, 5min, 2hr, 1day.
   set_reminder_at(input) — "HH:MM|text".
+  schedule_task(input) — set up a RECURRING job from a natural-language phrase.
+    Use this (not set_reminder) when the user says "every", "each", "daily",
+    "weekly", "every morning", or otherwise wants something to happen
+    repeatedly. A one-shot "in 10 minutes" is set_reminder, not this.
+    Format: "when|what", where "when" is natural language ("every day at 8am",
+    "every 30 minutes", "every monday at 9:00") and "what" is the request to
+    run each time. Examples:
+      "every day at 8am|give me the weather and top news"
+      "every 30 minutes|check system status"
+      "every monday at 9:00|summarize my unread email"
+    Also accepts a raw 5-field cron: "*/15 * * * *|check disk space".
+    Use "list" alone to list recurring jobs, and "remove|<n>" to delete one.
   list_reminders() — list pending reminders and daily tasks.
   remember(input) — save a lasting personal fact; never secrets.
   forget(input) — remove a lasting personal fact.
@@ -3915,7 +4063,7 @@ VALID_TOOLS = {
     "open_app", "open_website", "run_command", "make_folder",
     "find_and_open_folder", "write_file", "read_file",
     "set_reminder", "remember", "forget", "read_screen",
-    "clipboard_read", "clipboard_write", "set_volume", "media_control",
+    "schedule_task",    "clipboard_read", "clipboard_write", "set_volume", "media_control",
     "system_status", "lock_pc", "sleep_pc", "shutdown_pc", "restart_pc",
     "save_screenshot", "todo", "list_windows", "focus_window", "notify",
     "beep", "done", "set_reminder_at", "list_reminders", "list_brains",
@@ -4338,6 +4486,7 @@ def execute_tool(action):
     elif tool == 'play_on_youtube':        return play_on_youtube(inp)
     elif tool == 'set_reminder':           return set_reminder(inp)
     elif tool == 'set_reminder_at':        return set_reminder_at(inp)
+    elif tool == 'schedule_task':          return schedule_task(inp)
     elif tool == 'list_reminders':         return list_reminders()
     elif tool == 'list_brains':            return list_brains()
     elif tool == 'remember':               return remember_fact(inp)
