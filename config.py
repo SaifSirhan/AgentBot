@@ -53,6 +53,9 @@ DEFAULTS = {
 "TTS_SPEED": "1.0",
 "TTS_LANG": "a",
 "TTS_MAX_CHARS": "2000",
+# Phase 6c — GUI motion (pulses, fades, transitions). When false, every
+# animated element renders in its final state immediately.
+"ANIMATIONS_ENABLED": True,
 }
 
 
