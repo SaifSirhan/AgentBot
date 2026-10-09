@@ -7,7 +7,11 @@ chips showing the step log. Phase 5a: system tray, F9 hotkey (stub) and
 scheduler notifications. Phase 5b: voice (F9 push-to-talk STT, auto-speak TTS)
 and a scheduler queue so overlapping turns no longer race. Phase 5c: TTS
 warmup at startup, proactive file-watcher callbacks, and file attachments
-(paperclip picker, chip strip, contents inlined into the agent turn).
+(paperclip picker, chip strip, contents inlined into the agent turn). Phase
+5d: wired the previously-dead sidebar/header buttons (Tasks, Index docs,
+Activity log, Copy all, Export chat, New chat), added a visible mic button
+(click-to-toggle, in sync with F9), and replaced Unicode glyphs with SVG
+icons rendered via QtSvg.
 
 This file will eventually replace agent_gui.py. Until the port is complete,
 agent_gui.py remains the live GUI and this file is only run manually.
@@ -21,6 +25,7 @@ are plain-Python and safe to import.
 """
 from __future__ import annotations
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -38,14 +43,24 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QGuiApplication, QKeyEvent
+from PySide6.QtGui import (
+    QGuiApplication,
+    QIcon,
+    QKeyEvent,
+    QPainter,
+    QPixmap,
+)
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -115,6 +130,67 @@ INPUT_LINE_H = 22     # single-line height for the input field
 INPUT_MAX_LINES = 6   # auto-grow ceiling (~150px)
 
 SCHEDULED_QUEUE_CAP = 5   # pending scheduled triggers before oldest is dropped
+
+# ----------------------------------------------------------------------
+# SVG icon set (Phase 5d)
+# ----------------------------------------------------------------------
+# Stroke-based 24x24 line icons drawn as inline SVG strings and rasterised at
+# runtime with QtSvg. No new dependency (PySide6 ships QtSvg) and no PIL.
+# Each SVG uses stroke="currentColor" so the caller can tint it; `_svg_pixmap`
+# substitutes the colour and renders at the requested pixel size.
+_ICON_SVGS = {
+    # sidebar / nav
+    "settings": '<circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3'
+                'M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2.5 12h3M18.5 12h3'
+                'M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
+    "tasks": '<path d="M4 6.5l1.6 1.6L8.5 5M4 12.5l1.6 1.6L8.5 11'
+             'M4 18.5l1.6 1.6L8.5 17M11 7h9M11 13h9M11 19h9"/>',
+    "book": '<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v15H5.5A1.5 1.5 0 0 0 4 20.5z'
+            'M20 5.5A1.5 1.5 0 0 0 18.5 4H13v15h5.5A1.5 1.5 0 0 1 20 20.5z"/>',
+    "pulse": '<path d="M3 12h4l2.5-6 5 12 2.5-6h4"/>',
+    "clipboard": '<rect x="6" y="4.5" width="12" height="15" rx="2"/>'
+                 '<path d="M9 4.5a3 3 0 0 1 6 0M9.5 11h5M9.5 14.5h5"/>',
+    "export": '<path d="M12 15V4M8.5 7.5L12 4l3.5 3.5'
+              'M5 14v4.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V14"/>',
+    "chat": '<path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7'
+            'A2.5 2.5 0 0 1 17.5 16H10l-4.5 4v-4A2.5 2.5 0 0 1 4 13.5z"/>',
+    "plus": '<path d="M12 5v14M5 12h14"/>',
+    # header
+    "menu": '<path d="M4 7h16M4 12h16M4 17h16"/>',
+    "newchat": '<path d="M20 11.5A8 8 0 1 1 12 3.5"/>'
+               '<path d="M20 4l-7.5 7.5"/>',
+    "back": '<path d="M15 5l-7 7 7 7"/>',
+    # input row
+    "clip": '<path d="M8 12.5l6.5-6.5a3 3 0 0 1 4.2 4.2l-8 8a5 5 0 0 1-7-7'
+            'l8-8"/>',
+    "send": '<path d="M12 19V6M6.5 11.5L12 6l5.5 5.5"/>',
+    "mic": '<rect x="9" y="3" width="6" height="11" rx="3"/>'
+           '<path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21M9 21h6"/>',
+}
+
+
+def _svg_pixmap(name: str, size: int, color: str) -> QPixmap:
+    """Rasterise a named line icon at `size` px in `color`."""
+    body = _ICON_SVGS[name]
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+        f'fill="none" stroke="{color}" stroke-width="1.9" '
+        f'stroke-linecap="round" stroke-linejoin="round">{body}</svg>'
+    )
+    renderer = QSvgRenderer(svg.encode("utf-8"))
+    dpr = QApplication.instance().devicePixelRatio() if QApplication.instance() else 1.0
+    pm = QPixmap(int(size * dpr), int(size * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    renderer.render(painter)
+    painter.end()
+    return pm
+
+
+def _svg_icon(name: str, size: int, color: str) -> QIcon:
+    return QIcon(_svg_pixmap(name, size, color))
+
 
 _CODE_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+.-]*)\n?(.*?)```", re.DOTALL)
 
@@ -457,34 +533,55 @@ class AgentWorker(QObject):
             return f"[attachment read failed: {e}]\n\n{self._user_input}"
 
 
-def _icon_button(glyph: str, tooltip: str = "", size: int = 30) -> QPushButton:
-    btn = QPushButton(glyph)
+def _icon_button(icon: str, tooltip: str = "", size: int = 30,
+                 icon_size: int = 18) -> QPushButton:
+    """Flat icon button drawn from the SVG set (Phase 5d).
+
+    `icon` is a name in _ICON_SVGS. The pixmap is tinted by hand on hover so
+    the glyph lightens along with the background (Phase 2 hover rule).
+    """
+    btn = QPushButton()
     btn.setToolTip(tooltip)
     btn.setFixedSize(size + 2, size)
+    btn.setIconSize(QSize(icon_size, icon_size))
+    btn.setIcon(_svg_icon(icon, icon_size, COLOR_TEXT_MID))
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     btn.setStyleSheet(
         f"""
         QPushButton {{
             background: transparent;
             border: none;
-            color: {COLOR_TEXT_MID};
-            font-family: "{FONT_UI}";
-            font-size: 14px;
         }}
         QPushButton:hover {{
             background: {COLOR_HOVER};
             border-radius: 8px;
-            color: {COLOR_TEXT_HI};
         }}
         QPushButton:pressed {{ background: {COLOR_SELECTED}; }}
         """
     )
+    # Swap the tint on hover: QPushButton can't recolour a QIcon via QSS.
+    _orig_enter = btn.enterEvent
+    _orig_leave = btn.leaveEvent
+
+    def _enter(e):
+        btn.setIcon(_svg_icon(icon, icon_size, COLOR_TEXT_HI))
+        _orig_enter(e)
+
+    def _leave(e):
+        btn.setIcon(_svg_icon(icon, icon_size, COLOR_TEXT_MID))
+        _orig_leave(e)
+
+    btn.enterEvent = _enter
+    btn.leaveEvent = _leave
     return btn
 
 
-def _nav_button(glyph: str, label: str, active: bool = False) -> QPushButton:
-    btn = QPushButton(f"  {glyph}   {label}")
+def _nav_button(icon: str, label: str, active: bool = False) -> QPushButton:
+    """Sidebar nav row: SVG icon + text label, left aligned with hover."""
+    btn = QPushButton(f"   {label}")
     btn.setFixedHeight(34)
+    btn.setIcon(_svg_icon(icon, 16, COLOR_ACCENT if active else COLOR_TEXT_MID))
+    btn.setIconSize(QSize(16, 16))
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     btn.setStyleSheet(
         f"""
@@ -496,11 +593,25 @@ def _nav_button(glyph: str, label: str, active: bool = False) -> QPushButton:
             font-family: "{FONT_UI}";
             font-size: 12px;
             text-align: left;
-            padding-left: 8px;
+            padding-left: 10px;
         }}
         QPushButton:hover {{ background: {COLOR_HOVER}; }}
         """
     )
+    if not active:
+        _orig_enter = btn.enterEvent
+        _orig_leave = btn.leaveEvent
+
+        def _enter(e):
+            btn.setIcon(_svg_icon(icon, 16, COLOR_TEXT_HI))
+            _orig_enter(e)
+
+        def _leave(e):
+            btn.setIcon(_svg_icon(icon, 16, COLOR_TEXT_MID))
+            _orig_leave(e)
+
+        btn.enterEvent = _enter
+        btn.leaveEvent = _leave
     return btn
 
 
@@ -803,6 +914,7 @@ class UserMessage(MessageBase):
 
     def __init__(self, text: str):
         super().__init__()
+        self.raw_text = text
         holder = QFrame()
         holder.setObjectName("userMsg")
         holder.setStyleSheet(
@@ -852,6 +964,7 @@ class AssistantMessage(MessageBase):
 
     def __init__(self, text: str, step_log=None):
         super().__init__()
+        self.raw_text = text
         self._render(text)
 
         summary = activity_summary(step_log)
@@ -905,6 +1018,7 @@ class ChatView(QScrollArea):
         self._layout.setContentsMargins(0, 24, 0, 24)
         self._layout.setSpacing(MSG_SPACING)
         self._layout.addStretch(1)
+        self.chat_log = []  # (kind, text) record for Copy all / Export
 
         self.setWidget(self._body)
 
@@ -941,6 +1055,13 @@ class ChatView(QScrollArea):
         # Insert before the trailing stretch so messages stay top-aligned.
         self._layout.insertWidget(self._layout.count() - 1, widget)
 
+        # Record for Copy all / Export chat (Phase 5d), mirroring the old GUI's
+        # bubble_log. kind is "user" or "agent".
+        raw = getattr(widget, "raw_text", None)
+        if raw is not None:
+            kind = "user" if isinstance(widget, UserMessage) else "agent"
+            self.chat_log.append((kind, raw))
+
         if fade:
             effect = QGraphicsOpacityEffect(widget)
             widget.setGraphicsEffect(effect)
@@ -956,6 +1077,16 @@ class ChatView(QScrollArea):
         if was_pinned:
             self._pinned = True
             QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def clear(self):
+        """Remove every message widget and reset the recorded log."""
+        while self._layout.count() > 1:
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self.chat_log.clear()
 
 
 # ----------------------------------------------------------------------
@@ -984,8 +1115,10 @@ class Sidebar(QFrame):
         title.setFixedHeight(44)
         layout.addWidget(title)
 
-        self.new_chat = QPushButton("  +   New chat")
+        self.new_chat = QPushButton("   New chat")
         self.new_chat.setFixedHeight(36)
+        self.new_chat.setIcon(_svg_icon("plus", 16, "#06281a"))
+        self.new_chat.setIconSize(QSize(16, 16))
         self.new_chat.setCursor(Qt.CursorShape.PointingHandCursor)
         self.new_chat.setStyleSheet(
             f"""
@@ -1017,7 +1150,8 @@ class Sidebar(QFrame):
         nav_layout = QVBoxLayout(nav)
         nav_layout.setContentsMargins(10, 0, 10, 0)
         nav_layout.setSpacing(2)
-        nav_layout.addWidget(_nav_button("\U0001f4ac", "Current chat", active=True))
+        self.current_chat_btn = _nav_button("chat", "Current chat", active=True)
+        nav_layout.addWidget(self.current_chat_btn)
         layout.addWidget(nav)
 
         layout.addStretch(1)
@@ -1033,19 +1167,20 @@ class Sidebar(QFrame):
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(10, 0, 10, 10)
         bottom_layout.setSpacing(2)
-        self.settings_btn = None
-        for glyph, label in (
-            ("\u2699", "Settings"),
-            ("\U0001f4c5", "Tasks"),
-            ("\U0001f4da", "Index docs"),
-            ("\U0001f50d", "Activity log"),
-            ("\U0001f4cb", "Copy all"),
-            ("\U0001f4e4", "Export chat"),
+        # Named buttons so AgentWindow can wire each to its handler (Phase 5d).
+        self.nav_buttons = {}
+        for icon, label in (
+            ("settings", "Settings"),
+            ("tasks", "Tasks"),
+            ("book", "Index docs"),
+            ("pulse", "Activity log"),
+            ("clipboard", "Copy all"),
+            ("export", "Export chat"),
         ):
-            b = _nav_button(glyph, label)
-            if label == "Settings":
-                self.settings_btn = b
+            b = _nav_button(icon, label)
+            self.nav_buttons[label] = b
             bottom_layout.addWidget(b)
+        self.settings_btn = self.nav_buttons["Settings"]
         layout.addWidget(bottom)
 
 
@@ -1073,8 +1208,13 @@ class AgentWindow(QMainWindow):
         self._tray_icon = None
         self._hotkey_installed = False
         self._recording = False
+        self._mic_state = "idle"
+        self._mic_pulse = None
         self._scheduled_queue = []
         self.attachments = []
+        self._log_panel = None
+        self._main_col_layout = None
+        self._last_step_log = None
         self._command_done.connect(self._on_command_done)
         self._scheduled_triggered.connect(self._on_scheduled_trigger)
         self._reminder_result.connect(self._reminder_done)
@@ -1094,12 +1234,28 @@ class AgentWindow(QMainWindow):
         root.setSpacing(0)
 
         self.sidebar = Sidebar()
-        if self.sidebar.settings_btn is not None:
-            self.sidebar.settings_btn.clicked.connect(self.open_settings)
+        self._wire_sidebar()
         root.addWidget(self.sidebar)
 
         root.addWidget(self._build_main_column(), 1)
         self.setCentralWidget(central)
+
+    def _wire_sidebar(self):
+        """Connect the sidebar nav + New chat buttons (Phase 5d).
+
+        Each mirrors its handler in agent_gui.py: Settings -> open_settings,
+        Tasks -> schedule dialog, Index docs -> RAG indexing, Activity log ->
+        toggle the in-window log, Copy all -> clipboard, Export chat -> save
+        dialog, New chat -> clear the conversation.
+        """
+        nb = self.sidebar.nav_buttons
+        nb["Settings"].clicked.connect(self.open_settings)
+        nb["Tasks"].clicked.connect(self.open_schedule_dialog)
+        nb["Index docs"].clicked.connect(self.on_index_documents)
+        nb["Activity log"].clicked.connect(self.toggle_log)
+        nb["Copy all"].clicked.connect(self.copy_all)
+        nb["Export chat"].clicked.connect(self.export_conversation)
+        self.sidebar.new_chat.clicked.connect(self.new_chat)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1140,6 +1296,7 @@ class AgentWindow(QMainWindow):
         self.chat = ChatView()
         layout.addWidget(self.chat, 1)
         layout.addWidget(self._build_input_area())
+        self._main_col_layout = layout
         return col
 
     def _build_header(self) -> QWidget:
@@ -1151,7 +1308,7 @@ class AgentWindow(QMainWindow):
         row.setContentsMargins(10, 0, 10, 0)
         row.setSpacing(4)
 
-        self.sidebar_btn = _icon_button("\u2630", "Toggle sidebar")
+        self.sidebar_btn = _icon_button("menu", "Toggle sidebar")
         self.sidebar_btn.clicked.connect(self.toggle_sidebar)
         row.addWidget(self.sidebar_btn)
 
@@ -1174,8 +1331,12 @@ class AgentWindow(QMainWindow):
         row.addWidget(self.status_label)
         row.addStretch(1)
 
-        row.addWidget(_icon_button("\u21bb", "New chat", size=28))
-        gear = _icon_button("\u2699", "Settings")
+        # The old GUI's \u21bb header button is "New chat" (clear_chat), not a
+        # refresh — see agent_gui.py:284 -> _new_chat.
+        self.header_new_chat = _icon_button("newchat", "New chat", size=28)
+        self.header_new_chat.clicked.connect(self.new_chat)
+        row.addWidget(self.header_new_chat)
+        gear = _icon_button("settings", "Settings")
         gear.clicked.connect(self.open_settings)
         row.addWidget(gear)
 
@@ -1243,27 +1404,25 @@ class AgentWindow(QMainWindow):
         self.input_field.installEventFilter(self)
         pill_row.addWidget(self.input_field, 1)
 
-        self.attach_btn = QPushButton("\U0001f4ce")
-        self.attach_btn.setToolTip("Attach files")
-        self.attach_btn.setFixedSize(30, 30)
-        self.attach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.attach_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: transparent; border: none; border-radius: 8px;
-                color: {COLOR_TEXT_MID}; font-size: 14px;
-            }}
-            QPushButton:hover {{
-                background: {COLOR_HOVER}; color: {COLOR_TEXT_HI};
-            }}
-            """
-        )
+        self.attach_btn = _icon_button("clip", "Attach files")
         self.attach_btn.clicked.connect(self._pick_files)
         pill_row.addWidget(self.attach_btn, 0, Qt.AlignmentFlag.AlignBottom)
 
-        self.send_btn = QPushButton("\u2191")
+        # Mic button (Phase 5d): click to START recording, click again to STOP
+        # and transcribe (click-to-toggle). F9 remains press-and-hold and drives
+        # the same state, so the button reflects F9 activity too.
+        self.mic_btn = QPushButton()
+        self.mic_btn.setToolTip("Record voice message")
+        self.mic_btn.setFixedSize(32, 32)
+        self.mic_btn.setIconSize(QSize(18, 18))
+        self.mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mic_btn.clicked.connect(self._toggle_recording)
+        pill_row.addWidget(self.mic_btn, 0, Qt.AlignmentFlag.AlignBottom)
+
+        self.send_btn = QPushButton()
         self.send_btn.setToolTip("Send")
         self.send_btn.setFixedSize(32, 32)
+        self.send_btn.setIconSize(QSize(16, 16))
         self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.send_btn.clicked.connect(self.send)
         pill_row.addWidget(self.send_btn, 0, Qt.AlignmentFlag.AlignBottom)
@@ -1271,6 +1430,7 @@ class AgentWindow(QMainWindow):
         self._input_col_layout.addWidget(self.input_pill)
         col.addWidget(holder)
         self._input_outer = holder
+        self._set_mic_state("idle")   # paint the initial mic look
         self._refresh_send_btn()
         return outer
 
@@ -1278,21 +1438,95 @@ class AgentWindow(QMainWindow):
         has_text = bool(self._get_input_text()) or bool(self.attachments)
         enabled = has_text and not self._processing
         self.send_btn.setEnabled(enabled)
+        self.send_btn.setIcon(
+            _svg_icon("send", 16, COLOR_BG if enabled else COLOR_TEXT_LOW))
         self.send_btn.setStyleSheet(
             f"""
             QPushButton {{
                 background: {COLOR_ACCENT if enabled else COLOR_RAISED};
                 border: none;
                 border-radius: 16px;
-                color: {COLOR_BG if enabled else COLOR_TEXT_LOW};
-                font-size: 16px;
-                font-weight: bold;
             }}
             QPushButton:hover {{
                 background: {COLOR_ACCENT_HOVER if enabled else COLOR_RAISED};
             }}
             """
         )
+
+    # ------------------------------------------------------------------
+    # Mic button — click-to-toggle (Phase 5d)
+    # ------------------------------------------------------------------
+    def _set_mic_state(self, state: str):
+        """Paint the mic button for 'idle' | 'recording' | 'transcribing'.
+
+        F9 (press-and-hold) and the button (click-toggle) both route through
+        _start_recording/_stop_recording, and those call this, so the button
+        always mirrors the true recording state.
+        """
+        self._mic_state = state
+        if state == "recording":
+            self.mic_btn.setIcon(_svg_icon("mic", 18, "#ffffff"))
+            self.mic_btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: {COLOR_DANGER}; border: 1px solid {COLOR_DANGER};
+                    border-radius: 16px;
+                }}
+                QPushButton:hover {{ background: {COLOR_DANGER_HOVER}; }}
+                """
+            )
+            self._start_mic_pulse()
+        elif state == "transcribing":
+            self._stop_mic_pulse()
+            self.mic_btn.setIcon(_svg_icon("mic", 18, COLOR_WARN))
+            self.mic_btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: transparent; border: 1px solid {COLOR_WARN};
+                    border-radius: 16px;
+                }}
+                """
+            )
+        else:  # idle
+            self._stop_mic_pulse()
+            self.mic_btn.setIcon(_svg_icon("mic", 18, COLOR_TEXT_MID))
+            self.mic_btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: transparent; border: none; border-radius: 16px;
+                }}
+                QPushButton:hover {{ background: {COLOR_HOVER}; }}
+                """
+            )
+
+    def _start_mic_pulse(self):
+        """Opacity breathing 0.7 -> 1.0 over ~1.2s, looping, while recording."""
+        self._stop_mic_pulse()
+        effect = QGraphicsOpacityEffect(self.mic_btn)
+        self.mic_btn.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self.mic_btn)
+        anim.setDuration(1200)
+        anim.setStartValue(1.0)
+        anim.setKeyValueAt(0.5, 0.7)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        anim.setLoopCount(-1)  # loop forever until recording stops
+        anim.start()
+        self._mic_pulse = anim
+
+    def _stop_mic_pulse(self):
+        anim = getattr(self, "_mic_pulse", None)
+        if anim is not None:
+            anim.stop()
+            self._mic_pulse = None
+        self.mic_btn.setGraphicsEffect(None)
+
+    def _toggle_recording(self):
+        """Click-to-toggle: start recording, or stop + transcribe if already on."""
+        if self._recording:
+            self._stop_recording()
+        else:
+            self._start_recording()
 
     # ------------------------------------------------------------------
     # Input helpers
@@ -1480,6 +1714,7 @@ class AgentWindow(QMainWindow):
 
     def _on_turn_completed(self, payload):
         message, step_log = payload
+        self._last_step_log = step_log
         self.chat.add_message(AssistantMessage(message, step_log=step_log))
         self._speak_reply(message)
         self._end_turn()
@@ -1922,7 +2157,7 @@ class AgentWindow(QMainWindow):
                           f" border-top-right-radius: 12px;")
         bar_row = QHBoxLayout(bar)
         bar_row.setContentsMargins(10, 0, 10, 0)
-        back = _icon_button("\u2190", "Close settings")
+        back = _icon_button("back", "Close settings")
         back.clicked.connect(self._close_settings)
         bar_row.addWidget(back)
         bar_title = QLabel("Settings")
@@ -2213,6 +2448,296 @@ class AgentWindow(QMainWindow):
             "Memory reset — saved history cleared, chat kept."))
 
     # ------------------------------------------------------------------
+    # Phase 5d — sidebar/header button handlers
+    # (faithful ports of agent_gui.py: _new_chat, _copy_all,
+    #  export_conversation, on_index_documents, toggle_log,
+    #  open_schedule_dialog)
+    # ------------------------------------------------------------------
+    def new_chat(self):
+        """Header \u21bb / sidebar New chat -> clear_chat (agent_gui.py:577)."""
+        reply = QMessageBox.question(
+            self, "Clear chat", "Clear conversation and start fresh?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.conversation_history.clear()
+        try:
+            get_agent().save_conversation_history(self.conversation_history)
+        except Exception:
+            pass
+        self.chat.clear()
+        self.chat.add_message(AssistantMessage("Chat cleared. Fresh start \u2728"))
+
+    def _chat_as_text(self) -> str:
+        """Format the recorded chat like agent_gui._copy_all does."""
+        lines = []
+        for kind, text in self.chat.chat_log:
+            if kind == "user":
+                lines.append(f"You: {text}")
+            elif kind == "agent":
+                lines.append(f"Agent: {text}")
+            else:
+                lines.append(f"— {text}")
+        return "\n\n".join(lines)
+
+    def copy_all(self):
+        """Sidebar Copy all -> clipboard + confirmation bubble (:2269)."""
+        if not self.chat.chat_log:
+            self.chat.add_message(AssistantMessage("Nothing to copy"))
+            return
+        QApplication.clipboard().setText(self._chat_as_text())
+        self.chat.add_message(AssistantMessage("\U0001f4cb Copied to clipboard"))
+
+    def export_conversation(self):
+        """Sidebar Export chat -> save dialog + export_tools (:2301)."""
+        if not self.chat.chat_log:
+            QMessageBox.information(self, "Export", "Nothing to export yet.")
+            return
+
+        default_name = "conversation_" + datetime.datetime.now().strftime(
+            "%Y%m%d_%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export conversation", default_name,
+            "PDF document (*.pdf);;Word document (*.docx);;"
+            "Markdown (*.md);;Text file (*.txt);;All files (*.*)",
+        )
+        if not path:
+            return
+
+        ext = os.path.splitext(path)[1].lower()
+        title = "Agent Conversation"
+        try:
+            import export_tools
+            if ext == ".pdf":
+                export_tools.export_pdf(self.chat.chat_log, path, title)
+            elif ext == ".docx":
+                export_tools.export_docx(self.chat.chat_log, path, title)
+            elif ext == ".md":
+                export_tools.export_md(self.chat.chat_log, path, title)
+            else:
+                export_tools.export_txt(self.chat.chat_log, path, title)
+            QMessageBox.information(self, "Exported", f"Saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+
+    def on_index_documents(self):
+        """Sidebar Index docs -> pick folder, index in the background (:2481)."""
+        folder = QFileDialog.getExistingDirectory(self, "Pick a folder to index")
+        if not folder:
+            return
+        self._run_background_command(
+            f"Index documents: {folder}",
+            f"\U0001f4da Indexing {folder} … this can take a minute.",
+            lambda: self._index_documents_work(folder),
+        )
+
+    def _index_documents_work(self, folder):
+        # Stop any ongoing speech so replies don't overlap (matches old GUI).
+        try:
+            get_voice_output().stop()
+        except Exception:
+            pass
+        from rag_tool import index_documents
+        result = index_documents(folder)
+        return f"✅ Indexing done:\n{result}"
+
+    def toggle_log(self):
+        """Sidebar Activity log -> show/hide a bottom activity-log panel (:2870).
+
+        The old GUI packed/unpacked a tk log box; here we show/hide a Qt panel
+        docked under the chat. The panel mirrors the step log of the last turn.
+        """
+        # Use isHidden() (the widget's own flag) rather than isVisible(): the
+        # latter is False whenever any ancestor is hidden, which would make the
+        # toggle re-show instead of hide.
+        if self._log_panel is not None and not self._log_panel.isHidden():
+            self._log_panel.setVisible(False)
+            return
+        if self._log_panel is None:
+            self._log_panel = self._build_log_panel()
+            self._main_col_layout.addWidget(self._log_panel)
+        self._log_panel.setVisible(True)
+        self._refresh_log_panel()
+
+    def _build_log_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("logPanel")
+        panel.setFixedHeight(140)
+        panel.setStyleSheet(
+            f"""
+            QFrame#logPanel {{
+                background: {COLOR_BG_ALT};
+                border-top: 1px solid {COLOR_BORDER};
+            }}
+            """
+        )
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(12, 8, 12, 8)
+        head = QLabel("ACTIVITY LOG")
+        head.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+            f"font-size: 10px; font-weight: bold;"
+        )
+        lay.addWidget(head)
+        self._log_box = QPlainTextEdit()
+        self._log_box.setReadOnly(True)
+        self._log_box.setStyleSheet(
+            f'background: {COLOR_CODE_BG}; color: {COLOR_TEXT_MID}; '
+            f'border: none; font-family: "{FONT_MONO}"; font-size: 11px;'
+        )
+        lay.addWidget(self._log_box)
+        return panel
+
+    def _refresh_log_panel(self):
+        if self._log_panel is None:
+            return
+        lines = getattr(self, "_last_step_log", None) or ["(no activity yet)"]
+        self._log_box.setPlainText("\n".join(
+            l for l in lines if isinstance(l, str)))
+        self._log_box.verticalScrollBar().setValue(
+            self._log_box.verticalScrollBar().maximum())
+
+    def open_schedule_dialog(self):
+        """Sidebar Tasks -> read-only scheduled tasks view (:2885).
+
+        The old GUI auto-refreshed every 3s; this port rebuilds the listing on
+        open and offers the same Add / Remove / Clear actions via dialogs.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Scheduled tasks")
+        dlg.resize(520, 480)
+        dlg.setStyleSheet(f"background: {COLOR_BG};")
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("Scheduled tasks")
+        title.setStyleSheet(
+            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_UI}"; '
+            f"font-size: 16px; font-weight: bold;"
+        )
+        lay.addWidget(title)
+
+        sub = QLabel("Reminders are one-shot; daily tasks repeat.")
+        sub.setStyleSheet(
+            f'color: {COLOR_TEXT_MID}; font-family: "{FONT_UI}"; font-size: 12px;'
+        )
+        lay.addWidget(sub)
+
+        box = QPlainTextEdit()
+        box.setReadOnly(True)
+        box.setStyleSheet(
+            f'background: {COLOR_INPUT_BG}; color: {COLOR_TEXT_HI}; '
+            f'border: 1px solid {COLOR_BORDER}; border-radius: 10px; '
+            f'font-family: "{FONT_MONO}"; font-size: 12px;'
+        )
+        lay.addWidget(box, 1)
+
+        def build_listing():
+            lines = []
+            try:
+                reminders = scheduler.load_reminders()
+            except Exception:
+                reminders = []
+            lines.append("── PENDING REMINDERS (one-shot) ──")
+            if reminders:
+                for i, r in enumerate(reminders):
+                    when = datetime.datetime.fromtimestamp(
+                        r["fire_at"]).strftime("%Y-%m-%d %H:%M")
+                    lines.append(f"  [{i}] {when}  →  {r['text']}")
+            else:
+                lines.append("  (none)")
+            lines.append("")
+            try:
+                tasks = scheduler.load_tasks()
+            except Exception:
+                tasks = []
+            lines.append("── DAILY TASKS (repeat) ──")
+            if tasks:
+                for i, t in enumerate(tasks):
+                    lines.append(f"  [{i}] {t['time']}  →  {t['request']}")
+            else:
+                lines.append("  (none)")
+            return "\n".join(lines)
+
+        box.setPlainText(build_listing())
+
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("Add task")
+        rem_task_btn = QPushButton("Remove task")
+        clear_btn = QPushButton("Clear reminders")
+        close_btn = QPushButton("Close")
+        for b in (add_btn, rem_task_btn, clear_btn, close_btn):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: {COLOR_RAISED}; border: 1px solid {COLOR_BORDER};
+                    border-radius: 8px; color: {COLOR_TEXT_HI}; padding: 6px 12px;
+                    font-family: "{FONT_UI}"; font-size: 12px;
+                }}
+                QPushButton:hover {{ background: {COLOR_HOVER}; }}
+                """
+            )
+            btn_row.addWidget(b)
+        lay.addLayout(btn_row)
+
+        def do_add():
+            time_str, ok = QInputDialog.getText(
+                dlg, "Add task", "Time (24-hour, e.g. 08:00):")
+            if not ok or not time_str.strip():
+                return
+            time_str = time_str.strip()
+            if len(time_str) != 5 or time_str[2] != ":":
+                QMessageBox.critical(dlg, "Invalid time", "Use HH:MM format.")
+                return
+            req, ok = QInputDialog.getText(
+                dlg, "Add task", "What should the agent do at that time?")
+            if not ok or not req.strip():
+                return
+            scheduler.add_task(time_str, req.strip())
+            box.setPlainText(build_listing())
+
+        def do_remove_task():
+            idx_str, ok = QInputDialog.getText(
+                dlg, "Remove task", "Daily task number to remove:")
+            if not ok or idx_str is None:
+                return
+            try:
+                idx = int(idx_str.strip())
+            except ValueError:
+                QMessageBox.critical(dlg, "Invalid", "Enter a number.")
+                return
+            if scheduler.remove_task(idx):
+                box.setPlainText(build_listing())
+            else:
+                QMessageBox.critical(dlg, "Not found", f"No daily task {idx}.")
+
+        def do_clear_reminders():
+            reply = QMessageBox.question(
+                dlg, "Clear reminders",
+                "Remove ALL pending one-shot reminders?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                scheduler.save_reminders([])
+            except Exception as e:
+                QMessageBox.critical(dlg, "Failed", str(e))
+                return
+            box.setPlainText(build_listing())
+
+        add_btn.clicked.connect(do_add)
+        rem_task_btn.clicked.connect(do_remove_task)
+        clear_btn.clicked.connect(do_clear_reminders)
+        close_btn.clicked.connect(dlg.accept)
+        dlg.exec()
+
+    # ------------------------------------------------------------------
     def toggle_sidebar(self):
         visible = self.sidebar.isVisible()
         if visible:
@@ -2394,7 +2919,8 @@ class AgentWindow(QMainWindow):
         if self._recording or self._processing:
             return
         self._recording = True
-        self.set_status("Recording… release to send", busy=True)
+        self._set_mic_state("recording")
+        self.set_status("Recording… click the mic or release F9 to send", busy=True)
 
         def work():
             try:
@@ -2409,6 +2935,7 @@ class AgentWindow(QMainWindow):
         if not self._recording:
             return
         self._recording = False
+        self._set_mic_state("transcribing")
         self.set_status("Transcribing…", busy=True)
 
         def work():
@@ -2424,6 +2951,7 @@ class AgentWindow(QMainWindow):
         """GUI-thread slot for recording/transcription results."""
         if payload.startswith("error:"):
             self._recording = False
+            self._set_mic_state("idle")
             self.set_status(payload[len("error:"):], busy=False)
             return
         if payload == "recording_started":
@@ -2434,6 +2962,7 @@ class AgentWindow(QMainWindow):
     def _handle_transcript(self, text):
         # Match the old GUI: type it into the input, then send immediately.
         self._recording = False
+        self._set_mic_state("idle")
         if text and text.strip():
             self.input_field.setPlainText(text.strip())
             self.send()
