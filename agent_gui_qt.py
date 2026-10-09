@@ -1,9 +1,9 @@
 """
 AgentBot GUI — PySide6 port.
 
-Phase 3: agent integration. Input box, send button and a background worker
-that calls agent.run_agent_turn. The agent loop blocks for 1-30s, so it runs
-off the GUI thread; results return via Qt signals.
+Phase 4a: slash commands, settings overlay, memory reset — faithful ports of
+the same features in agent_gui.py. Phase 4b: per-turn collapsible activity
+chips showing the step log.
 
 This file will eventually replace agent_gui.py. Until the port is complete,
 agent_gui.py remains the live GUI and this file is only run manually.
@@ -11,12 +11,14 @@ agent_gui.py remains the live GUI and this file is only run manually.
 Palette values are inlined from gui_widgets.py (the mint accent has been
 shifted greener for this port). That module imports tkinter, so it must NOT
 be imported here — the Qt port stays free of tkinter. agent_gui.py is NOT
-imported either; the one piece of logic shared with it (the hallucination
-guard) is replicated below as pure Python.
+imported either; the logic shared with it (the hallucination guard, the slash
+command dispatch) is replicated below as pure Python.
 """
 from __future__ import annotations
 import contextlib
 import io
+import json
+import os
 import re
 import sys
 import threading
@@ -32,15 +34,19 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QGuiApplication, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -49,6 +55,7 @@ from PySide6.QtWidgets import (
 # Mirrors gui_widgets.py, with the mint accent shifted greener (hue 153->147,
 # saturation 60%->70%). Keep backgrounds/borders/text in sync with the theme.
 COLOR_BG         = "#0d0f14"
+COLOR_BG_ALT     = "#141720"
 COLOR_SIDEBAR    = "#111319"
 COLOR_RAISED     = "#171a22"
 COLOR_CODE_BG    = "#080a0e"
@@ -62,6 +69,8 @@ COLOR_TEXT_MID   = "#9aa1af"
 COLOR_TEXT_LOW   = "#5f6673"
 
 COLOR_WARN       = "#eab308"
+COLOR_DANGER     = "#dc2626"
+COLOR_DANGER_HOVER = "#b91c1c"
 
 # mint accent — shifted greener (was #3ecf8e / #2fb87c / #1f4d3a)
 COLOR_ACCENT       = "#4fe08f"
@@ -197,6 +206,136 @@ def apply_hallucination_guard(final_message, step_log):
             "Say it again or use /find, /move, /mkdir to run it directly."
         )
     return final_message
+
+
+# ----------------------------------------------------------------------
+# Config access — safe single-key writes
+# ----------------------------------------------------------------------
+_config_module = None
+
+
+def get_config_module():
+    global _config_module
+    if _config_module is None:
+        import config as _config
+        _config_module = _config
+    return _config_module
+
+
+def read_config_file_raw():
+    """Read config.json as-is (NO env-var overlay).
+
+    config.load_config() overlays environment variables over file values. If
+    we saved that merged dict back to disk it would bake env-var secrets into
+    the plaintext file. Settings must only ever persist what the user typed,
+    so we read the raw file here and write only edited keys back.
+    """
+    cfg = get_config_module()
+    if not os.path.exists(cfg.CONFIG_PATH):
+        return {}
+    try:
+        with open(cfg.CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_config_keys(updates):
+    """Merge `updates` into the raw config file and write it back.
+
+    Unknown keys already in the file are preserved. Values not present are
+    never introduced, so nothing from the environment leaks in.
+    """
+    cfg = get_config_module()
+    raw = read_config_file_raw()
+    raw.update(updates)
+    os.makedirs(cfg.APP_DIR, exist_ok=True)
+    with open(cfg.CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(raw, f, indent=2)
+    return True
+
+
+# ----------------------------------------------------------------------
+# Activity summary — what the chip shows when collapsed
+# ----------------------------------------------------------------------
+def activity_summary(step_log):
+    """Human summary of the tool steps in a step_log, or None if none ran."""
+    tool_lines = [
+        l for l in (step_log or [])
+        if isinstance(l, str) and l.startswith("Action: ")
+        and not l.startswith("Action: chat(")
+    ]
+    if not tool_lines:
+        return None
+    names = []
+    for l in tool_lines:
+        name = l[len("Action: "):].split("(")[0].strip()
+        if name and name not in names:
+            names.append(name)
+    steps = len(tool_lines)
+    return (f"used {', '.join(names)}  \u00b7  {steps} step"
+            f"{'s' if steps != 1 else ''}")
+
+
+# ----------------------------------------------------------------------
+# Slash command help (verbatim from agent_gui._handle_slash_command)
+# ----------------------------------------------------------------------
+HELP_TEXT = (
+    "Slash commands — bypass the AI and go straight to the tool:\n\n"
+    "/send  Contact|message\n"
+    "       e.g.  /send JEE|helo\n\n"
+    "/edit  Contact|old text|new text\n"
+    "       e.g.  /edit JEE|helo|hello there\n\n"
+    "/del   Contact|text             → preview\n"
+    "/del   Contact|text|confirm     → delete\n"
+    "/del   Contact|text|all         → preview all matches\n"
+    "/del   Contact|text|all|confirm → delete all matches\n"
+    "       e.g.  /del JEE|helo\n\n"
+    "/dellast Contact       → delete latest outgoing message\n\n"
+    "Use 'me' as contact for Saved Messages.\n\n"
+    "File commands — no AI, straight to the tool:\n\n"
+    "/find  Folder|pat1,pat2\n"
+    "       e.g.  /find telegram desktop|SPM,CTU,LCC\n"
+    "       Folder alone works too:  /find SPM,CTU\n\n"
+    "/move  Source|pat1,pat2|Dest            → preview\n"
+    "/move  Source|pat1,pat2|Dest|confirm    → execute\n"
+    "       e.g.  /move downloads|SPM,CTU|semester1\n\n"
+    "/mkdir Name       → creates under Downloads (or give a full path)\n\n"
+    "Code inspection — read-only, cannot modify anything:\n\n"
+    "/symbols file.py  → every class/function with line numbers\n"
+    "       e.g.  /symbols config.py\n\n"
+    "/map   [Folder|max_files]  → symbol map of a whole folder\n"
+    "       e.g.  /map agentbot|40     (no args = the AgentBot folder)\n\n"
+    "Browser recipes — deterministic click/type scripts:\n\n"
+    "/recipe Name      → run a recipe from recipes.json\n"
+    "       e.g.  /recipe clock_out\n\n"
+    "Security scanning — static analysis, no AI:\n\n"
+    "/scan  File        → scan a file (hash, entropy, verdict)\n"
+    "       e.g.  /scan C:\\Users\\USER\\Downloads\\file.exe\n\n"
+    "/quarantine File   → move a file to Downloads\\Quarantine\\\n\n"
+    "/quarantine-list   → list quarantined files\n\n"
+    "/rag   query       → search your indexed documents\n\n"
+    "Group GIF library — memes the bot stored from Telegram:\n\n"
+    "/gif-stats         → how many GIFs, occurrences and labels\n\n"
+    "/label-gifs        → label every unlabeled GIF (costs API calls)\n"
+    "/label-gifs 50     → label the 50 most-reused only\n"
+    "/label-gifs min 2  → only GIFs sent 2+ times (cheapest start)\n\n"
+    "Instagram gateway (needs INSTAGRAM_ENABLED in config.json):\n\n"
+    "/ig status         → is the DM gateway running?\n"
+    "/ig restart        → stop and re-login the gateway\n\n"
+    "Evaluation harness (developer surface, selection-only):\n\n"
+    "/eval run Suite [provider] → run a suite, compare tool choice\n"
+    "/eval list         → list suites\n"
+    "/eval traces [n]   → recent turn traces\n"
+    "/eval label Id good|bad    → label a trace\n"
+    "/eval diff RunA RunB       → which cases changed\n\n"
+    "Telegram group export (private, stays outside the repo):\n\n"
+    "/import-chat <result.json>\n"
+    "       → parse a Telegram Desktop export into scrubbed monthly\n"
+    "         files under C:\\Users\\USER\\PrivateExport\n\n"
+    "/reindex           → re-index RAG_AUTO_INDEX_FOLDERS"
+)
 
 
 # ----------------------------------------------------------------------
@@ -431,6 +570,87 @@ class CodeBlock(QFrame):
 
 
 # ----------------------------------------------------------------------
+# Activity chip — per-turn collapsible step log
+# ----------------------------------------------------------------------
+class ActivityChip(QWidget):
+    """Collapsed one-line tool summary; click to reveal the raw step log."""
+
+    def __init__(self, summary: str, detail: str):
+        super().__init__()
+        self._detail = detail
+        self._open = False
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.header = QFrame()
+        self.header.setObjectName("chipHeader")
+        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header.setStyleSheet(
+            f"""
+            QFrame#chipHeader {{
+                background: {COLOR_RAISED};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 6px;
+            }}
+            QFrame#chipHeader:hover {{ background: {COLOR_HOVER}; }}
+            """
+        )
+        head_row = QHBoxLayout(self.header)
+        head_row.setContentsMargins(9, 4, 9, 4)
+        head_row.setSpacing(6)
+
+        self.chevron = QLabel("\u25b8")
+        self.chevron.setStyleSheet(
+            f"color: {COLOR_TEXT_LOW}; font-size: 10px; background: transparent;"
+        )
+        head_row.addWidget(self.chevron)
+
+        label = QLabel(summary)
+        label.setStyleSheet(
+            f'color: {COLOR_TEXT_MID}; font-family: "{FONT_UI}"; '
+            f"font-size: 11px; background: transparent;"
+        )
+        head_row.addWidget(label)
+        head_row.addStretch(1)
+        self.header.mousePressEvent = self._on_click
+
+        outer.addWidget(self.header)
+
+        self.body = QPlainTextEdit(detail)
+        self.body.setReadOnly(True)
+        self.body.setFrameShape(QFrame.Shape.NoFrame)
+        self.body.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.body.setStyleSheet(
+            f'background: {COLOR_RAISED}; color: {COLOR_TEXT_LOW}; '
+            f'border: 1px solid {COLOR_BORDER}; border-radius: 6px; '
+            f'font-family: "{FONT_MONO}"; font-size: 11px; padding: 6px;'
+        )
+        self.body.setVisible(False)
+        outer.addWidget(self.body)
+
+        self._anim = None
+
+    def _on_click(self, _event):
+        self._open = not self._open
+        self.chevron.setText("\u25be" if self._open else "\u25b8")
+        self.body.setVisible(True)  # ensure mapped before animating height
+        lines = max(1, self._detail.count("\n") + 1)
+        target = min(lines, 14) * 18 + 16
+        self._anim = QPropertyAnimation(self.body, b"maximumHeight", self)
+        self._anim.setDuration(FADE_MS)
+        self._anim.setStartValue(0 if self._open else max(0, self.body.height()))
+        self._anim.setEndValue(target if self._open else 0)
+        self._anim.setEasingCurve(
+            QEasingCurve.Type.OutCubic if self._open else QEasingCurve.Type.InCubic
+        )
+        if not self._open:
+            self._anim.finished.connect(lambda: self.body.setVisible(False))
+        self._anim.start()
+
+
+# ----------------------------------------------------------------------
 # Messages
 # ----------------------------------------------------------------------
 class MessageBase(QWidget):
@@ -533,11 +753,17 @@ class UserMessage(MessageBase):
 
 
 class AssistantMessage(MessageBase):
-    """Full-width prose, no background."""
+    """Full-width prose, no background. Optional activity chip below."""
 
-    def __init__(self, text: str):
+    def __init__(self, text: str, step_log=None):
         super().__init__()
         self._render(text)
+
+        summary = activity_summary(step_log)
+        if summary:
+            chip = ActivityChip(summary, "\n".join(
+                l for l in step_log if isinstance(l, str)))
+            self._col_layout.addWidget(chip)
 
 
 # ----------------------------------------------------------------------
@@ -711,6 +937,7 @@ class Sidebar(QFrame):
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(10, 0, 10, 10)
         bottom_layout.setSpacing(2)
+        self.settings_btn = None
         for glyph, label in (
             ("\u2699", "Settings"),
             ("\U0001f4c5", "Tasks"),
@@ -719,7 +946,10 @@ class Sidebar(QFrame):
             ("\U0001f4cb", "Copy all"),
             ("\U0001f4e4", "Export chat"),
         ):
-            bottom_layout.addWidget(_nav_button(glyph, label))
+            b = _nav_button(glyph, label)
+            if label == "Settings":
+                self.settings_btn = b
+            bottom_layout.addWidget(b)
         layout.addWidget(bottom)
 
 
@@ -727,6 +957,8 @@ class Sidebar(QFrame):
 # Main window
 # ----------------------------------------------------------------------
 class AgentWindow(QMainWindow):
+    _command_done = Signal(str)   # background slash-command result
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Agent")
@@ -736,6 +968,8 @@ class AgentWindow(QMainWindow):
         self._sidebar_anim = None
         self._worker = None
         self._processing = False
+        self._settings_overlay = None
+        self._command_done.connect(self._on_command_done)
 
         # Conversation history shared with agent.run_agent_turn, loaded once.
         self.conversation_history = []
@@ -750,10 +984,24 @@ class AgentWindow(QMainWindow):
         root.setSpacing(0)
 
         self.sidebar = Sidebar()
+        if self.sidebar.settings_btn is not None:
+            self.sidebar.settings_btn.clicked.connect(self.open_settings)
         root.addWidget(self.sidebar)
 
         root.addWidget(self._build_main_column(), 1)
         self.setCentralWidget(central)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._settings_overlay is not None:
+            self._settings_overlay.setGeometry(self.rect())
+
+    def keyPressEvent(self, event):
+        if (event.key() == Qt.Key.Key_Escape
+                and self._settings_overlay is not None):
+            self._close_settings()
+            return
+        super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
     def _build_main_column(self) -> QWidget:
@@ -808,7 +1056,9 @@ class AgentWindow(QMainWindow):
         row.addStretch(1)
 
         row.addWidget(_icon_button("\u21bb", "New chat", size=28))
-        row.addWidget(_icon_button("\u2699", "Settings"))
+        gear = _icon_button("\u2699", "Settings")
+        gear.clicked.connect(self.open_settings)
+        row.addWidget(gear)
 
         return header
 
@@ -927,6 +1177,11 @@ class AgentWindow(QMainWindow):
             return
 
         self._clear_input()
+
+        if text.startswith("/"):
+            self._handle_slash_command(text)
+            return
+
         self.chat.add_message(UserMessage(text))
 
         self._processing = True
@@ -948,12 +1203,716 @@ class AgentWindow(QMainWindow):
 
     def _on_turn_completed(self, payload):
         message, step_log = payload
-        self.chat.add_message(AssistantMessage(message))
+        self.chat.add_message(AssistantMessage(message, step_log=step_log))
         self._end_turn()
 
     def _on_turn_failed(self, error_text):
         self.chat.add_message(AssistantMessage(error_text))
         self._end_turn()
+
+    # ------------------------------------------------------------------
+    # Slash commands — faithful port of agent_gui._handle_slash_command
+    # ------------------------------------------------------------------
+    def _finish_slash_command(self, text, result):
+        """Mirror agent_gui._finish_slash_command: bubble the result and
+        record the exchange in history."""
+        if not isinstance(result, str):
+            result = str(result) if result is not None else "(no result)"
+        self.chat.add_message(UserMessage(text))
+        self.chat.add_message(AssistantMessage(result))
+        self.conversation_history.append(f"User: {text}")
+        self.conversation_history.append(f"System: {result}")
+        try:
+            get_agent().save_conversation_history(self.conversation_history)
+        except Exception:
+            pass
+
+    def _handle_slash_command(self, text):
+        """Route a '/'-prefixed input to its tool. Returns True if handled.
+
+        Non-Telegram commands are handled before importing telegram_user so
+        they keep working when Telethon is missing or not logged in.
+        """
+        if not text.startswith("/"):
+            return False
+
+        parts = text.split(None, 1)
+        cmd = parts[0].lower()
+        args = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd in ("/help", "/?"):
+            self.chat.add_message(AssistantMessage(HELP_TEXT))
+            self.conversation_history.append(f"User: {text}")
+            self.conversation_history.append(f"System: {HELP_TEXT}")
+            return True
+
+        try:
+            agent = get_agent()
+        except Exception as e:
+            self._finish_slash_command(text, f"ERROR: {e}")
+            return True
+
+        if cmd == "/find":
+            result = ("ERROR: format is /find Folder|pat1,pat2" if not args
+                      else agent.find_files(args))
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/move":
+            result = ("ERROR: format is /move Source|pat1,pat2|Dest (add |confirm to execute)"
+                      if args.count("|") < 2 else agent.move_files(args))
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/mkdir":
+            result = ("ERROR: format is /mkdir Name" if not args
+                      else agent.make_folder(args))
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/symbols":
+            result = ("ERROR: format is /symbols file.py" if not args
+                      else agent.list_symbols(args))
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/map":
+            target = args or os.path.dirname(os.path.abspath(agent.__file__))
+            return self._finish_slash_command(text, agent.repo_map(target))
+
+        if cmd == "/recipe":
+            if not args:
+                result = "ERROR: format is /recipe Name"
+            else:
+                from recipes import run_recipe
+                result = run_recipe(args.strip())
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/scan":
+            if not args:
+                result = "ERROR: format is /scan <file_path>"
+            else:
+                import security_tools
+                result = security_tools.scan_file(args.strip())
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/quarantine":
+            if not args:
+                result = "ERROR: format is /quarantine <file_path>"
+            else:
+                import security_tools
+                result = security_tools.quarantine_file(args.strip())
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/quarantine-list":
+            import security_tools
+            return self._finish_slash_command(text, security_tools.list_quarantine())
+
+        if cmd == "/rag":
+            if not args:
+                result = "ERROR: format is /rag <query>"
+            else:
+                from rag_tool import search_documents
+                result = search_documents(args.strip())
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/gif-stats":
+            try:
+                import gif_library
+                result = gif_library.library_stats()
+            except Exception as e:
+                result = f"ERROR: {e}"
+            return self._finish_slash_command(text, result)
+
+        if cmd == "/eval":
+            return self._handle_eval(text, args)
+
+        if cmd == "/ig":
+            return self._handle_ig(text, args)
+
+        if cmd == "/reindex":
+            self._run_background_command(
+                text, "🔍 Re-indexing configured folders…", self._reindex_work)
+            return True
+
+        if cmd == "/import-chat":
+            if not args.strip():
+                self.chat.add_message(AssistantMessage(
+                    "Usage: /import-chat <path to result.json>\n"
+                    "Parses a Telegram Desktop export into scrubbed monthly "
+                    "files under C:\\Users\\USER\\PrivateExport."))
+                return True
+            try:
+                import telegram_export_parser  # noqa: F401
+            except Exception as e:
+                self.chat.add_message(UserMessage(text))
+                self.chat.add_message(AssistantMessage(f"ERROR: {e}"))
+                return True
+            self.chat.add_message(UserMessage(text))
+            self._run_background_command(
+                text, "📥 Parsing and scrubbing Telegram export…",
+                lambda: self._import_chat_work(args.strip()))
+            return True
+
+        if cmd == "/label-gifs":
+            return self._handle_label_gifs(text, args)
+
+        # Telegram commands come last: they require telethon and a login.
+        try:
+            import telegram_user
+        except ImportError:
+            self.chat.add_message(AssistantMessage(
+                "ERROR: telegram_user module not found."))
+            return True
+        if cmd == "/send":
+            result = ("ERROR: format is /send Contact|message" if "|" not in args
+                      else telegram_user.send_telegram_tool(args))
+        elif cmd == "/edit":
+            result = ("ERROR: format is /edit Contact|old text|new text"
+                      if args.count("|") < 2 else telegram_user.edit_tool(args))
+        elif cmd in ("/del", "/delete"):
+            result = ("ERROR: format is /del Contact|text (add |confirm to delete)"
+                      if "|" not in args else telegram_user.delete_tool(args))
+        elif cmd in ("/dellast", "/dl"):
+            if not args:
+                result = "ERROR: format is /dellast Contact"
+            else:
+                try:
+                    result = telegram_user.delete_latest_tool(args.strip())
+                except AttributeError:
+                    result = "ERROR: telegram_user.delete_latest_tool not available."
+        else:
+            return False
+
+        return self._finish_slash_command(text, result)
+
+    def _handle_eval(self, text, args):
+        parts = (args or "").strip().split()
+        sub = parts[0] if parts else "help"
+        try:
+            import evals
+        except Exception as e:
+            return self._finish_slash_command(text, f"ERROR: {e}")
+
+        if sub == "run":
+            if len(parts) < 2:
+                return self._finish_slash_command(text, "Usage: /eval run <suite> [<provider>]")
+            suite = parts[1]
+            provider = parts[2] if len(parts) > 2 else None
+            run = evals.run_suite(suite, force_provider=provider)
+            passed = sum(1 for r in run["results"] if r["passed"])
+            return self._finish_slash_command(
+                text,
+                f"Suite {suite} — pass rate {run['pass_rate']:.2f} "
+                f"({passed}/{len(run['results'])}) "
+                f"provider={provider or 'chain'} run={run['run_id']}")
+
+        if sub == "list":
+            suites = sorted(p.stem for p in evals.SUITES_DIR.glob("*.json"))
+            return self._finish_slash_command(
+                text, "Suites: " + (", ".join(suites) if suites else "(none)"))
+
+        if sub == "traces":
+            try:
+                n = int(parts[1]) if len(parts) > 1 else 20
+            except ValueError:
+                n = 20
+            rows = evals.list_traces(n)
+            if not rows:
+                return self._finish_slash_command(text, "No traces.")
+            return self._finish_slash_command(text, "\n".join(
+                f"[{r['id']}] {r['provider']} parse={r['parse_ok']} "
+                f"empty={r['empty_reply']} — {r['request']}" for r in rows))
+
+        if sub == "label":
+            if len(parts) < 3:
+                return self._finish_slash_command(text, "Usage: /eval label <trace_id> <good|bad>")
+            return self._finish_slash_command(
+                text, evals.label_trace(parts[1], "user_feedback", parts[2]))
+
+        if sub == "diff":
+            if len(parts) < 3:
+                return self._finish_slash_command(text, "Usage: /eval diff <run_a> <run_b>")
+            return self._finish_slash_command(text, evals.diff_runs(parts[1], parts[2]))
+
+        return self._finish_slash_command(
+            text,
+            "Usage: /eval run <suite> [<provider>] | list | traces [n] | "
+            "label <trace_id> <good|bad> | diff <run_a> <run_b>")
+
+    def _handle_ig(self, text, args):
+        try:
+            import gateway
+        except Exception as e:
+            return self._finish_slash_command(text, f"ERROR: {e}")
+        sub = (args or "status").strip().lower()
+        if sub == "status":
+            gw = gateway.get_active_adapter()
+            msg = ("Instagram gateway: not running." if gw is None
+                   else f"Instagram gateway: running, poll every {gw.poll_interval}s.")
+            return self._finish_slash_command(text, msg)
+        if sub == "restart":
+            gw = gateway.get_active_adapter()
+            if gw:
+                gw.stop()
+            from config import load_config
+            result = gateway.start_gateway(load_config())
+            msg = str(result) if result else "Disabled in config."
+            return self._finish_slash_command(text, msg)
+        return self._finish_slash_command(text, "Usage: /ig status | /ig restart")
+
+    def _handle_label_gifs(self, text, args):
+        parts_l = args.split()
+        limit = None
+        min_occ = 1
+        if len(parts_l) == 1 and parts_l[0].isdigit():
+            limit = int(parts_l[0])
+        elif len(parts_l) == 2 and parts_l[0].lower() == "min":
+            if not parts_l[1].isdigit():
+                self.chat.add_message(UserMessage(text))
+                self.chat.add_message(AssistantMessage(
+                    "ERROR: /label-gifs min N — N must be a number"))
+                return True
+            min_occ = int(parts_l[1])
+
+        try:
+            import gif_library  # noqa: F401
+        except Exception as e:
+            self.chat.add_message(UserMessage(text))
+            self.chat.add_message(AssistantMessage(f"ERROR: {e}"))
+            return True
+
+        def work():
+            try:
+                import gif_library
+                msg = gif_library.label_gifs(min_occurrences=min_occ, limit=limit)
+            except Exception as e:
+                msg = f"❌ Labeling failed: {e}"
+            return msg
+
+        self.chat.add_message(UserMessage(text))
+        self._run_background_command(
+            text, "🏷️ Labeling GIFs… this can take a while.", work)
+        return True
+
+    def _run_background_command(self, text, busy_msg, work):
+        """Run a blocking command off the GUI thread; post the result back."""
+        self._processing = True
+        self.input_field.setEnabled(False)
+        self._refresh_send_btn()
+        self.chat.add_message(AssistantMessage(busy_msg))
+        self.set_status("Working…", busy=True)
+
+        def runner():
+            try:
+                result = work()
+            except Exception as e:
+                result = f"ERROR: {e}"
+            self._command_done.emit(result)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _on_command_done(self, result):
+        self.chat.add_message(AssistantMessage(result))
+        self.conversation_history.append(f"System: {result}")
+        try:
+            get_agent().save_conversation_history(self.conversation_history)
+        except Exception:
+            pass
+        self._end_turn()
+
+    def _reindex_work(self):
+        import rag_tool
+        cfg = read_config_file_raw()
+        merged = dict(get_config_module().DEFAULTS)
+        merged.update(cfg)
+        folders = merged.get("RAG_AUTO_INDEX_FOLDERS", [])
+        if isinstance(folders, str):
+            folders = [f.strip() for f in folders.split(",") if f.strip()]
+        lines = []
+        skipped = 0
+        for folder in folders:
+            if not os.path.isdir(folder):
+                skipped += 1
+                continue
+            try:
+                res = rag_tool.index_documents(folder)
+                first = (res or "done").splitlines()[0] if res else "done"
+            except Exception as e:
+                first = f"failed: {e}"
+            lines.append(f"  {os.path.basename(folder) or folder}: {first}")
+        msg = "✅ Reindex complete:\n" + "\n".join(lines)
+        if skipped:
+            msg += f"\n  ({skipped} configured folder(s) not found, skipped)"
+        return msg
+
+    def _import_chat_work(self, path):
+        import telegram_export_parser as tep
+        r = tep.parse_json_export(path)
+        return (
+            f"✅ Chat import complete:\n"
+            f"  Chat: {r['chat_name']}\n"
+            f"  Files written: {r['files_written']}\n"
+            f"  Messages indexed: {r['total_messages']}\n"
+            f"  Dropped (address/blocklist): {r['dropped_lines']}\n"
+            f"  Redacted: {r['modified_lines']}\n"
+            f"  Output: {r['output_dir']}\n\n"
+            f"Review the scrub report before indexing:\n"
+            f"  {r['report_path']}\n\n"
+            f"Run /reindex to add it to RAG."
+        )
+
+    # ------------------------------------------------------------------
+    # Settings overlay — in-window, dim backdrop, centred panel
+    # ------------------------------------------------------------------
+    def open_settings(self):
+        try:
+            cfgmod = get_config_module()
+        except Exception as e:
+            self.chat.add_message(AssistantMessage(f"ERROR: config.py not found — {e}"))
+            return
+        cfg = read_config_file_raw()
+
+        overlay = QWidget(self)
+        overlay.setGeometry(self.rect())
+        overlay.setStyleSheet("background: rgba(0, 0, 0, 170);")
+        overlay.mousePressEvent = lambda e: None  # swallow clicks on backdrop
+
+        panel = QFrame(overlay)
+        panel.setObjectName("settingsPanel")
+        panel.setStyleSheet(
+            f"""
+            QFrame#settingsPanel {{
+                background: {COLOR_BG};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 12px;
+            }}
+            QFrame#settingsPanel QLabel {{
+                background: transparent;
+                color: {COLOR_TEXT_HI};
+                font-family: "{FONT_UI}";
+                font-size: 12px;
+            }}
+            QLineEdit, QComboBox {{
+                background: {COLOR_INPUT_BG};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 6px;
+                color: {COLOR_TEXT_HI};
+                padding: 5px 8px;
+                font-family: "{FONT_MONO}";
+                font-size: 11px;
+            }}
+            QComboBox:hover, QLineEdit:hover {{ border-color: {COLOR_ACCENT_DIM}; }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox QAbstractItemView {{
+                background: {COLOR_BG_ALT};
+                color: {COLOR_TEXT_HI};
+                selection-background-color: {COLOR_SELECTED};
+            }}
+            """
+        )
+        outer = QVBoxLayout(overlay)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(panel, 0, Qt.AlignmentFlag.AlignCenter)
+        panel.setFixedSize(760, 620)
+
+        playout = QVBoxLayout(panel)
+        playout.setContentsMargins(0, 0, 0, 0)
+        playout.setSpacing(0)
+
+        # Header bar
+        bar = QWidget()
+        bar.setFixedHeight(HEADER_H)
+        bar.setStyleSheet(f"background: {COLOR_SIDEBAR}; border-top-left-radius: 12px;"
+                          f" border-top-right-radius: 12px;")
+        bar_row = QHBoxLayout(bar)
+        bar_row.setContentsMargins(10, 0, 10, 0)
+        back = _icon_button("\u2190", "Close settings")
+        back.clicked.connect(self._close_settings)
+        bar_row.addWidget(back)
+        bar_title = QLabel("Settings")
+        bar_title.setStyleSheet(
+            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_UI}"; '
+            f"font-size: 15px; font-weight: bold; background: transparent;"
+        )
+        bar_row.addWidget(bar_title)
+        path_lbl = QLabel(f"saved to {cfgmod.CONFIG_PATH}")
+        path_lbl.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+            f"font-size: 10px; background: transparent;"
+        )
+        bar_row.addWidget(path_lbl)
+        bar_row.addStretch(1)
+        playout.addWidget(bar)
+
+        # Tabs
+        tabs = QTabWidget()
+        tabs.setStyleSheet(
+            f"""
+            QTabWidget::pane {{ border: none; background: {COLOR_BG_ALT}; }}
+            QTabBar::tab {{
+                background: {COLOR_RAISED}; color: {COLOR_TEXT_MID};
+                padding: 7px 14px; border-top-left-radius: 6px;
+                border-top-right-radius: 6px; margin-right: 2px;
+                font-family: "{FONT_UI}"; font-size: 11px;
+            }}
+            QTabBar::tab:hover {{ background: {COLOR_HOVER}; color: {COLOR_TEXT_HI}; }}
+            QTabBar::tab:selected {{ background: {COLOR_ACCENT_DIM}; color: {COLOR_TEXT_HI}; }}
+            """
+        )
+        playout.addWidget(tabs, 1)
+
+        entries = {}
+
+        def make_tab(name):
+            page = QWidget()
+            lay = QVBoxLayout(page)
+            lay.setContentsMargins(12, 10, 12, 10)
+            lay.setSpacing(6)
+            tabs.addTab(page, name)
+            return page, lay
+
+        def section(lay, text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(
+                f'color: {COLOR_TEXT_MID}; font-family: "{FONT_UI}"; '
+                f"font-size: 13px; font-weight: bold; background: transparent;"
+            )
+            lay.addWidget(lbl)
+
+        def field(lay, label, key, secret=False):
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            lab = QLabel(label)
+            lab.setFixedWidth(210)
+            rl.addWidget(lab)
+            edit = QLineEdit(str(cfg.get(key, cfgmod.DEFAULTS.get(key, ""))))
+            if secret:
+                edit.setEchoMode(QLineEdit.EchoMode.Password)
+            rl.addWidget(edit, 1)
+            lay.addWidget(row)
+            entries[key] = ("text", edit)
+            return edit
+
+        def dropdown(lay, label, key, choices):
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            lab = QLabel(label)
+            lab.setFixedWidth(210)
+            rl.addWidget(lab)
+            saved = str(cfg.get(key, choices[0]))
+            values = list(choices)
+            if saved not in values:
+                values.append(saved)
+            combo = QComboBox()
+            combo.addItems(values)
+            combo.setCurrentText(saved)
+            combo.setFixedWidth(220)
+            rl.addWidget(combo)
+            rl.addStretch(1)
+            lay.addWidget(row)
+            entries[key] = ("combo", combo)
+            return combo
+
+        # --- API Keys ---
+        page, lay = make_tab("API Keys")
+        section(lay, "Groq"); field(lay, "API key", "GROQ_API_KEY", secret=True)
+        section(lay, "Google Gemini"); field(lay, "API key", "GEMINI_API_KEY", secret=True)
+        section(lay, "OpenRouter"); field(lay, "API key", "OPENROUTER_API_KEY", secret=True)
+        section(lay, "Cerebras"); field(lay, "API key", "CEREBRAS_API_KEY", secret=True)
+        section(lay, "Mistral"); field(lay, "API key", "MISTRAL_API_KEY", secret=True)
+        section(lay, "Cloudflare Workers AI")
+        field(lay, "API key", "CLOUDFLARE_API_KEY", secret=True)
+        field(lay, "Account ID", "CLOUDFLARE_ACCOUNT_ID")
+        section(lay, "Cohere"); field(lay, "API key", "COHERE_API_KEY", secret=True)
+        section(lay, "HuggingFace"); field(lay, "API key", "HUGGINGFACE_API_KEY", secret=True)
+        section(lay, "DeepSeek"); field(lay, "API key", "DEEPSEEK_API_KEY", secret=True)
+        lay.addStretch(1)
+
+        # --- Chat ---
+        page, lay = make_tab("Chat")
+        section(lay, "Input")
+        dropdown(lay, "Enter key behaviour", "ENTER_SENDS", ["true", "false"])
+        section(lay, "Display")
+        dropdown(lay, "Typing indicator", "SHOW_TYPING_INDICATOR", ["true", "false"])
+        dropdown(lay, "Show system messages", "SHOW_SYSTEM_MESSAGES", ["true", "false"])
+        dropdown(lay, "Show timestamps", "SHOW_TIMESTAMPS", ["true", "false"])
+        dropdown(lay, "Autocorrect outgoing messages", "AUTOCORRECT_ENABLED", ["true", "false"])
+        section(lay, "History")
+        field(lay, "Conversation history length", "HISTORY_LENGTH")
+        reset_btn = QPushButton("Reset conversation memory")
+        reset_btn.setFixedHeight(32)
+        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {COLOR_DANGER}; border: none; border-radius: 8px;
+                color: #ffffff; font-family: "{FONT_UI}"; font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {COLOR_DANGER_HOVER}; }}
+            """
+        )
+        reset_btn.clicked.connect(self.reset_memory)
+        lay.addWidget(reset_btn)
+        note = QLabel("Forgets the saved history only — the chat on screen is kept.")
+        note.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+            f"font-size: 10px; background: transparent;"
+        )
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addStretch(1)
+
+        # --- Voice ---
+        page, lay = make_tab("Voice")
+        section(lay, "Voice output")
+        dropdown(lay, "Voice on", "TTS_ENABLED", ["true", "false"])
+        dropdown(lay, "Auto-speak replies", "TTS_AUTO_SPEAK", ["true", "false"])
+        dropdown(lay, "Voice", "TTS_VOICE", [
+            "af_heart", "af_bella", "af_nicole", "af_sarah", "am_michael",
+            "am_adam", "bf_emma", "bf_isabella", "bm_george", "bm_lewis"])
+        dropdown(lay, "Speed", "TTS_SPEED", ["0.75", "0.9", "1.0", "1.1", "1.25", "1.5"])
+        dropdown(lay, "Language", "TTS_LANG", ["a", "b"])
+        field(lay, "Max characters per reply", "TTS_MAX_CHARS")
+        lay.addStretch(1)
+
+        # --- Appearance ---
+        page, lay = make_tab("Appearance")
+        section(lay, "Theme")
+        dropdown(lay, "Appearance mode", "THEME", ["dark", "light", "system"])
+        section(lay, "Chat bubbles")
+        dropdown(lay, "Font size", "FONT_SIZE", ["10", "11", "12", "13", "14", "15", "16"])
+        dropdown(lay, "Max width (% of window)", "BUBBLE_WIDTH", ["50", "60", "65", "72", "80", "90"])
+        dropdown(lay, "Corner radius", "BUBBLE_RADIUS", ["0", "8", "12", "16", "20", "24"])
+        note = QLabel("Appearance changes require a restart.")
+        note.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+            f"font-size: 10px; background: transparent;"
+        )
+        lay.addWidget(note)
+        lay.addStretch(1)
+
+        # --- Telegram ---
+        page, lay = make_tab("Telegram")
+        section(lay, "Bot API (notifications to you)")
+        field(lay, "Bot token", "TELEGRAM_BOT_TOKEN", secret=True)
+        field(lay, "Your user ID", "TELEGRAM_USER_ID")
+        section(lay, "Personal account (message contacts)")
+        field(lay, "API ID", "TELEGRAM_API_ID")
+        field(lay, "API hash", "TELEGRAM_API_HASH", secret=True)
+        lay.addStretch(1)
+
+        # --- Advanced ---
+        page, lay = make_tab("Advanced")
+        section(lay, "Brain")
+        field(lay, "Provider priority", "AGENT_BRAIN_PRIORITY")
+        field(lay, "Max steps per turn", "MAX_STEPS_PER_TURN")
+        field(lay, "Temperature (0.0-1.0)", "TEMPERATURE")
+        section(lay, "Ollama (local)")
+        field(lay, "Server URL", "OLLAMA_URL")
+        field(lay, "Model name", "OLLAMA_MODEL")
+        field(lay, "Timeout (seconds)", "OLLAMA_TIMEOUT")
+        section(lay, "Other")
+        dropdown(lay, "Check for updates", "CHECK_UPDATES", ["true", "false"])
+        dropdown(lay, "Log level", "LOG_LEVEL", ["info", "debug", "off"])
+        lay.addStretch(1)
+
+        # --- Bottom buttons ---
+        btn_row = QWidget()
+        br = QHBoxLayout(btn_row)
+        br.setContentsMargins(14, 8, 14, 14)
+        br.setSpacing(8)
+
+        def footer_button(text, primary=False, danger=False):
+            b = QPushButton(text)
+            b.setFixedHeight(34)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            bg = COLOR_ACCENT if primary else (COLOR_DANGER if danger else COLOR_RAISED)
+            hover = (COLOR_ACCENT_HOVER if primary
+                     else (COLOR_DANGER_HOVER if danger else COLOR_HOVER))
+            fg = COLOR_BG if primary else COLOR_TEXT_HI
+            b.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: {bg}; border: none; border-radius: 8px;
+                    color: {fg}; font-family: "{FONT_UI}"; font-size: 12px;
+                    font-weight: bold; padding: 0 16px;
+                }}
+                QPushButton:hover {{ background: {hover}; }}
+                """
+            )
+            return b
+
+        save_btn = footer_button("Save", primary=True)
+        save_btn.clicked.connect(lambda: self._save_settings(entries))
+        cancel_btn = footer_button("Cancel")
+        cancel_btn.clicked.connect(self._close_settings)
+        default_btn = footer_button("Reset to defaults", danger=True)
+        default_btn.clicked.connect(self._reset_settings_defaults)
+        br.addWidget(default_btn)
+        br.addStretch(1)
+        br.addWidget(cancel_btn)
+        br.addWidget(save_btn)
+        playout.addWidget(btn_row)
+
+        self._settings_overlay = overlay
+        overlay.show()
+        overlay.raise_()
+
+    def _close_settings(self):
+        if self._settings_overlay is not None:
+            self._settings_overlay.deleteLater()
+            self._settings_overlay = None
+
+    def _save_settings(self, entries):
+        updates = {}
+        for key, (kind, widget) in entries.items():
+            updates[key] = (widget.currentText() if kind == "combo"
+                            else widget.text().strip())
+        try:
+            write_config_keys(updates)
+        except Exception as e:
+            self.chat.add_message(AssistantMessage(f"ERROR: save failed — {e}"))
+            return
+        self._close_settings()
+        self.chat.add_message(AssistantMessage(
+            "✅ Settings saved. Restart AgentBot for changes to take effect."))
+
+    def _reset_settings_defaults(self):
+        cfgmod = get_config_module()
+        try:
+            write_config_keys(dict(cfgmod.DEFAULTS))
+        except Exception as e:
+            self.chat.add_message(AssistantMessage(f"ERROR: reset failed — {e}"))
+            return
+        self._close_settings()
+        self.chat.add_message(AssistantMessage("Settings reset to defaults."))
+
+    # ------------------------------------------------------------------
+    # Memory reset — conversation history only, never facts.json
+    # ------------------------------------------------------------------
+    def reset_memory(self):
+        """Forget saved conversation history; leave the on-screen chat alone.
+
+        Touches AgentMemory/conversation.json only — NOT facts.json.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "Reset memory",
+            "Forget the saved conversation (memory)?\n\n"
+            "The chat on screen stays as-is.\n"
+            "The next session starts fresh.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.conversation_history.clear()
+        try:
+            get_agent().save_conversation_history(self.conversation_history)
+        except Exception:
+            pass
+        self.chat.add_message(AssistantMessage(
+            "Memory reset — saved history cleared, chat kept."))
 
     # ------------------------------------------------------------------
     def toggle_sidebar(self):
