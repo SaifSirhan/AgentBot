@@ -13,6 +13,7 @@ import winsound
 import weather_news
 import whatsapp_tool
 from bs4 import BeautifulSoup
+from pathlib import Path
 from PIL import ImageGrab
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -207,6 +208,148 @@ KNOWN_WEB_APPS = {
 }
 
 TODO_FILE = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'todos.json')
+
+
+# ---------------------------
+# SKILLS (Hermes-style auto-generated procedures)
+# ---------------------------
+SKILLS_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "AgentMemory" / "skills"
+SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _parse_skill_frontmatter(text: str) -> tuple:
+    """Return (frontmatter_dict, body). Tolerant of missing frontmatter."""
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    fm_raw = text[3:end].strip()
+    body = text[end + 4:].lstrip("\n")
+    fm = {}
+    for line in fm_raw.splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            fm[k.strip()] = v.strip()
+    return fm, body
+
+
+def _render_skill(fm: dict, body: str) -> str:
+    lines = ["---"]
+    for k, v in fm.items():
+        lines.append(f"{k}: {v}")
+    lines.append("---")
+    lines.append("")
+    lines.append(body.rstrip())
+    lines.append("")
+    return "\n".join(lines)
+
+
+def skill_manage(action: str, name: str = "", content: str = "") -> str:
+    """
+    Manage AgentBot skills.
+    action: create | update | list | search | read | delete
+    name:   skill slug (lowercase, underscores)
+    content: full SKILL.md text (for create/update)
+    """
+    action = (action or "").strip().lower()
+    name = (name or "").strip().lower().replace(" ", "_")
+
+    if action == "list":
+        if not SKILLS_DIR.exists():
+            return "No skills yet."
+        names = sorted(p.name for p in SKILLS_DIR.iterdir() if p.is_dir())
+        if not names:
+            return "No skills yet."
+        return "Skills:\n" + "\n".join(f"- {n}" for n in names)
+
+    if action == "search":
+        if not name:
+            return "ERROR: search needs a query in the name field."
+        hits = []
+        q = name.lower()
+        for p in SKILLS_DIR.iterdir():
+            if not p.is_dir():
+                continue
+            sk = p / "SKILL.md"
+            if not sk.exists():
+                continue
+            text = sk.read_text(encoding="utf-8")
+            if q in text.lower():
+                fm, _ = _parse_skill_frontmatter(text)
+                hits.append(f"- {p.name}: {fm.get('description','')}")
+        return "Matches:\n" + "\n".join(hits) if hits else "No matches."
+
+    if action == "read":
+        sk = SKILLS_DIR / name / "SKILL.md"
+        if not sk.exists():
+            return f"ERROR: skill '{name}' not found."
+        return sk.read_text(encoding="utf-8")
+
+    if action == "delete":
+        sk = SKILLS_DIR / name
+        if not sk.exists():
+            return f"ERROR: skill '{name}' not found."
+        for f in sk.iterdir():
+            f.unlink()
+        sk.rmdir()
+        return f"Deleted skill '{name}'."
+
+    if action in ("create", "update"):
+        if not name:
+            return "ERROR: name required."
+        if not content.strip():
+            return "ERROR: content required."
+        d = SKILLS_DIR / name
+        d.mkdir(parents=True, exist_ok=True)
+        fm, body = _parse_skill_frontmatter(content)
+        if "name" not in fm:
+            fm["name"] = name
+        fm.setdefault("created", datetime.datetime.now().isoformat(timespec="seconds"))
+        fm["last_used"] = fm.get("last_used", fm["created"])
+        fm.setdefault("use_count", "0")
+        (d / "SKILL.md").write_text(_render_skill(fm, body), encoding="utf-8")
+        return f"Skill '{name}' {'updated' if action=='update' else 'created'}."
+
+    return f"ERROR: unknown action '{action}'."
+
+
+def _generate_skill_from_turn(user_request: str, tool_calls: list) -> str:
+    """Called after a turn with >=3 tool calls (or loop exhaustion). Asks the
+    LLM to write a SKILL.md.
+
+    Prompt informed by Anthropic's skill-creator guidelines:
+    - Use imperative form in instructions
+    - Explain WHY things are important rather than heavy-handed MUSTs
+    - Make the skill general, not super-narrow to specific examples
+    - Keep SKILL.md under 500 lines / 5,000 tokens
+    """
+    if not tool_calls:
+        return ""
+    summary = "\n".join(f"- {c.get('tool')}: {str(c.get('input'))[:120]}" for c in tool_calls)
+    prompt = (
+        "You just completed a multi-step task. Write a reusable SKILL.md that captures "
+        "the procedure so it can be repeated later.\n\n"
+        f"User request: {user_request}\n\n"
+        f"Tool calls made:\n{summary}\n\n"
+        "Write the skill using the imperative form (e.g. 'Call play_on_youtube with...' "
+        "not 'You should call...'). Explain WHY each step matters rather than just listing "
+        "MUSTs — the reader benefits from understanding the reasoning. Keep the body under "
+        "300 words. Make the skill general enough to apply to similar future requests, not "
+        "just this one exact case.\n\n"
+        "Output ONLY a SKILL.md with YAML frontmatter (name, description) and a markdown "
+        "body with sections '## When to use', '## Steps', '## Notes'. Do not include any "
+        "other text."
+    )
+    try:
+        raw = _call_llm(prompt, force_json=False, max_tokens=512)
+    except Exception as e:
+        return f"ERROR generating skill: {e}"
+    if not raw or raw.startswith("Error:"):
+        return ""
+    fm, body = _parse_skill_frontmatter(raw)
+    slug = (fm.get("name") or f"skill_{int(time.time())}").lower().replace(" ", "_")
+    return skill_manage("create", slug, raw)
 
 
 # ---------------------------
@@ -752,6 +895,16 @@ def ask_ai_for_plan(user_request, context, correction=None):
 
     known_facts = memory.get_facts_block()
     facts_block = f"\nKnown facts about the user:\n{known_facts}\n" if known_facts else ""
+
+    try:
+        skill_names = (sorted(p.name for p in SKILLS_DIR.iterdir() if p.is_dir())
+                       if SKILLS_DIR.exists() else [])
+    except Exception:
+        skill_names = []
+    if skill_names:
+        facts_block += ("\nAVAILABLE SKILLS (use skill_manage with action=read "
+                        "to load full text):\n")
+        facts_block += "\n".join(f"- {n}" for n in skill_names) + "\n"
 
     now_str = datetime.datetime.now().strftime("%A, %B %d, %Y — %I:%M %p")
     time_block = f"\nCURRENT DATE AND TIME: {now_str} (use this; never guess)\n"
@@ -4017,6 +4170,22 @@ SOCIAL MEDIA POSTING
     ALWAYS confirm the content with the user before posting. Never post without
     explicit confirmation.
 
+SKILL MANAGEMENT
+  skill_manage(input) — manage reusable procedure files ("skills"). Skills are
+    markdown files the agent writes to itself after completing a complex
+    multi-step task. ALWAYS check for a matching skill before starting a
+    multi-step workflow. Format: "action|name|content"
+      action: create | update | list | search | read | delete
+      name:   skill slug (lowercase_underscores) or search query
+      content: full SKILL.md text (required for create/update only)
+    Examples:
+      "list"                            → list all skills
+      "search|youtube"                  → find skills mentioning youtube
+      "read|play_jazz_on_youtube"       → load the full skill text
+      "create|my_skill|---\nname: my_skill\ndescription: does X\n---\n\n## Steps\n1. ..."
+    NEVER invent a skill body. Only create skills from procedures you actually
+    executed.
+
 =====================================================================
 10. EXAMPLES
 =====================================================================
@@ -4079,7 +4248,8 @@ VALID_TOOLS = {
     "crawl_site", "map_site", "fetch_clean", "run_recipe", "crawl_managed",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
-    "search_group_chat", "grep_group_chat", "edit_document", "post_to_social"
+    "search_group_chat", "grep_group_chat", "edit_document", "post_to_social",
+    "skill_manage",
 }
 
 
@@ -4476,6 +4646,11 @@ def execute_tool(action):
             return "ERROR: post_to_social needs content."
         import typefully_tool
         return typefully_tool.post_to_social(content, schedule)
+    elif tool == 'skill_manage':
+        parts = inp.split("|", 2)
+        while len(parts) < 3:
+            parts.append("")
+        return skill_manage(parts[0], parts[1], parts[2])
     elif tool == 'run_command':            return run_command(inp)
     elif tool == 'search_web':             return search_web(inp)
     elif tool == 'show_last_result':       return show_last_result()
@@ -4587,6 +4762,7 @@ def run_agent_turn(user_input, conversation_history):
     user_lower = (user_input or "").lower()
     is_pushback = any(w in user_lower for w in pushback_words)
 
+    _ran_out_of_steps = False
     for step in range(MAX_STEPS_PER_TURN):
         step_start = time.time()
         context = "\n".join(conversation_history[-10:] + step_log)
@@ -4687,6 +4863,10 @@ def run_agent_turn(user_input, conversation_history):
 
         # Otherwise: loop back, feed the tool result to the LLM,
         # let it decide next (usually: wrap the result in a natural reply).
+    else:
+        # The for-loop ran to completion without a break: MAX_STEPS_PER_TURN
+        # was exhausted. Flag it so the skill auto-gen hook below fires.
+        _ran_out_of_steps = True
 
     # Response-integrity checks: prevent unsupported action claims.
     tool_ran = any(
@@ -4770,5 +4950,31 @@ Reply:"""
                 "⚠️ I didn't actually do that — no tool ran. "
                 "Say it again or use /find, /move, /mkdir to run it directly."
             )
+
+    # --- Skill auto-generation ---
+    # A turn is worth capturing as a reusable procedure when it made >=3 real
+    # tool calls, or when the loop exhausted MAX_STEPS_PER_TURN without a
+    # natural finish (for/else: the else runs only if no break fired). The
+    # exhaustion case is the strong signal — the LLM wanted to keep going,
+    # which is exactly the "complex multi-step procedure" worth saving.
+    try:
+        _actions = [l for l in step_log
+                    if l.startswith("Action: ") and "-> Result:" in l
+                    and not l.startswith("Action: chat(")]
+        tool_calls_this_turn = []
+        for a in _actions:
+            head = a[len("Action: "):].split(") -> Result:", 1)[0]
+            tname, _, tinp = head.partition("(")
+            tool_calls_this_turn.append({"tool": tname.strip(), "input": tinp.strip()})
+    except Exception:
+        tool_calls_this_turn = []
+
+    if len(tool_calls_this_turn) >= 3 or _ran_out_of_steps:
+        try:
+            skill_result = _generate_skill_from_turn(user_input, tool_calls_this_turn)
+            if skill_result and skill_result.startswith("ERROR"):
+                print(f"[skill-gen] {skill_result}")
+        except Exception as e:
+            print(f"[skill-gen] failed: {e}")
 
     return step_log
