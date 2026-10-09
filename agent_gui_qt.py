@@ -111,6 +111,8 @@ FADE_MS = 150
 INPUT_LINE_H = 22     # single-line height for the input field
 INPUT_MAX_LINES = 6   # auto-grow ceiling (~150px)
 
+SCHEDULED_QUEUE_CAP = 5   # pending scheduled triggers before oldest is dropped
+
 _CODE_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+.-]*)\n?(.*?)```", re.DOTALL)
 
 # CSS injected into QTextDocument HTML so the markdown typography matches the
@@ -150,6 +152,29 @@ def get_agent():
     except Exception as e:  # remember so repeated sends fail fast and visibly
         _agent_import_error = e
         raise
+
+
+_voice_module = None
+_voice_output_module = None
+
+
+def get_voice():
+    """Import voice.py lazily. It pulls whisper/numpy/sounddevice (~4s), so it
+    must not run at startup — only on the first F9 press."""
+    global _voice_module
+    if _voice_module is None:
+        import voice as _voice
+        _voice_module = _voice
+    return _voice_module
+
+
+def get_voice_output():
+    """Import voice_output.py lazily (Kokoro). Failure is non-fatal."""
+    global _voice_output_module
+    if _voice_output_module is None:
+        import voice_output as _vo
+        _voice_output_module = _vo
+    return _voice_output_module
 
 
 def extract_final_message(step_log):
@@ -1012,6 +1037,7 @@ class AgentWindow(QMainWindow):
     _scheduled_triggered = Signal(str)  # scheduler fired (from its own thread)
     _reminder_result = Signal(str, str)  # (result, reminder_text)
     _hotkey_changed = Signal(bool)   # F9 pressed/released (from keyboard thread)
+    _voice_event = Signal(str)       # recording/transcription status from worker
 
     def __init__(self):
         super().__init__()
@@ -1026,10 +1052,13 @@ class AgentWindow(QMainWindow):
         self._input_outer = None
         self._tray_icon = None
         self._hotkey_installed = False
+        self._recording = False
+        self._scheduled_queue = []
         self._command_done.connect(self._on_command_done)
         self._scheduled_triggered.connect(self._on_scheduled_trigger)
         self._reminder_result.connect(self._reminder_done)
         self._hotkey_changed.connect(self._on_hotkey_changed)
+        self._voice_event.connect(self._on_voice_event)
 
         # Conversation history shared with agent.run_agent_turn, loaded once.
         self.conversation_history = []
@@ -1290,15 +1319,39 @@ class AgentWindow(QMainWindow):
         self.input_field.setFocus()
         self._refresh_send_btn()
         self.set_status("Ready", busy=False)
+        # A scheduled task may have fired while this turn was running.
+        self._drain_scheduled_queue()
 
     def _on_turn_completed(self, payload):
         message, step_log = payload
         self.chat.add_message(AssistantMessage(message, step_log=step_log))
+        self._speak_reply(message)
         self._end_turn()
 
     def _on_turn_failed(self, error_text):
         self.chat.add_message(AssistantMessage(error_text))
         self._end_turn()
+
+    def _speak_reply(self, message):
+        """Speak a reply if TTS_AUTO_SPEAK is on. Matches agent_gui.handle_result.
+
+        speak() queues to its own worker thread and returns immediately, so no
+        extra threading is needed here.
+        """
+        if not message:
+            return
+        try:
+            auto_speak = str(
+                read_config_file_raw().get("TTS_AUTO_SPEAK", "true")
+            ).strip().lower() in ("true", "1", "yes", "on")
+        except Exception:
+            auto_speak = True
+        if not auto_speak:
+            return
+        try:
+            get_voice_output().speak(message)
+        except Exception as e:
+            print(f"[tts] speak failed: {e}")
 
     # ------------------------------------------------------------------
     # Slash commands — faithful port of agent_gui._handle_slash_command
@@ -2107,6 +2160,18 @@ class AgentWindow(QMainWindow):
             get_agent().save_conversation_history(self.conversation_history)
         except Exception:
             pass
+        # Stop any in-flight recording / speech before tearing down.
+        if self._recording and _voice_module is not None:
+            try:
+                _voice_module.stop_and_transcribe()
+            except Exception:
+                pass
+            self._recording = False
+        if _voice_output_module is not None:
+            try:
+                _voice_output_module.stop()
+            except Exception:
+                pass
         if self._tray_icon is not None:
             try:
                 self._tray_icon.stop()
@@ -2125,7 +2190,7 @@ class AgentWindow(QMainWindow):
         event.ignore()
         self.hide_to_tray()
 
-    # -- global hotkey (F9) ---------------------------------------------
+    # -- global hotkey (F9) → push-to-talk ------------------------------
     def _setup_global_hotkey(self):
         if keyboard is None:
             print("[hotkey] 'keyboard' not installed. Run: pip install keyboard")
@@ -2134,24 +2199,73 @@ class AgentWindow(QMainWindow):
             keyboard.on_press_key("f9", self._hotkey_press, suppress=False)
             keyboard.on_release_key("f9", self._hotkey_release, suppress=False)
             self._hotkey_installed = True
-            print("[hotkey] F9 registered (stub — voice is Phase 5b)")
+            print("[hotkey] F9 registered (hold to talk, release to send)")
         except Exception as e:
             print(f"[hotkey] failed to register: {e}")
 
     def _hotkey_press(self, event=None):
         # Runs on the keyboard library's thread — never touch widgets here.
-        print("[hotkey] F9 pressed")
         self._hotkey_changed.emit(True)
 
     def _hotkey_release(self, event=None):
-        print("[hotkey] F9 released")
         self._hotkey_changed.emit(False)
 
     def _on_hotkey_changed(self, pressed):
+        """GUI-thread slot for F9 press/release."""
         if pressed:
-            self.set_status("Voice (Phase 5b)", busy=True)
+            self._start_recording()
         else:
-            self.set_status("Ready", busy=False)
+            self._stop_recording()
+
+    def _start_recording(self):
+        if self._recording or self._processing:
+            return
+        self._recording = True
+        self.set_status("Recording… release to send", busy=True)
+
+        def work():
+            try:
+                get_voice().start_recording()
+                self._voice_event.emit("recording_started")
+            except Exception as e:
+                self._voice_event.emit(f"error:Mic error: {e}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _stop_recording(self):
+        if not self._recording:
+            return
+        self._recording = False
+        self.set_status("Transcribing…", busy=True)
+
+        def work():
+            try:
+                text = get_voice().stop_and_transcribe()
+                self._voice_event.emit(f"transcript:{text}")
+            except Exception as e:
+                self._voice_event.emit(f"error:Transcribe error: {e}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_voice_event(self, payload):
+        """GUI-thread slot for recording/transcription results."""
+        if payload.startswith("error:"):
+            self._recording = False
+            self.set_status(payload[len("error:"):], busy=False)
+            return
+        if payload == "recording_started":
+            return
+        if payload.startswith("transcript:"):
+            self._handle_transcript(payload[len("transcript:"):])
+
+    def _handle_transcript(self, text):
+        # Match the old GUI: type it into the input, then send immediately.
+        self._recording = False
+        if text and text.strip():
+            self.input_field.setPlainText(text.strip())
+            self.send()
+        else:
+            self.set_status("No speech detected — try again", busy=False)
 
     # -- scheduler notifications ----------------------------------------
     def _on_scheduled_trigger(self, request_text):
@@ -2160,10 +2274,26 @@ class AgentWindow(QMainWindow):
             reminder_text = request_text[len("REMINDER:"):].strip()
             self._fire_reminder_direct(reminder_text)
             return
-        # A scheduled task runs a full agent turn.
+        # A scheduled task runs a full agent turn. If one is already running,
+        # queue it (the old GUI overlapped two racing turns instead — that is
+        # the bug this fixes).
         self.chat.add_message(AssistantMessage(f"[scheduled] {request_text}"))
-        if not self._processing:
+        if self._processing:
+            self._queue_scheduled(request_text)
+        else:
             self._start_agent_turn(request_text)
+
+    def _queue_scheduled(self, request_text):
+        if len(self._scheduled_queue) >= SCHEDULED_QUEUE_CAP:
+            dropped = self._scheduled_queue.pop(0)
+            print(f"[scheduler] queue full — dropped oldest: {dropped[:60]}")
+        self._scheduled_queue.append(request_text)
+
+    def _drain_scheduled_queue(self):
+        if self._processing or not self._scheduled_queue:
+            return
+        nxt = self._scheduled_queue.pop(0)
+        self._start_agent_turn(nxt)
 
     def _fire_reminder_direct(self, reminder_text):
         self.chat.add_message(AssistantMessage(f"[REMINDER] {reminder_text}"))
