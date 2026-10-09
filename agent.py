@@ -4283,7 +4283,7 @@ VALID_TOOLS = {
     "crawl_site", "map_site", "fetch_clean", "run_recipe", "crawl_managed",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
-    "search_group_chat", "grep_group_chat", "edit_document", "post_to_social",
+    "search_group_chat", "grep_group_chat", "rag_search", "edit_document", "post_to_social",
     "skill_manage",
 }
 
