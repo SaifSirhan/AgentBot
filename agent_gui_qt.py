@@ -36,18 +36,23 @@ import threading
 from PySide6.QtCore import (
     Qt,
     QEasingCurve,
+    QEvent,
     QObject,
     QParallelAnimationGroup,
     QPropertyAnimation,
+    QRect,
     QSize,
     QTimer,
     Signal,
 )
 from PySide6.QtGui import (
+    QColor,
     QGuiApplication,
     QIcon,
     QKeyEvent,
+    QLinearGradient,
     QPainter,
+    QPainterPath,
     QPixmap,
 )
 from PySide6.QtSvg import QSvgRenderer
@@ -158,6 +163,19 @@ MEDIA_REFRESH_MS = 1000
 COLOR_NOTIF_SCHEDULED = COLOR_ACCENT
 COLOR_NOTIF_WATCHER = COLOR_WARN
 COLOR_NOTIF_REMINDER = COLOR_DANGER
+
+# Phase 6c — motion timings (ms).
+PULSE_READY_MS = 2500     # calm breathing while Ready
+PULSE_THINKING_MS = 1200  # faster while Thinking…
+MIC_RING_MS = 1200        # outer recording ring expand+fade loop
+CARD_FADE_MS = 220        # per-card entrance fade
+CARD_STAGGER_MS = 60      # delay between successive cards
+ENTRY_FADE_MS = 150       # new activity/notification line (matches Phase 2)
+NUMBER_EASE_MS = 400      # SYSTEM value interpolation
+PANEL_SLIDE_MS = 200      # right-panel width slide
+OVERLAY_FADE_MS = 150     # settings backdrop dim
+OVERLAY_SCALE_MS = 180    # settings panel scale-in
+THINKING_DOT_MS = 360     # per-dot step in the 3-dot thinking indicator
 
 CONTENT_MAX_W = 720
 CONTENT_PAD = 24
@@ -663,23 +681,28 @@ def _icon_button(icon: str, tooltip: str = "", size: int = 30,
 
 
 def _nav_button(icon: str, label: str, active: bool = False) -> QPushButton:
-    """Sidebar nav row: SVG icon + text label, left aligned with hover."""
+    """Sidebar nav row: SVG icon + text label, left aligned with hover.
+
+    The active row (Phase 6c G) gets a 3px mint strip on its left edge.
+    """
     btn = QPushButton(f"   {label}")
     btn.setFixedHeight(34)
     btn.setIcon(_svg_icon(icon, 16, COLOR_ACCENT if active else COLOR_TEXT_MID))
     btn.setIconSize(QSize(16, 16))
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    border_left = (f"border-left: 3px solid {COLOR_ACCENT};"
+                   if active else "border: none;")
     btn.setStyleSheet(
         f"""
         QPushButton {{
             background: {COLOR_SELECTED if active else "transparent"};
-            border: none;
+            {border_left}
             border-radius: 9px;
             color: {COLOR_TEXT_HI if active else COLOR_TEXT_MID};
             font-family: "{FONT_UI}";
             font-size: 12px;
             text-align: left;
-            padding-left: 10px;
+            padding-left: {7 if active else 10}px;
         }}
         QPushButton:hover {{ background: {COLOR_HOVER}; }}
         """
@@ -757,14 +780,81 @@ class MeterRow(QWidget):
         frac = max(0.0, min(1.0, fraction))
         self._fill.setFixedWidth(int(self.TRACK_W * frac))
 
+    def set_value_animated(self, fraction: float, formatter, enabled: bool,
+                           threshold: float = 0.01):
+        """Phase 6c C — ease the bar + value from the current to a new reading.
+
+        `fraction` is the new 0..1 value; `formatter(frac) -> str` renders the
+        label text. Jumps under `threshold` snap instantly (no jitter), and
+        when `enabled` is False everything snaps to the final state.
+        """
+        new = max(0.0, min(1.0, fraction))
+        old = getattr(self, "_frac", None)
+        ticker = getattr(self, "_ticker", None)
+        if ticker is not None:
+            ticker.stop()
+            ticker = None
+        if old is None or not enabled or abs(new - old) < threshold:
+            self._frac = new
+            self._paint_fraction(new, formatter)
+            return
+
+        steps = 20
+        state = {"i": 0, "from": old}
+
+        def tick():
+            state["i"] += 1
+            t = min(1.0, state["i"] / steps)
+            # ease-out cubic to match the rest of the motion language
+            e = 1 - (1 - t) ** 3
+            frac = state["from"] + (new - state["from"]) * e
+            self._frac = frac
+            self._paint_fraction(frac, formatter)
+            if t >= 1.0:
+                self._ticker.stop()
+                self._ticker = None
+                self._frac = new
+                self._paint_fraction(new, formatter)
+
+        ticker = QTimer(self)
+        ticker.setInterval(max(1, NUMBER_EASE_MS // steps))
+        ticker.timeout.connect(tick)
+        self._ticker = ticker
+        ticker.start()
+
+    def _paint_fraction(self, frac: float, formatter):
+        self._value.setText(formatter(frac))
+        self._fill.setFixedWidth(int(self.TRACK_W * frac))
+
+    def stop_ticker(self):
+        ticker = getattr(self, "_ticker", None)
+        if ticker is not None:
+            ticker.stop()
+            self._ticker = None
+
     def set_value_text(self, text: str):
         """Value text with no bar (e.g. the no-GPU row)."""
+        self.stop_ticker()
+        self._frac = None
         self._value.setText(text)
         self._fill.setFixedWidth(0)
         self._track.setVisible(False)
 
     def set_bar_visible(self, visible: bool):
         self._track.setVisible(visible)
+
+
+def _fmt_percent(frac: float) -> str:
+    return f"{frac * 100:4.1f}%"
+
+
+def _fmt_gb(used_gb: float, total_gb: float):
+    return lambda frac: f"{used_gb * frac:.1f}/{total_gb:.1f} GB"
+
+
+def _fmt_gpu(util_pct: float, used_gb: float, total_gb: float):
+    return (lambda frac: f"{frac * 100:.0f}%  "
+                         f"{used_gb * frac:.1f}/{total_gb * frac:.1f} GB")
 
 
 # ----------------------------------------------------------------------
@@ -1413,6 +1503,25 @@ class InfoCard(QFrame):
         self.placeholder.setText(text)
         self.placeholder.setVisible(True)
 
+    def paintEvent(self, event):
+        """Phase 6c F — a very subtle vertical depth gradient over the card.
+
+        The base colour and border come from QSS; this overlays a barely-there
+        light-to-dark wash. Kept under ~2% alpha so it reads as depth, not as
+        a visible gradient.
+        """
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        grad = QLinearGradient(0, 0, 0, self.height())
+        grad.setColorAt(0.0, QColor(255, 255, 255, 4))   # ~0.015 alpha
+        grad.setColorAt(1.0, QColor(0, 0, 0, 5))         # ~0.02 alpha
+        path = QPainterPath()
+        path.addRoundedRect(0.5, 0.5, self.width() - 1, self.height() - 1,
+                            CARD_RADIUS, CARD_RADIUS)
+        painter.fillPath(path, grad)
+        painter.end()
+
 
 class RightPanel(QFrame):
     """Fixed-width column of stacked info cards, scrollable.
@@ -1429,6 +1538,8 @@ class RightPanel(QFrame):
         self.setFixedWidth(RIGHT_PANEL_W)
         self.setStyleSheet(f"background: {COLOR_BG};")
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        # Phase 6c: set by AgentWindow; gates the per-entry fade-in.
+        self.animations_enabled = True
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1544,8 +1655,11 @@ class RightPanel(QFrame):
             self.activity_earlier.setVisible(False)
         for i, lbl in enumerate(self.activity_labels):
             if i < len(shown):
+                newly = not lbl.isVisible() or lbl.text() != self._ellipsize(shown[i])
                 lbl.setText(self._ellipsize(shown[i]))
                 lbl.setVisible(True)
+                if newly:
+                    self._fade_in(lbl)
             else:
                 lbl.setVisible(False)
 
@@ -1553,6 +1667,25 @@ class RightPanel(QFrame):
     def _ellipsize(text: str, limit: int = 46) -> str:
         text = " ".join(text.split())
         return text if len(text) <= limit else text[:limit - 1] + "\u2026"
+
+    def _fade_in(self, widget: QWidget, duration: int = ENTRY_FADE_MS):
+        """Phase 6c E — fade a freshly shown line/entry in (matches Phase 2).
+
+        A plain opacity fade, no slide/bounce. No-op when animations are off,
+        and it clears the effect on finish so nothing lingers on the widget.
+        """
+        if not self.animations_enabled:
+            return
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", widget)
+        anim.setDuration(duration)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda w=widget: w.setGraphicsEffect(None))
+        anim.start()
+        widget._fade_anim = anim  # keep a reference alive
 
     # -- NOW PLAYING ----------------------------------------------------
     def _build_now_playing(self):
@@ -1575,19 +1708,23 @@ class RightPanel(QFrame):
         self.gpu_row.set_value_text("no GPU detected")
 
     def update_system(self, cpu_pct, ram_used, ram_total, gpu=None):
-        self.cpu_row.set_value(f"{cpu_pct:4.1f}%", cpu_pct / 100.0)
+        anim = self.animations_enabled
+        self.cpu_row.set_value_animated(
+            cpu_pct / 100.0, _fmt_percent, anim)
         used_gb = ram_used / (1024 ** 3)
         total_gb = ram_total / (1024 ** 3)
         frac = (ram_used / ram_total) if ram_total else 0.0
-        self.ram_row.set_value(f"{used_gb:.1f}/{total_gb:.1f} GB", frac)
+        self.ram_row.set_value_animated(
+            frac, _fmt_gb(used_gb, total_gb), anim)
         if gpu is None:
             self.gpu_row.set_value_text("no GPU")
         else:
             util, mem_used, mem_total = gpu
             self.gpu_row.set_bar_visible(True)
-            self.gpu_row.set_value(
-                f"{util:.0f}%  {mem_used / 1024:.1f}/{mem_total / 1024:.1f} GB",
-                util / 100.0)
+            self.gpu_row.set_value_animated(
+                util / 100.0,
+                _fmt_gpu(util, mem_used / 1024, mem_total / 1024),
+                anim)
 
     # -- WEATHER --------------------------------------------------------
     def _build_weather(self):
@@ -1681,11 +1818,15 @@ class RightPanel(QFrame):
         for i, (dot, txt, row) in enumerate(self.notif_labels):
             if i < len(self.notif_events):
                 kind, ts, text = self.notif_events[i]
+                # Fade a row that is newly populated or whose content changed.
+                newly = not row.isVisible() or txt.text() != f"{ts}  {self._ellipsize(text, 34)}"
                 dot.setStyleSheet(
                     f"background: transparent; "
                     f"color: {colors.get(kind, COLOR_TEXT_LOW)}; font-size: 9px;")
                 txt.setText(f"{ts}  {self._ellipsize(text, 34)}")
                 row.setVisible(True)
+                if newly:
+                    self._fade_in(row)
             else:
                 row.setVisible(False)
 
@@ -1728,6 +1869,22 @@ class AgentWindow(QMainWindow):
         # fresh launch always opens with the panel visible.
         self._right_panel_visible = True
         self._right_panel_auto = True  # not user-toggled — safe to auto-hide
+        # Phase 6c: read the motion flag once and cache it. Toggling it in
+        # settings applies on next launch (no mid-session hot-reload).
+        self._animations_enabled = self._read_animations_flag()
+        # Phase 6c animation state (all anims live on the main thread).
+        self._status_pulse = None
+        self._status_state = "ready"
+        self._mic_ring = None
+        self._mic_ring_anim = None
+        self._thinking_dots = None
+        self._thinking_timer = None
+        self._thinking_index = 0
+        self._minimized = False
+        self._card_anims = []
+        self._entry_anims = []
+        self._sidebar_strip_pulse = None
+        self._panel_anim = None
         # Phase 6b panel timers (all created here, on the main thread) + state.
         self._system_timer = None
         self._weather_timer = None
@@ -1770,6 +1927,7 @@ class AgentWindow(QMainWindow):
 
     def _build_right_panel(self) -> QWidget:
         self._right_panel_inner = RightPanel()
+        self._right_panel_inner.animations_enabled = self._animations_enabled
         wrapper = QWidget()
         wrapper.setFixedWidth(RIGHT_PANEL_W)
         wrap_layout = QVBoxLayout(wrapper)
@@ -1821,6 +1979,95 @@ class AgentWindow(QMainWindow):
         self._weather_timer.start()
         QTimer.singleShot(200, self._refresh_weather)  # first fetch soon after show
 
+    # ------------------------------------------------------------------
+    # Phase 6c — motion startup
+    # ------------------------------------------------------------------
+    def start_motion(self):
+        """Begin the ambient motion (status pulse, card entrance).
+
+        Called once after the window is shown. When ANIMATIONS_ENABLED is
+        false this is a no-op: every element already renders in its final
+        state.
+        """
+        self._set_status_pulse(self._status_state)
+        self._start_sidebar_strip_pulse()
+        # Card entrance: only when the panel is actually visible at launch.
+        if self._right_panel_visible:
+            QTimer.singleShot(0, self._animate_card_entrance)
+
+    # ------------------------------------------------------------------
+    # Phase 6c G — sidebar active-item strip pulse
+    # ------------------------------------------------------------------
+    def _start_sidebar_strip_pulse(self):
+        """Pulse the active sidebar row's mint strip opacity subtly.
+
+        Chosen over a sliding y-position strip because only one item can be
+        active at a time here, so there is nothing to slide between — a gentle
+        0.85 -> 1.0 -> 0.85 breath over 3s conveys "this is the current view"
+        without inventing a moving target.
+        """
+        if not self._animations_enabled or self._minimized:
+            return
+        btn = getattr(self.sidebar, "current_chat_btn", None)
+        if btn is None:
+            return
+        effect = QGraphicsOpacityEffect(btn)
+        btn.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", btn)
+        anim.setDuration(3000)
+        anim.setStartValue(1.0)
+        anim.setKeyValueAt(0.5, 0.85)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        anim.setLoopCount(-1)
+        anim.start()
+        self._sidebar_strip_pulse = anim
+
+    def _stop_sidebar_strip_pulse(self):
+        anim = getattr(self, "_sidebar_strip_pulse", None)
+        if anim is not None:
+            anim.stop()
+            self._sidebar_strip_pulse = None
+        btn = getattr(self.sidebar, "current_chat_btn", None)
+        if btn is not None:
+            btn.setGraphicsEffect(None)
+
+    # ------------------------------------------------------------------
+    # Phase 6c D — staggered card entrance
+    # ------------------------------------------------------------------
+    def _animate_card_entrance(self):
+        """Fade each card in with a 60ms stagger (220ms ease-out each).
+
+        Only runs on first show and on an explicit toggle-back-on — never on
+        focus/resize. No-op when animations are disabled.
+        """
+        if not self._animations_enabled or not self._right_panel_visible:
+            return
+        self._stop_card_anims()
+        for i, title in enumerate(RightPanel.CARD_TITLES):
+            card = self.panel.cards.get(title)
+            if card is None:
+                continue
+            effect = QGraphicsOpacityEffect(card)
+            card.setGraphicsEffect(effect)
+            anim = QPropertyAnimation(effect, b"opacity", card)
+            anim.setDuration(CARD_FADE_MS)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            # setGraphicsEffect(None) on finish releases the effect so the
+            # card's own paintEvent gradient is not routed through it.
+            anim.finished.connect(lambda c=card: c.setGraphicsEffect(None))
+            QTimer.singleShot(i * CARD_STAGGER_MS, anim.start)
+            self._card_anims.append(anim)
+
+    def _stop_card_anims(self):
+        for anim in list(self._card_anims):
+            anim.stop()
+        self._card_anims = []
+        for card in self.panel.cards.values():
+            card.setGraphicsEffect(None)
+
     @staticmethod
     def _nvidia_available() -> bool:
         import shutil
@@ -1829,6 +2076,10 @@ class AgentWindow(QMainWindow):
     def _refresh_system(self):
         psutil = getattr(self, "_psutil", None)
         if psutil is None:
+            return
+        # Performance guard: no point sampling (or animating) a hidden panel.
+        # cpu_percent keeps its own baseline, so skipping calls is harmless.
+        if not self._right_panel_visible or self._minimized:
             return
         try:
             cpu = psutil.cpu_percent(interval=None)
@@ -1909,18 +2160,69 @@ class AgentWindow(QMainWindow):
         if not self._right_panel_auto:
             return
         w = self.width()
+        # Autohide is a reactive resize response — do it instantly (animate=
+        # False) so the panel cannot lag behind a fast drag.
         if self._right_panel_visible and w < HIDE_PANEL_BELOW:
-            self._set_right_panel_visible(False)
+            self._set_right_panel_visible(False, animate=False)
         elif not self._right_panel_visible and w >= SHOW_PANEL_AT:
-            self._set_right_panel_visible(True)
+            self._set_right_panel_visible(True, animate=False)
 
-    def _set_right_panel_visible(self, visible: bool):
+    def _set_right_panel_visible(self, visible: bool, animate: bool = True):
         self._right_panel_visible = visible
-        self.right_panel.setVisible(visible)
         self.panel_toggle_btn.setIcon(_svg_icon(
             "chevrons_left" if visible else "chevrons_right", 18, COLOR_TEXT_MID))
         self.panel_toggle_btn.setToolTip(
             "Hide info panel" if visible else "Show info panel")
+
+        # Phase 6c H — slide the panel width 320 <-> 0 (200ms ease-in-out).
+        # The wrapper's min-width is held at 0 and only max-width is animated,
+        # so the chat column reflows smoothly instead of snapping.
+        self._stop_panel_anim()
+        if animate and self._animations_enabled:
+            self.right_panel.setMinimumWidth(0)
+            self.right_panel.setVisible(True)
+            anim = QPropertyAnimation(self.right_panel, b"maximumWidth",
+                                      self.right_panel)
+            anim.setDuration(PANEL_SLIDE_MS)
+            anim.setStartValue(self.right_panel.width())
+            anim.setEndValue(RIGHT_PANEL_W if visible else 0)
+            anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            if visible:
+                anim.finished.connect(self._after_panel_shown)
+            else:
+                anim.finished.connect(self._after_panel_hidden)
+            anim.start()
+            self._panel_anim = anim
+        else:
+            self.right_panel.setFixedWidth(RIGHT_PANEL_W)
+            self.right_panel.setVisible(visible)
+            if visible:
+                QTimer.singleShot(0, self._animate_card_entrance)
+
+        # Guardrails: stop panel motion while hidden; entrance on re-show.
+        if not visible:
+            self._stop_card_anims()
+            for row in (self.panel.cpu_row, self.panel.ram_row,
+                        self.panel.gpu_row):
+                row.stop_ticker()
+
+    def _stop_panel_anim(self):
+        anim = getattr(self, "_panel_anim", None)
+        if anim is not None:
+            anim.stop()
+            self._panel_anim = None
+
+    def _after_panel_shown(self):
+        # Re-pin the fixed width once the slide finishes so the layout is
+        # exactly 320 again (maximumWidth animation leaves min at 0).
+        self._panel_anim = None
+        self.right_panel.setFixedWidth(RIGHT_PANEL_W)
+        self._animate_card_entrance()
+
+    def _after_panel_hidden(self):
+        self._panel_anim = None
+        self.right_panel.setVisible(False)
+        self.right_panel.setFixedWidth(RIGHT_PANEL_W)
 
     def toggle_right_panel(self):
         """Header chevron -> show/hide the right info panel (Phase 6a).
@@ -2000,6 +2302,21 @@ class AgentWindow(QMainWindow):
             f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; font-size: 11px;'
         )
         row.addWidget(self.status_label)
+
+        # Phase 6c I — three-dot thinking indicator, right of the status text.
+        self.thinking_dots = QWidget()
+        td = QHBoxLayout(self.thinking_dots)
+        td.setContentsMargins(4, 0, 0, 0)
+        td.setSpacing(3)
+        self._thinking_dot_labels = []
+        for _ in range(3):
+            d = QLabel("\u25cf")
+            d.setStyleSheet(
+                f"color: {COLOR_WARN}; font-size: 7px; background: transparent;")
+            td.addWidget(d)
+            self._thinking_dot_labels.append(d)
+        self.thinking_dots.setVisible(False)
+        row.addWidget(self.thinking_dots)
         row.addStretch(1)
 
         # The old GUI's \u21bb header button is "New chat" (clear_chat), not a
@@ -2086,19 +2403,36 @@ class AgentWindow(QMainWindow):
         # Mic button (Phase 5d): click to START recording, click again to STOP
         # and transcribe (click-to-toggle). F9 remains press-and-hold and drives
         # the same state, so the button reflects F9 activity too.
-        self.mic_btn = QPushButton()
+        # Phase 6c B wraps it in a fixed 40x40 holder so the recording ring can
+        # overlay the button without disturbing the pill row layout.
+        self.mic_holder = QWidget()
+        self.mic_holder.setFixedSize(40, 40)
+        self.mic_ring = QFrame(self.mic_holder)
+        self.mic_ring.setGeometry(4, 4, 32, 32)
+        self.mic_ring.setStyleSheet(
+            f"background: transparent; border: 2px solid {COLOR_DANGER}; "
+            f"border-radius: 16px;"
+        )
+        self.mic_ring.setVisible(False)
+        self.mic_btn = QPushButton(self.mic_holder)
         self.mic_btn.setToolTip("Record voice message")
+        self.mic_btn.setGeometry(4, 4, 32, 32)
         self.mic_btn.setFixedSize(32, 32)
         self.mic_btn.setIconSize(QSize(18, 18))
         self.mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.mic_btn.clicked.connect(self._toggle_recording)
-        pill_row.addWidget(self.mic_btn, 0, Qt.AlignmentFlag.AlignBottom)
+        self.mic_btn.raise_()
+        pill_row.addWidget(self.mic_holder, 0, Qt.AlignmentFlag.AlignBottom)
 
         self.send_btn = QPushButton()
         self.send_btn.setToolTip("Send")
         self.send_btn.setFixedSize(32, 32)
         self.send_btn.setIconSize(QSize(16, 16))
         self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Phase 6c H — hover lift: a soft shadow reads as the button rising.
+        # (No geometry/scale transform — those jitter under Qt.)
+        self._send_hover_enter = None
+        self._send_hover_leave = None
         self.send_btn.clicked.connect(self.send)
         pill_row.addWidget(self.send_btn, 0, Qt.AlignmentFlag.AlignBottom)
 
@@ -2107,7 +2441,33 @@ class AgentWindow(QMainWindow):
         self._input_outer = holder
         self._set_mic_state("idle")   # paint the initial mic look
         self._refresh_send_btn()
+        self._install_send_hover_lift()
         return outer
+
+    def _install_send_hover_lift(self):
+        """Phase 6c H — add a soft shadow on hover so the send button lifts."""
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        btn = self.send_btn
+        orig_enter = btn.enterEvent
+        orig_leave = btn.leaveEvent
+
+        def enter(e):
+            if self._animations_enabled and btn.isEnabled():
+                eff = QGraphicsDropShadowEffect(btn)
+                eff.setBlurRadius(14)
+                eff.setOffset(0, 3)
+                eff.setColor(QColor(0, 0, 0, 130))
+                btn.setGraphicsEffect(eff)
+            orig_enter(e)
+
+        def leave(e):
+            btn.setGraphicsEffect(None)
+            orig_leave(e)
+
+        btn.enterEvent = enter
+        btn.leaveEvent = leave
+        self._send_hover_enter = enter
+        self._send_hover_leave = leave
 
     def _refresh_send_btn(self):
         has_text = bool(self._get_input_text()) or bool(self.attachments)
@@ -2175,8 +2535,15 @@ class AgentWindow(QMainWindow):
             )
 
     def _start_mic_pulse(self):
-        """Opacity breathing 0.7 -> 1.0 over ~1.2s, looping, while recording."""
+        """Recording feedback: inner icon opacity pulse + outer expanding ring.
+
+        The inner pulse is the Phase 5d behaviour (0.7 -> 1.0, loops). The
+        outer ring (Phase 6c) expands 1.0 -> 1.25 and fades 0.6 -> 0.0, also
+        looping, so the two read as one "recording" motion.
+        """
         self._stop_mic_pulse()
+        if not self._animations_enabled:
+            return
         effect = QGraphicsOpacityEffect(self.mic_btn)
         self.mic_btn.setGraphicsEffect(effect)
         anim = QPropertyAnimation(effect, b"opacity", self.mic_btn)
@@ -2188,6 +2555,44 @@ class AgentWindow(QMainWindow):
         anim.setLoopCount(-1)  # loop forever until recording stops
         anim.start()
         self._mic_pulse = anim
+        self._start_mic_ring()
+
+    def _start_mic_ring(self):
+        """Outer recording ring: expand + fade out, looping."""
+        self._stop_mic_ring()
+        if not self._animations_enabled:
+            return
+        self.mic_ring.setVisible(True)
+        self.mic_ring.setGeometry(4, 4, 32, 32)
+        ring_effect = QGraphicsOpacityEffect(self.mic_ring)
+        self.mic_ring.setGraphicsEffect(ring_effect)
+        # Animate the opacity (geometry scaling of the ring is driven by the
+        # same property animation's key values on a separate geometry anim).
+        group = QParallelAnimationGroup(self)
+        op = QPropertyAnimation(ring_effect, b"opacity", self.mic_ring)
+        op.setDuration(MIC_RING_MS)
+        op.setStartValue(0.6)
+        op.setEndValue(0.0)
+        op.setEasingCurve(QEasingCurve.Type.OutQuad)
+        group.addAnimation(op)
+        geo = QPropertyAnimation(self.mic_ring, b"geometry", self.mic_ring)
+        geo.setDuration(MIC_RING_MS)
+        geo.setStartValue(QRect(4, 4, 32, 32))
+        geo.setEndValue(QRect(0, 0, 40, 40))
+        geo.setEasingCurve(QEasingCurve.Type.OutQuad)
+        group.addAnimation(geo)
+        group.setLoopCount(-1)
+        group.start()
+        self._mic_ring_anim = group
+
+    def _stop_mic_ring(self):
+        anim = getattr(self, "_mic_ring_anim", None)
+        if anim is not None:
+            anim.stop()
+            self._mic_ring_anim = None
+        self.mic_ring.setGraphicsEffect(None)
+        self.mic_ring.setGeometry(4, 4, 32, 32)
+        self.mic_ring.setVisible(False)
 
     def _stop_mic_pulse(self):
         anim = getattr(self, "_mic_pulse", None)
@@ -2195,6 +2600,7 @@ class AgentWindow(QMainWindow):
             anim.stop()
             self._mic_pulse = None
         self.mic_btn.setGraphicsEffect(None)
+        self._stop_mic_ring()
 
     def _toggle_recording(self):
         """Click-to-toggle: start recording, or stop + transcribe if already on."""
@@ -2334,9 +2740,127 @@ class AgentWindow(QMainWindow):
     # ------------------------------------------------------------------
     def set_status(self, text, busy=False):
         self.status_label.setText(text)
+        # Phase 6c — the dot breathes; period and colour encode the state.
+        #   error text -> red, steady (alert)
+        #   busy       -> amber, fast pulse (active)
+        #   otherwise  -> mint, slow pulse (calm)
+        low = (text or "").lower()
+        if any(w in low for w in ("error", "failed", "couldn't", "no speech")):
+            dot_state, color = "error", COLOR_DANGER
+        elif busy:
+            dot_state, color = "thinking", COLOR_WARN
+        else:
+            dot_state, color = "ready", COLOR_ACCENT
+        self.status_dot.setStyleSheet(f"color: {color}; font-size: 10px;")
+        self._set_status_pulse(dot_state)
+        self._update_thinking_indicator(dot_state == "thinking")
+
+    # ------------------------------------------------------------------
+    # Phase 6c A — pulsing status dot
+    # ------------------------------------------------------------------
+    def _set_status_pulse(self, state: str):
+        """Start/stop the breathing pulse on the status dot.
+
+        state: 'ready' (2.5s), 'thinking' (1.2s), 'error' (no pulse).
+        """
+        self._status_state = state
+        if not self._animations_enabled or state == "error" or self._minimized:
+            self._stop_status_pulse()
+            return
+        period = PULSE_READY_MS if state == "ready" else PULSE_THINKING_MS
+        if (self._status_pulse is not None
+                and self._status_pulse.duration() == period):
+            return  # already pulsing at the right rate — leave it running
+        self._stop_status_pulse()
+        effect = QGraphicsOpacityEffect(self.status_dot)
+        self.status_dot.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self.status_dot)
+        anim.setDuration(period)
+        anim.setStartValue(1.0)
+        anim.setKeyValueAt(0.5, 0.7)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        anim.setLoopCount(-1)
+        anim.start()
+        self._status_pulse = anim
+
+    def _stop_status_pulse(self):
+        anim = getattr(self, "_status_pulse", None)
+        if anim is not None:
+            anim.stop()
+            self._status_pulse = None
+        self.status_dot.setGraphicsEffect(None)
         self.status_dot.setStyleSheet(
-            f"color: {COLOR_ACCENT if not busy else COLOR_WARN}; font-size: 10px;"
-        )
+            self.status_dot.styleSheet())  # force repaint at full opacity
+
+    # ------------------------------------------------------------------
+    # Phase 6c I — three-dot thinking indicator
+    # ------------------------------------------------------------------
+    def _update_thinking_indicator(self, thinking: bool):
+        if not thinking or not self._animations_enabled:
+            self._stop_thinking_dots()
+            return
+        if self._thinking_timer is not None:
+            return  # already running
+        self.thinking_dots.setVisible(True)
+        self._thinking_index = 0
+        self._paint_thinking_dots()
+        self._thinking_timer = QTimer(self)
+        self._thinking_timer.setInterval(THINKING_DOT_MS)
+        self._thinking_timer.timeout.connect(self._advance_thinking_dots)
+        self._thinking_timer.start()
+
+    def _advance_thinking_dots(self):
+        self._thinking_index = (self._thinking_index + 1) % 3
+        self._paint_thinking_dots()
+
+    def _paint_thinking_dots(self):
+        for i, d in enumerate(self._thinking_dot_labels):
+            lit = (i == self._thinking_index)
+            d.setStyleSheet(
+                f"color: {COLOR_WARN}; font-size: 7px; background: transparent;"
+                if lit else
+                f"color: {COLOR_TEXT_LOW}; font-size: 7px; background: transparent;")
+
+    def _stop_thinking_dots(self):
+        if self._thinking_timer is not None:
+            self._thinking_timer.stop()
+            self._thinking_timer = None
+        self.thinking_dots.setVisible(False)
+
+    # ------------------------------------------------------------------
+    # Phase 6c performance guard — pause motion while minimized
+    # ------------------------------------------------------------------
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._minimized = self.isMinimized()
+            if self._minimized:
+                self._stop_status_pulse()
+                self._stop_mic_ring()
+                self._stop_sidebar_strip_pulse()
+                self._stop_pass_a_anims()
+            else:
+                # Resume the dot pulse in whatever state we're in.
+                self._set_status_pulse(self._status_state)
+                self._start_sidebar_strip_pulse()
+        super().changeEvent(event)
+
+    def _stop_pass_a_anims(self):
+        """Stop looping card/entry anims (called when minimized)."""
+        for anim in list(self._card_anims):
+            anim.stop()
+        self._card_anims = []
+
+    @staticmethod
+    def _read_animations_flag() -> bool:
+        """Read ANIMATIONS_ENABLED once (raw config, default True)."""
+        try:
+            val = read_config_file_raw().get("ANIMATIONS_ENABLED", True)
+        except Exception:
+            val = True
+        if isinstance(val, bool):
+            return val
+        return str(val).strip().lower() in ("true", "1", "yes", "on")
 
     def send(self):
         if self._processing:
@@ -2873,6 +3397,26 @@ class AgentWindow(QMainWindow):
         )
         playout.addWidget(tabs, 1)
 
+        # Phase 6c H — fade the newly shown tab page in briefly.
+        def _fade_tab(_idx):
+            if not self._animations_enabled:
+                return
+            page = tabs.currentWidget()
+            if page is None:
+                return
+            eff = QGraphicsOpacityEffect(page)
+            page.setGraphicsEffect(eff)
+            a = QPropertyAnimation(eff, b"opacity", page)
+            a.setDuration(ENTRY_FADE_MS)
+            a.setStartValue(0.0)
+            a.setEndValue(1.0)
+            a.setEasingCurve(QEasingCurve.Type.OutCubic)
+            a.finished.connect(lambda p=page: p.setGraphicsEffect(None))
+            a.start()
+            self._tab_fade = a
+
+        tabs.currentChanged.connect(_fade_tab)
+
         entries = {}
 
         def make_tab(name):
@@ -2994,6 +3538,8 @@ class AgentWindow(QMainWindow):
         page, lay = make_tab("Appearance")
         section(lay, "Theme")
         dropdown(lay, "Appearance mode", "THEME", ["dark", "light", "system"])
+        section(lay, "Motion")
+        dropdown(lay, "Animations", "ANIMATIONS_ENABLED", ["true", "false"])
         section(lay, "Chat bubbles")
         dropdown(lay, "Font size", "FONT_SIZE", ["10", "11", "12", "13", "14", "15", "16"])
         dropdown(lay, "Max width (% of window)", "BUBBLE_WIDTH", ["50", "60", "65", "72", "80", "90"])
@@ -3072,6 +3618,37 @@ class AgentWindow(QMainWindow):
         self._settings_overlay = overlay
         overlay.show()
         overlay.raise_()
+        # Phase 6c H — backdrop fades in (0 -> 1 effect over the 170-alpha
+        # backdrop) and the panel scales 0.97 -> 1.0.
+        self._animate_settings_open(overlay, panel)
+
+    def _animate_settings_open(self, overlay, panel):
+        if not self._animations_enabled:
+            return
+        fade = QGraphicsOpacityEffect(overlay)
+        overlay.setGraphicsEffect(fade)
+        a1 = QPropertyAnimation(fade, b"opacity", overlay)
+        a1.setDuration(OVERLAY_FADE_MS)
+        a1.setStartValue(0.0)
+        a1.setEndValue(1.0)
+        a1.setEasingCurve(QEasingCurve.Type.OutCubic)
+        a1.finished.connect(lambda: overlay.setGraphicsEffect(None))
+        a1.start()
+        self._settings_fade = a1
+
+        pw, ph = panel.width(), panel.height()
+        cx, cy = (overlay.width() - pw) // 2, (overlay.height() - ph) // 2
+        start = QRect(cx + int(pw * 0.015), cy + int(ph * 0.015),
+                      int(pw * 0.97), int(ph * 0.97))
+        end = QRect(cx, cy, pw, ph)
+        panel.setGeometry(start)
+        a2 = QPropertyAnimation(panel, b"geometry", panel)
+        a2.setDuration(OVERLAY_SCALE_MS)
+        a2.setStartValue(start)
+        a2.setEndValue(end)
+        a2.setEasingCurve(QEasingCurve.Type.OutCubic)
+        a2.start()
+        self._settings_scale = a2
 
     def _close_settings(self):
         if self._settings_overlay is not None:
@@ -3486,6 +4063,12 @@ class AgentWindow(QMainWindow):
             self.start_panel_timers()
         except Exception as e:
             print(f"[panel] timers failed to start: {e}")
+
+        # Phase 6c — ambient motion (status pulse, card entrance).
+        try:
+            self.start_motion()
+        except Exception as e:
+            print(f"[motion] failed to start: {e}")
 
         # Delay the tray like the old GUI (root.after(800, _start_tray)):
         # pystray needs the Qt event loop to be up and running first.
