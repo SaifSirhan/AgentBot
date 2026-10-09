@@ -54,6 +54,7 @@ webdriver-manager
 telethon             # Telegram user account
 google-api-python-client   # Gmail
 google-auth-oauthlib       # Gmail auth
+instagrapi           # Instagram DMs (gateway.py)
 
 # --- Packaging (build only, not needed to run) ---
 pyinstaller

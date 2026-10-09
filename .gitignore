@@ -12,6 +12,9 @@ config.json.bak*
 *password*
 *token*
 tokens.json
+ig_session.json
+ig_state.json
+ig_activity.log
 
 # ---- Local data / caches ----
 rag_db/

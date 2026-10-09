@@ -481,6 +481,17 @@ class AgentGUI:
 
         self.root.after(1200, self._settle_chat)
 
+        # Instagram gateway (only starts if INSTAGRAM_ENABLED is true).
+        # Wrapped so a missing instagrapi or a failed login never breaks the GUI.
+        try:
+            import gateway
+            from config import load_config
+            result = gateway.start_gateway(load_config())
+            if isinstance(result, str) and result.startswith("ERROR"):
+                print(f"[gateway] {result}")
+        except Exception as e:
+            print(f"[gateway] startup failed: {e}")
+
     # ------------------------------------------------------------------
     # Chrome helpers — sidebar, icon buttons, markdown reflow
     # ------------------------------------------------------------------
@@ -1389,6 +1400,9 @@ class AgentGUI:
                 "/label-gifs        → label every unlabeled GIF (costs API calls)\n"
                 "/label-gifs 50     → label the 50 most-reused only\n"
                 "/label-gifs min 2  → only GIFs sent 2+ times (cheapest start)\n\n"
+                "Instagram gateway (needs INSTAGRAM_ENABLED in config.json):\n\n"
+                "/ig status         → is the DM gateway running?\n"
+                "/ig restart        → stop and re-login the gateway\n\n"
                 "Telegram group export (private, stays outside the repo):\n\n"
                 "/import-chat <result.json>\n"
                 "       → parse a Telegram Desktop export into scrubbed monthly\n"
@@ -1618,6 +1632,26 @@ class AgentGUI:
 
             threading.Thread(target=work, daemon=True).start()
             return True
+
+        if cmd == "/ig":
+            import gateway
+            sub = (args or "status").strip().lower()
+            if sub == "status":
+                gw = gateway.get_active_adapter()
+                if gw is None:
+                    msg = "Instagram gateway: not running."
+                else:
+                    msg = f"Instagram gateway: running, poll every {gw.poll_interval}s."
+                return self._finish_slash_command(text, msg)
+            if sub == "restart":
+                gw = gateway.get_active_adapter()
+                if gw:
+                    gw.stop()
+                from config import load_config
+                result = gateway.start_gateway(load_config())
+                msg = str(result) if result else "Disabled in config."
+                return self._finish_slash_command(text, msg)
+            return self._finish_slash_command(text, "Usage: /ig status | /ig restart")
 
         try:
             import telegram_user
