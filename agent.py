@@ -472,10 +472,29 @@ def _call_gemini(prompt, force_json, max_tokens):
         if r.status_code != 200:
             return f"Error: HTTP {r.status_code}: {r.text[:200]}"
         data = r.json()
-        try:
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except (KeyError, IndexError):
-            return f"Error: unexpected response: {str(data)[:200]}"
+        candidates = data.get("candidates") or []
+        # A blocked prompt (safety/recitation) may return no candidates at all.
+        block = (data.get("promptFeedback") or {}).get("blockReason")
+        if block:
+            return f"Error: gemini blocked the prompt ({block})"
+        if not candidates:
+            return "Error: gemini returned no candidates"
+        cand = candidates[0]
+        finish = cand.get("finishReason")
+        parts = (cand.get("content") or {}).get("parts") or []
+        if parts and parts[0].get("text"):
+            return parts[0]["text"].strip()
+        # No usable text. Distinguish the common, benign case (the model ran
+        # out of output budget before emitting anything — reasoning models do
+        # this at low maxOutputTokens) from a genuinely malformed response.
+        # Returning an Error: string makes _call_llm fail over, which is
+        # correct; before this it said "unexpected response: {...}" which
+        # looked like a parser bug rather than an empty reply.
+        if finish == "MAX_TOKENS":
+            return "Error: gemini returned empty content (hit maxOutputTokens)"
+        if finish and finish not in ("STOP",):
+            return f"Error: gemini produced no text (finishReason={finish})"
+        return f"Error: gemini unexpected response: {str(data)[:200]}"
     except Exception as e:
         return f"Error: {e}"
 
