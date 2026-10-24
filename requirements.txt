@@ -51,6 +51,8 @@ schedule
 # --- Browser automation ---
 selenium
 webdriver-manager
+playwright            # Section 4 browser agent; run "python -m playwright install chromium" once
+jsonschema            # validates model-proposed browser actions
 
 # --- Messaging integrations ---
 telethon             # Telegram user account

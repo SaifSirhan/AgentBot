@@ -24,6 +24,7 @@ command dispatch) is replicated below as pure Python. tray.py and scheduler.py
 are plain-Python and safe to import.
 """
 from __future__ import annotations
+import concurrent.futures
 import contextlib
 import datetime
 import io
@@ -57,6 +58,7 @@ from PySide6.QtGui import (
     QLinearGradient,
     QPainter,
     QPainterPath,
+    QPen,
     QPixmap,
 )
 from PySide6.QtSvg import QSvgRenderer
@@ -719,7 +721,8 @@ HELP_TEXT = (
     "       → parse a Telegram Desktop export into scrubbed monthly\n"
     "         files under C:\\Users\\USER\\PrivateExport\n\n"
     "/reindex           → re-index RAG_AUTO_INDEX_FOLDERS\n\n"
-    "/reload-skills     → rescan skills/ and the legacy AppData skills folder"
+    "/reload-skills     → rescan skills/ and the legacy AppData skills folder\n\n"
+    "/browse URL | task → run the restricted browser agent (approvals in chat)"
 )
 
 
@@ -1493,6 +1496,153 @@ class UntrustedTextMessage(MessageBase):
         self.body_label = body
 
 
+class BrowserApprovalCard(QFrame):
+    """Inline approval for one browser action (never blocks the Qt thread)."""
+
+    resolved = Signal(bool)
+
+    def __init__(self, payload: dict):
+        super().__init__()
+        self.setObjectName("browserApproval")
+        self._payload = payload
+        self._future = payload.get("future")
+        self._resolved = False
+        self._timer = None
+        self.setStyleSheet(
+            f"QFrame#browserApproval {{ background: #0c0f0e; "
+            f"border: 1px solid {COLOR_BORDER}; border-radius: 6px; }}"
+        )
+
+        col = QVBoxLayout(self)
+        col.setContentsMargins(14, 10, 14, 10)
+        col.setSpacing(6)
+        self._col = col
+
+        header = QLabel(f"BROWSER APPROVAL \u2014 {payload.get('summary', 'action')}")
+        header.setWordWrap(True)
+        header.setTextFormat(Qt.TextFormat.PlainText)
+        header.setStyleSheet(
+            f"color: {COLOR_ACCENT}; font-family: '{FONT_MONO}'; "
+            "font-size: 12px; font-weight: bold;"
+        )
+        col.addWidget(header)
+
+        url = QLabel(str(payload.get("url") or ""))
+        url.setWordWrap(True)
+        url.setTextFormat(Qt.TextFormat.PlainText)
+        url.setStyleSheet(
+            f"color: {COLOR_TEXT_LOW}; font-family: '{FONT_MONO}'; font-size: 11px;"
+        )
+        col.addWidget(url)
+
+        if payload.get("screenshot_png"):
+            self._add_marked_screenshot(
+                payload["screenshot_png"], payload.get("x"), payload.get("y"))
+
+        self.status_label = QLabel("Waiting for your decision\u2026")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet(
+            f"color: {COLOR_TEXT_LOW}; font-size: 11px;")
+        col.addWidget(self.status_label)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.allow_btn = QPushButton("Allow")
+        self.deny_btn = QPushButton("Deny & stop")
+        for button in (self.allow_btn, self.deny_btn):
+            button.setFixedHeight(26)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.allow_btn.clicked.connect(
+            lambda: self._resolve(True, "Allowed"))
+        self.deny_btn.clicked.connect(
+            lambda: self._resolve(False, "Denied \u2014 task stopped"))
+        row.addWidget(self.allow_btn)
+        row.addWidget(self.deny_btn)
+        row.addStretch(1)
+        col.addLayout(row)
+
+        try:
+            timeout_ms = max(1_000, int(float(payload.get("timeout") or 120) * 1000))
+        except (TypeError, ValueError):
+            timeout_ms = 120_000
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._expire)
+        self._timer.start(timeout_ms)
+
+    def _add_marked_screenshot(self, png, x, y):
+        pix = QPixmap()
+        if not pix.loadFromData(png):
+            return
+        original_width = pix.width()
+        if original_width > 560:
+            pix = pix.scaledToWidth(
+                560, Qt.TransformationMode.SmoothTransformation)
+        scale = pix.width() / max(1, original_width)
+        try:
+            px = int(float(x) * scale)
+            py = int(float(y) * scale)
+        except (TypeError, ValueError):
+            px = py = 0
+
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(COLOR_ACCENT), 3))
+        painter.drawEllipse(px - 14, py - 14, 28, 28)
+        painter.drawLine(px - 22, py, px + 22, py)
+        painter.drawLine(px, py - 22, px, py + 22)
+        painter.end()
+
+        image = QLabel()
+        image.setPixmap(pix)
+        image.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._col.addWidget(image)
+
+    def _expire(self):
+        self._resolve(False, "Expired \u2014 denied")
+
+    def _resolve(self, approved: bool, note: str):
+        if self._resolved:
+            return
+        self._resolved = True
+        if self._timer is not None:
+            self._timer.stop()
+        self.allow_btn.setEnabled(False)
+        self.deny_btn.setEnabled(False)
+        if self._future is not None and not self._future.done():
+            with contextlib.suppress(Exception):
+                self._future.set_result(bool(approved))
+        self.status_label.setText(note)
+        self.resolved.emit(bool(approved))
+
+
+class BrowserApprovalBridge(QObject):
+    """Thread-safe bridge: service loop -> Qt main thread -> future."""
+
+    requested = Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lock = threading.Lock()
+        self._pending = {}
+
+    def __call__(self, request: dict):
+        future = concurrent.futures.Future()
+        request_id = str(request.get("id") or "")
+        with self._lock:
+            self._pending[request_id] = future
+        payload = dict(request)
+        payload["future"] = future
+        self.requested.emit(payload)
+
+        def cleanup(_):
+            with self._lock:
+                self._pending.pop(request_id, None)
+
+        future.add_done_callback(cleanup)
+        return future
+
+
 # ----------------------------------------------------------------------
 # Chat view with scroll-lock
 # ----------------------------------------------------------------------
@@ -2258,6 +2408,8 @@ class AgentWindow(QMainWindow):
         self._telegram_service = None
         self._telegram_results = None
         self._telegram_timer = None
+        # Section 4 — browser approval bridge (created after the chat view).
+        self._browser_bridge = None
         # Phase 6b panel timers (all created here, on the main thread) + state.
         self._system_timer = None
         self._weather_timer = None
@@ -2300,6 +2452,8 @@ class AgentWindow(QMainWindow):
         self.panel.notif_clear_btn.clicked.connect(self.panel.clear_notifications)
 
         self.setCentralWidget(central)
+
+        self._setup_browser_bridge()
 
     def _build_right_panel(self) -> QWidget:
         self._right_panel_inner = RightPanel()
@@ -3391,6 +3545,15 @@ class AgentWindow(QMainWindow):
                 result = f"ERROR: {e}"
             return self._finish_slash_command(text, result)
 
+        if cmd == "/browse":
+            if "|" not in args:
+                return self._finish_slash_command(
+                    text, "ERROR: format is /browse https://site | task")
+            self._run_background_command(
+                text, "Starting browser task\u2026",
+                lambda: agent.browse_web(args))
+            return True
+
         if cmd == "/find":
             result = ("ERROR: format is /find Folder|pat1,pat2" if not args
                       else agent.find_files(args))
@@ -4430,6 +4593,30 @@ class AgentWindow(QMainWindow):
             ), fade=False)
 
     # ------------------------------------------------------------------
+    # Section 4 — browser approvals
+    # ------------------------------------------------------------------
+    def _setup_browser_bridge(self):
+        """Register the Qt approval bridge with the browser service."""
+        try:
+            import browser_agent
+            bridge = BrowserApprovalBridge(self)
+            bridge.requested.connect(self._on_browser_approval_request)
+            browser_agent.set_approval_handler(bridge)
+            self._browser_bridge = bridge
+        except Exception as e:
+            print(f"[browser] approval bridge unavailable: {e}")
+
+    def _on_browser_approval_request(self, payload):
+        card = BrowserApprovalCard(payload)
+        self.chat.add_message(card, fade=False)
+        card.resolved.connect(self._on_browser_approval_resolved)
+        self.set_status("Waiting for browser approval\u2026", busy=True)
+
+    def _on_browser_approval_resolved(self, approved):
+        if self._processing:
+            self.set_status("Browsing\u2026", busy=True)
+
+    # ------------------------------------------------------------------
     # Background services — tray, hotkey, scheduler
     # ------------------------------------------------------------------
     def start_services(self):
@@ -4661,6 +4848,14 @@ class AgentWindow(QMainWindow):
             except Exception:
                 pass
             self._hotkey_installed = False
+        # Section 4 — cancel any browser task and detach the approval bridge.
+        try:
+            import browser_agent
+            browser_agent.shutdown()
+            browser_agent.set_approval_handler(None)
+        except Exception:
+            pass
+        self._browser_bridge = None
         QApplication.instance().quit()
 
     def closeEvent(self, event):

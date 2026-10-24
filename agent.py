@@ -1035,6 +1035,7 @@ def _build_plan_prompt(user_request, context, correction=None):
             "- telegram_user_send, telegram_user_delete, telegram_user_edit\n"
             "- describe_image, send_image_telegram\n"
             "- load_skill (skills are disabled in groups)\n"
+            "- browse_web (browser control is disabled in groups)\n"
             "- All system tools (volume, media, lock, shutdown)\n\n"
             "If a user asks for any blocked capability, reply briefly: you "
             "can't do that in a group, DM the bot directly. Do NOT attempt "
@@ -4239,6 +4240,13 @@ SKILL MANAGEMENT
     The returned text is the procedure; follow its steps and use read_file for
     any files it references.
 
+BROWSER CONTROL
+  browse_web(input) — control a browser through a separate restricted agent.
+    Format: "https://site | task" where the URL must be in
+    BROWSER_ALLOWED_ORIGINS. The browser agent observes the page, proposes one
+    action at a time, and asks the user to approve clicks, fills and selects.
+    Returns a report; do not claim success unless the report says completed.
+
 =====================================================================
 10. EXAMPLES
 =====================================================================
@@ -4303,7 +4311,7 @@ VALID_TOOLS = {
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
     "search_group_chat", "grep_group_chat", "rag_search",
     "edit_document", "post_to_social",
-    "skill_manage", "load_skill",
+    "skill_manage", "load_skill", "browse_web",
 }
 
 
@@ -4622,6 +4630,29 @@ def grep_group_chat(input_str):
 # ---------------------------
 # TOOL EXECUTION
 # ---------------------------
+def browse_web(input_str):
+    """Run one bounded browser task. Format: "https://site | task"."""
+    parts = (input_str or "").split("|", 1)
+    if len(parts) < 2:
+        return 'ERROR: format is "https://site | task"'
+    url, task = parts[0].strip(), parts[1].strip()
+    if not url or not task:
+        return "ERROR: browse_web needs both a URL and a task."
+
+    try:
+        import browser_agent as _browser_agent
+        settings = _browser_agent.load_settings()
+        if not settings.enabled:
+            return ("ERROR: browser agent is disabled. Set BROWSER_ENABLED=true "
+                    "and BROWSER_ALLOWED_ORIGINS in config.json.")
+        planner = lambda prompt: _call_llm(prompt, force_json=True, max_tokens=700)
+        result = _browser_agent.run_task_sync(
+            url, task, planner=planner, settings=settings)
+        return _browser_agent.format_report(result)
+    except Exception as exc:
+        return f"ERROR: {exc}"
+
+
 def execute_tool(action):
     tool = action.get('tool')
     inp = action.get('input', '')
@@ -4706,6 +4737,7 @@ def execute_tool(action):
             parts.append("")
         return skill_manage(parts[0], parts[1], parts[2])
     elif tool == 'load_skill':             return load_skill_tool(inp)
+    elif tool == 'browse_web':             return browse_web(inp)
     elif tool == 'run_command':            return run_command(inp)
     elif tool == 'search_web':             return search_web(inp)
     elif tool == 'show_last_result':       return show_last_result()

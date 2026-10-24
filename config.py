@@ -53,6 +53,17 @@ DEFAULTS = {
 "TTS_SPEED": "1.0",
 "TTS_LANG": "a",
 "TTS_MAX_CHARS": "2000",
+# Section 4 — restricted browser agent. Disabled until both the flag and at
+# least one HTTPS origin allowlist entry are set. Vision sends screenshots to
+# an external model, so it stays off until explicitly enabled.
+"BROWSER_ENABLED": False,
+"BROWSER_ALLOWED_ORIGINS": "",
+"BROWSER_HEADLESS": False,
+"BROWSER_MAX_STEPS": 15,
+"BROWSER_TASK_TIMEOUT": 180,
+"BROWSER_APPROVAL_TIMEOUT": 120,
+"BROWSER_VISION_ENABLED": False,
+"BROWSER_VISION_MODEL": "deepseek-flash",
 # Phase 6c — GUI motion (pulses, fades, transitions). When false, every
 # animated element renders in its final state immediately.
 "ANIMATIONS_ENABLED": True,
