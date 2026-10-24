@@ -2370,11 +2370,62 @@ def list_reminders():
 # ---------------------------
 # WEB SEARCH
 # ---------------------------
-def search_web(query):
-    global last_search_query, last_search_result
-    last_search_query = query
-    last_search_result = ""
+# DeepSeek's official Search & Fetch tools:
+# https://api-docs.deepseek.com/guides/search/
+DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
+DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
+MAX_FETCH_CHARS = 8000
 
+
+def _deepseek_headers():
+    return {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _deepseek_search(query, count=5):
+    """Call DeepSeek Search. Returns (formatted_text, error)."""
+    if not DEEPSEEK_API_KEY:
+        return None, "DEEPSEEK_API_KEY not set"
+
+    try:
+        r = requests.post(
+            DEEPSEEK_SEARCH_URL,
+            headers=_deepseek_headers(),
+            # The API caps queries at 128 chars.
+            json={"query": query[:128], "count": max(1, min(50, count)),
+                  "need_content": True},
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}: {r.text[:200]}"
+
+        data = r.json()
+        results = []
+        for item in (data.get("results") or [])[:count]:
+            title = str(item.get("title") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if not title or not url:
+                continue
+            summary = (str(item.get("summary") or "")
+                       or str(item.get("snippet") or "")
+                       or str(item.get("content") or "")).strip()
+            entry = f"{title} -> {url}"
+            if summary:
+                entry += f"\n  {summary[:240]}"
+            results.append(entry)
+
+        if not results:
+            return None, "no usable results"
+        return ("Real search results (use these EXACT URLs):\n"
+                + "\n".join(results)), None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _search_web_legacy(query):
+    """Old keyless Tavily backend, kept as a fallback."""
     try:
         r = requests.post(
             "https://api.tavily.com/search",
@@ -2387,13 +2438,9 @@ def search_web(query):
         )
 
         if r.status_code == 429:
-            msg = "ERROR: Tavily rate limit hit (keyless). Try again in a moment."
-            last_search_result = msg
-            return msg
+            return "ERROR: Tavily rate limit hit (keyless). Try again in a moment."
         if r.status_code != 200:
-            msg = f"ERROR: Tavily HTTP {r.status_code}: {r.text[:150]}"
-            last_search_result = msg
-            return msg
+            return f"ERROR: Tavily HTTP {r.status_code}: {r.text[:150]}"
 
         data = r.json()
         results = []
@@ -2409,22 +2456,41 @@ def search_web(query):
             results.append(entry)
 
         if not results:
-            msg = f"ERROR: Tavily returned 0 results for '{query}'."
-            last_search_result = msg
-            return msg
-
-        out = "Real search results (use these EXACT URLs):\n" + "\n".join(results)
-        last_search_result = out
-        return out
-
+            return f"ERROR: Tavily returned 0 results for '{query}'."
+        return "Real search results (use these EXACT URLs):\n" + "\n".join(results)
     except requests.exceptions.Timeout:
-        msg = "ERROR: Tavily search timed out."
-        last_search_result = msg
-        return msg
+        return "ERROR: Tavily search timed out."
     except Exception as e:
-        msg = f"ERROR: Tavily search failed: {e}"
+        return f"ERROR: Tavily search failed: {e}"
+
+
+def search_web(query):
+    global last_search_query, last_search_result
+    query = (query or "").strip()
+    last_search_query = query
+    last_search_result = ""
+
+    if not query:
+        msg = "ERROR: search_web needs a query."
         last_search_result = msg
         return msg
+
+    text, deepseek_error = _deepseek_search(query)
+    if text:
+        last_search_result = text
+        return text
+
+    fallback = _search_web_legacy(query)
+    if fallback and not fallback.startswith("ERROR"):
+        last_search_result = fallback
+        return fallback
+
+    detail = (fallback or "no response").removeprefix("ERROR: ")
+    msg = (f"ERROR: web search failed (DeepSeek: {deepseek_error}; "
+           f"fallback: {detail})")[:400]
+    last_search_result = msg
+    return msg
+
 
 def show_last_result():
     global last_search_result
@@ -2560,18 +2626,77 @@ def _web_norm_url(input_str):
     return url
 
 
-def fetch_clean(input_str):
-    """Fetch a URL and return its raw extracted text — no summarization."""
+def _fetch_clean_legacy(input_str):
+    """Legacy local extraction, kept as a fallback for web_fetch."""
     url = _web_norm_url(input_str)
     if not url:
-        return "ERROR: fetch_clean needs a URL."
+        return "ERROR: web_fetch needs a URL."
     html, err = _web_fetch(url)
     if err:
         return err
-    text = _web_text(html, limit=8000)
+    text = _web_text(html, limit=MAX_FETCH_CHARS)
     if not text:
         return f"ERROR: no readable text extracted from {url}."
     return f"[Clean text from {url}]\n\n{text}"
+
+
+def _deepseek_fetch(url):
+    """Call DeepSeek Fetch. Returns (markdown_text, error)."""
+    if not DEEPSEEK_API_KEY:
+        return None, "DEEPSEEK_API_KEY not set"
+
+    try:
+        r = requests.post(
+            DEEPSEEK_FETCH_URL,
+            headers=_deepseek_headers(),
+            json={"url": url},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}: {r.text[:200]}"
+
+        data = r.json()
+        title = str(data.get("title") or "").strip()
+        content = str(data.get("content") or "").strip()
+        if not content:
+            return None, "empty markdown response"
+
+        if len(content) > MAX_FETCH_CHARS:
+            content = content[:MAX_FETCH_CHARS] + "\n\n[... truncated]"
+        header = f"[Fetched: {title}]" if title else "[Fetched]"
+        return f"{header}\n{url}\n\n{content}", None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def web_fetch(input_str):
+    """Fetch a URL as clean Markdown via DeepSeek, with a local fallback."""
+    raw = (input_str or "").strip().strip('"').strip("'")
+    if raw and urllib.parse.urlparse(raw).scheme not in ("", "http", "https"):
+        return "ERROR: web_fetch needs an http(s) URL."
+
+    url = _web_norm_url(raw)
+    if not url:
+        return "ERROR: web_fetch needs a URL."
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return "ERROR: web_fetch needs an http(s) URL."
+    if len(url) > 8192:
+        return "ERROR: URL is too long (max 8192 characters)."
+
+    text, deepseek_error = _deepseek_fetch(url)
+    if text:
+        return text
+
+    fallback = _fetch_clean_legacy(url)
+    if fallback and not fallback.startswith("ERROR"):
+        return (f"{fallback}\n\n[DeepSeek fetch unavailable: {deepseek_error}; "
+                "used local extraction]")
+
+    detail = (fallback or "no response").removeprefix("ERROR: ")
+    return (f"ERROR: web_fetch failed (DeepSeek: {deepseek_error}; "
+            f"fallback: {detail})")[:500]
 
 
 def map_site(input_str):
@@ -4019,7 +4144,8 @@ Match the requested shape.
 Format: name(input) — description. Invoke as {"tool":"name","input":"..."}.
 
 INFORMATION & WEB
-  search_web(input) — web search for current/external facts.
+  search_web(input) — search the live web via DeepSeek Search (falls back to
+the legacy engine). Returns titles, URLs and summaries. Use these exact URLs.
   serp_search(input) — structured web search via SerpApi (Google, News, Images,
 Scholar, Maps, Flights, Hotels, Shopping, YouTube). Format: "query|engine"
 (engine optional, default google). Falls back to search_web if no API key is set.
@@ -4036,8 +4162,9 @@ Scholar, Maps, Flights, Hotels, Shopping, YouTube). Format: "query|engine"
 from up to N pages. Format: "url|max_pages" (default 10, max 50).
   map_site(input) — list all URLs on a site without reading content. Tries
 sitemap.xml first.
-  fetch_clean(input) — fetch a URL and return its raw extracted text (no
-summarization). For summaries, use read_and_summarize instead.
+  web_fetch(input) — fetch a URL as clean Markdown via DeepSeek Fetch (falls
+back to local text extraction). Use after search_web; for a summary use
+read_and_summarize instead.
   crawl_managed(input) — crawl via a managed service (Crawlbase or Firecrawl)
 with JS rendering and anti-bot handling; falls back to crawl_site if no API
 key is set. Format: "url|mode" (mode optional, default markdown). Modes:
@@ -4306,7 +4433,7 @@ VALID_TOOLS = {
     "find_files", "move_files",
     "patch_file", "list_symbols", "repo_map",
     "whitelist", "send_maps_list",    "whitelist", "deep_research", "hardware_scan", "recommend_models",
-    "crawl_site", "map_site", "fetch_clean", "run_recipe", "crawl_managed",
+    "crawl_site", "map_site", "web_fetch", "run_recipe", "crawl_managed",
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
     "search_group_chat", "grep_group_chat", "rag_search",
@@ -4707,7 +4834,7 @@ def execute_tool(action):
     elif tool == 'repo_map':               return repo_map(inp)
     elif tool == 'crawl_site':             return crawl_site(inp)
     elif tool == 'map_site':               return map_site(inp)
-    elif tool == 'fetch_clean':            return fetch_clean(inp)
+    elif tool == 'web_fetch':              return web_fetch(inp)
     elif tool == 'crawl_managed':
         parts = inp.split("|", 1)
         url = parts[0].strip()
