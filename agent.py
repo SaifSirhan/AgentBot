@@ -1036,6 +1036,7 @@ def _build_plan_prompt(user_request, context, correction=None):
             "- describe_image, send_image_telegram\n"
             "- load_skill (skills are disabled in groups)\n"
             "- browse_web (browser control is disabled in groups)\n"
+            "- screenshot_background, click_coordinates, type_text, get_pixel_color (OS control)\n"
             "- All system tools (volume, media, lock, shutdown)\n\n"
             "If a user asks for any blocked capability, reply briefly: you "
             "can't do that in a group, DM the bot directly. Do NOT attempt "
@@ -4368,11 +4369,18 @@ SKILL MANAGEMENT
     any files it references.
 
 BROWSER CONTROL
-  browse_web(input) — control a browser through a separate restricted agent.
-    Format: "https://site | task" where the URL must be in
-    BROWSER_ALLOWED_ORIGINS. The browser agent observes the page, proposes one
-    action at a time, and asks the user to approve clicks, fills and selects.
-    Returns a report; do not claim success unless the report says completed.
+  browse_web(input) — run a restricted browser agent. Format:
+    "https://site | task"; the origin must be allowlisted. The agent asks for
+    approval for clicks/fills/selects. Do not claim success unless the report
+    says completed.
+
+OS CONTROL
+  screenshot_background() — hide the GUI, capture the primary monitor to a
+    PNG, restore the GUI, and return the path, image size and DPI. Inspect it
+    with describe_image, then get_pixel_color.
+  click_coordinates(input) — left-click "x,y" in screenshot pixels.
+  type_text(input) — type into the focused window (max 5,000 chars); click first.
+  get_pixel_color(input) — hex colour at "x,y" in screenshot pixels.
 
 =====================================================================
 10. EXAMPLES
@@ -4423,6 +4431,7 @@ VALID_TOOLS = {
     "schedule_task",    "clipboard_read", "clipboard_write", "set_volume", "media_control",
     "system_status", "lock_pc", "sleep_pc", "shutdown_pc", "restart_pc",
     "save_screenshot", "todo", "list_windows", "focus_window", "notify",
+    "screenshot_background", "click_coordinates", "type_text", "get_pixel_color",
     "beep", "done", "set_reminder_at", "list_reminders", "list_brains",
     "close_window", "watch_folder", "stop_watching",
     "gmail_unread", "gmail_read", "gmail_search",
@@ -4757,6 +4766,39 @@ def grep_group_chat(input_str):
 # ---------------------------
 # TOOL EXECUTION
 # ---------------------------
+def _os_control_module():
+    import os_control as _os_control
+    return _os_control
+
+
+def screenshot_background():
+    try:
+        return _os_control_module().screenshot_background()
+    except Exception as exc:
+        return f"ERROR: OS control unavailable: {exc}"
+
+
+def click_coordinates(input_str):
+    try:
+        return _os_control_module().click_coordinates(input_str)
+    except Exception as exc:
+        return f"ERROR: OS control unavailable: {exc}"
+
+
+def type_text(input_str):
+    try:
+        return _os_control_module().type_text(input_str)
+    except Exception as exc:
+        return f"ERROR: OS control unavailable: {exc}"
+
+
+def get_pixel_color(input_str):
+    try:
+        return _os_control_module().get_pixel_color(input_str)
+    except Exception as exc:
+        return f"ERROR: OS control unavailable: {exc}"
+
+
 def browse_web(input_str):
     """Run one bounded browser task. Format: "https://site | task"."""
     parts = (input_str or "").split("|", 1)
@@ -4835,6 +4877,10 @@ def execute_tool(action):
     elif tool == 'crawl_site':             return crawl_site(inp)
     elif tool == 'map_site':               return map_site(inp)
     elif tool == 'web_fetch':              return web_fetch(inp)
+    elif tool == 'screenshot_background':  return screenshot_background()
+    elif tool == 'click_coordinates':      return click_coordinates(inp)
+    elif tool == 'type_text':              return type_text(inp)
+    elif tool == 'get_pixel_color':        return get_pixel_color(inp)
     elif tool == 'crawl_managed':
         parts = inp.split("|", 1)
         url = parts[0].strip()

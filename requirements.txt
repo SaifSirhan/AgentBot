@@ -46,6 +46,7 @@ comtypes             # required by pycaw
 # --- System / process ---
 psutil
 pyautogui
+mss                  # fast primary-monitor screenshots (os_control.py)
 schedule
 
 # --- Browser automation ---

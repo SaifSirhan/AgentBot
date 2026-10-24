@@ -2363,6 +2363,7 @@ class AgentWindow(QMainWindow):
     _hotkey_changed = Signal(bool)   # F9 pressed/released (from keyboard thread)
     _voice_event = Signal(str)       # recording/transcription status from worker
     _weather_ready = Signal(str)     # parsed weather text (from worker thread)
+    _gui_visibility_request = Signal(bool, object)  # (show, completion event)
 
     def __init__(self):
         super().__init__()
@@ -2410,6 +2411,10 @@ class AgentWindow(QMainWindow):
         self._telegram_timer = None
         # Section 4 — browser approval bridge (created after the chat view).
         self._browser_bridge = None
+        # Option 2 — OS control (hide/show bridge and kill switch).
+        self._os_control = None
+        self._gui_was_visible = True
+        self._gui_was_minimized = False
         # Phase 6b panel timers (all created here, on the main thread) + state.
         self._system_timer = None
         self._weather_timer = None
@@ -2422,6 +2427,7 @@ class AgentWindow(QMainWindow):
         self._hotkey_changed.connect(self._on_hotkey_changed)
         self._voice_event.connect(self._on_voice_event)
         self._weather_ready.connect(self._on_weather_ready)
+        self._gui_visibility_request.connect(self._apply_gui_visibility)
 
         # Conversation history shared with agent.run_agent_turn, loaded once.
         self.conversation_history = []
@@ -2454,6 +2460,7 @@ class AgentWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._setup_browser_bridge()
+        self._setup_os_control()
 
     def _build_right_panel(self) -> QWidget:
         self._right_panel_inner = RightPanel()
@@ -4617,6 +4624,57 @@ class AgentWindow(QMainWindow):
             self.set_status("Browsing\u2026", busy=True)
 
     # ------------------------------------------------------------------
+    # Option 2 — OS control (hide/show + kill switch)
+    # ------------------------------------------------------------------
+    def _setup_os_control(self):
+        """Install the hide/show bridge and start the kill-switch watcher."""
+        try:
+            import os_control
+            os_control.set_gui_visibility_handlers(
+                self._hide_gui_for_screenshot,
+                self._show_gui_after_screenshot,
+            )
+            os_control.ensure_kill_switch()
+            try:
+                import browser_agent
+                os_control.add_kill_callback(
+                    browser_agent.cancel_current_task)
+            except Exception:
+                pass
+            self._os_control = os_control
+        except Exception as e:
+            print(f"[os] OS control unavailable: {e}")
+
+    def _hide_gui_for_screenshot(self):
+        """Called from the agent worker; blocks until Qt has hidden the window."""
+        event = threading.Event()
+        self._gui_visibility_request.emit(False, event)
+        if not event.wait(timeout=1.5):
+            raise RuntimeError("GUI hide timed out")
+
+    def _show_gui_after_screenshot(self):
+        event = threading.Event()
+        self._gui_visibility_request.emit(True, event)
+        event.wait(timeout=1.5)
+
+    def _apply_gui_visibility(self, visible: bool, event):
+        try:
+            if not visible:
+                self._gui_was_visible = self.isVisible()
+                self._gui_was_minimized = self.isMinimized()
+                self.hide()
+            elif self._gui_was_visible:
+                if self._gui_was_minimized:
+                    self.showMinimized()
+                else:
+                    self.show()
+                    self.raise_()
+                    self.activateWindow()
+        finally:
+            if event is not None:
+                event.set()
+
+    # ------------------------------------------------------------------
     # Background services — tray, hotkey, scheduler
     # ------------------------------------------------------------------
     def start_services(self):
@@ -4842,6 +4900,14 @@ class AgentWindow(QMainWindow):
                 self._tray_icon.stop()
             except Exception:
                 pass
+        # Option 2 — stop the OS kill-switch watcher and detach the GUI bridge.
+        try:
+            import os_control
+            os_control.stop_kill_switch()
+            os_control.set_gui_visibility_handlers(None, None)
+        except Exception:
+            pass
+        self._os_control = None
         if self._hotkey_installed and keyboard is not None:
             try:
                 keyboard.unhook_all()
