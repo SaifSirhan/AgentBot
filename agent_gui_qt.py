@@ -718,7 +718,8 @@ HELP_TEXT = (
     "/import-chat <result.json>\n"
     "       → parse a Telegram Desktop export into scrubbed monthly\n"
     "         files under C:\\Users\\USER\\PrivateExport\n\n"
-    "/reindex           → re-index RAG_AUTO_INDEX_FOLDERS"
+    "/reindex           → re-index RAG_AUTO_INDEX_FOLDERS\n\n"
+    "/reload-skills     → rescan skills/ and the legacy AppData skills folder"
 )
 
 
@@ -3373,6 +3374,22 @@ class AgentWindow(QMainWindow):
         except Exception as e:
             self._finish_slash_command(text, f"ERROR: {e}")
             return True
+
+        if cmd == "/reload-skills":
+            if self._processing:
+                self.chat.add_message(AssistantMessage(
+                    "ERROR: /reload-skills is unavailable while a turn is running."))
+                return True
+            try:
+                manager = agent.reload_skills()
+                result = manager.summary()
+                warnings = manager.warnings
+                if warnings:
+                    result += "\nWarnings:\n" + "\n".join(
+                        f"- {w}" for w in warnings)
+            except Exception as e:
+                result = f"ERROR: {e}"
+            return self._finish_slash_command(text, result)
 
         if cmd == "/find":
             result = ("ERROR: format is /find Folder|pat1,pat2" if not args

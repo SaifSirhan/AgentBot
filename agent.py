@@ -220,6 +220,71 @@ TODO_FILE = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'tod
 SKILLS_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "AgentMemory" / "skills"
 SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Repo-owned roots for versioned skills and plugin packs. The legacy
+# SKILLS_DIR above is still scanned as a lower-priority extra root.
+REPO_ROOT = Path(__file__).resolve().parent
+SKILLS_ROOT = REPO_ROOT / "skills"
+PLUGINS_ROOT = REPO_ROOT / "plugins"
+
+_skill_manager = None
+_skill_manager_lock = _threading.RLock()
+_skills_dirty = True
+
+
+def get_skill_manager():
+    """Return the shared SkillManager, rescanning when skills changed."""
+    global _skill_manager, _skills_dirty
+    with _skill_manager_lock:
+        if _skill_manager is None:
+            import skill_manager as _skill_manager_module
+            _skill_manager = _skill_manager_module.SkillManager(
+                skills_dir=str(SKILLS_ROOT),
+                plugins_dir=str(PLUGINS_ROOT),
+                extra_skills_dirs=[str(SKILLS_DIR)],
+            )
+            _skills_dirty = True
+        if _skills_dirty:
+            _skill_manager.scan()
+            _skills_dirty = False
+        return _skill_manager
+
+
+def reload_skills():
+    """Force a rescan on the next access; returns the refreshed manager."""
+    global _skills_dirty
+    with _skill_manager_lock:
+        _skills_dirty = True
+        return get_skill_manager()
+
+
+def mark_skills_dirty():
+    """Mark the catalog stale after skill_manage writes to disk."""
+    global _skills_dirty
+    with _skill_manager_lock:
+        _skills_dirty = True
+
+
+def get_skill_catalog():
+    """Compact skill catalog for the system prompt ("" if unavailable)."""
+    try:
+        return get_skill_manager().system_prompt()
+    except Exception:
+        return ""
+
+
+def load_skill_tool(skill_id):
+    """Execute the load_skill tool; returns the skill text or an ERROR string."""
+    skill_id = (skill_id or "").strip()
+    if not skill_id:
+        return "ERROR: load_skill needs a skill id from the AVAILABLE SKILLS list."
+    try:
+        result = get_skill_manager().invoke_tool(skill_id)
+    except Exception as exc:
+        return f"ERROR: skills unavailable ({exc})"
+    if not result.get("ok"):
+        return f"ERROR: {result.get('error')}"
+    return result.get("content", "")
+
 
 def _parse_skill_frontmatter(text: str) -> tuple:
     """Return (frontmatter_dict, body). Tolerant of missing frontmatter."""
@@ -297,6 +362,7 @@ def skill_manage(action: str, name: str = "", content: str = "") -> str:
         for f in sk.iterdir():
             f.unlink()
         sk.rmdir()
+        mark_skills_dirty()
         return f"Deleted skill '{name}'."
 
     if action in ("create", "update"):
@@ -313,6 +379,7 @@ def skill_manage(action: str, name: str = "", content: str = "") -> str:
         fm["last_used"] = fm.get("last_used", fm["created"])
         fm.setdefault("use_count", "0")
         (d / "SKILL.md").write_text(_render_skill(fm, body), encoding="utf-8")
+        mark_skills_dirty()
         return f"Skill '{name}' {'updated' if action=='update' else 'created'}."
 
     return f"ERROR: unknown action '{action}'."
@@ -943,15 +1010,12 @@ def _build_plan_prompt(user_request, context, correction=None):
     known_facts = memory.get_facts_block()
     facts_block = f"\nKnown facts about the user:\n{known_facts}\n" if known_facts else ""
 
-    try:
-        skill_names = (sorted(p.name for p in SKILLS_DIR.iterdir() if p.is_dir())
-                       if SKILLS_DIR.exists() else [])
-    except Exception:
-        skill_names = []
-    if skill_names:
-        facts_block += ("\nAVAILABLE SKILLS (use skill_manage with action=read "
-                        "to load full text):\n")
-        facts_block += "\n".join(f"- {n}" for n in skill_names) + "\n"
+    # Skills are personal procedures; group chats never see the catalog and
+    # execute_tool blocks load_skill there too.
+    if not GROUP_MODE:
+        skill_catalog = get_skill_catalog()
+        if skill_catalog:
+            facts_block += "\n" + skill_catalog + "\n"
 
     now_str = datetime.datetime.now().strftime("%A, %B %d, %Y — %I:%M %p")
     time_block = f"\nCURRENT DATE AND TIME: {now_str} (use this; never guess)\n"
@@ -970,6 +1034,7 @@ def _build_plan_prompt(user_request, context, correction=None):
             "- remember, forget (personal memory writes)\n"
             "- telegram_user_send, telegram_user_delete, telegram_user_edit\n"
             "- describe_image, send_image_telegram\n"
+            "- load_skill (skills are disabled in groups)\n"
             "- All system tools (volume, media, lock, shutdown)\n\n"
             "If a user asks for any blocked capability, reply briefly: you "
             "can't do that in a group, DM the bot directly. Do NOT attempt "
@@ -4168,6 +4233,11 @@ SKILL MANAGEMENT
       content: full SKILL.md text (required for create/update only)
     NEVER invent a skill body. Only create skills from procedures you actually
     executed.
+  load_skill(input) — load the full text of one skill listed in AVAILABLE
+    SKILLS. Read it before performing the workflow it describes. Format:
+    "skill_id" using the id from the catalog (e.g. "local:clock-out-reminder").
+    The returned text is the procedure; follow its steps and use read_file for
+    any files it references.
 
 =====================================================================
 10. EXAMPLES
@@ -4233,7 +4303,7 @@ VALID_TOOLS = {
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
     "search_group_chat", "grep_group_chat", "rag_search",
     "edit_document", "post_to_social",
-    "skill_manage",
+    "skill_manage", "load_skill",
 }
 
 
@@ -4635,6 +4705,7 @@ def execute_tool(action):
         while len(parts) < 3:
             parts.append("")
         return skill_manage(parts[0], parts[1], parts[2])
+    elif tool == 'load_skill':             return load_skill_tool(inp)
     elif tool == 'run_command':            return run_command(inp)
     elif tool == 'search_web':             return search_web(inp)
     elif tool == 'show_last_result':       return show_last_result()

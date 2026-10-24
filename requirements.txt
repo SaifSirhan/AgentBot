@@ -19,6 +19,7 @@ feedparser
 serpapi-search-tools # structured web search (serpapi_tool.serp_search); optional, falls back to search_web
 
 # --- LLM / RAG ---
+PyYAML>=6.0.3,<7      # skill_manager.py frontmatter parsing
 chromadb
 sentence-transformers
 pypdf
