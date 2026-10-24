@@ -3,12 +3,23 @@
 Run: python -m pytest tests/test_os_tools_integration.py -v
 Or:  python tests/test_os_tools_integration.py
 """
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Keep tool-result mood writes out of the user's real AgentMemory.
+os.environ.setdefault(
+    "AGENTBOT_MOOD_FILE",
+    os.path.join(tempfile.gettempdir(), "agentbot_test_mood.json"))
+try:
+    os.remove(os.environ["AGENTBOT_MOOD_FILE"])
+except OSError:
+    pass
 
 import agent
 

@@ -173,6 +173,7 @@ CARD_STAGGER_MS = 60      # delay between successive cards
 ENTRY_FADE_MS = 150       # new activity line (matches Phase 2)
 NUMBER_EASE_MS = 400      # SYSTEM value interpolation
 PANEL_SLIDE_MS = 200      # right-panel width slide
+SPONTANEOUS_INTERVAL_MS = 2 * 60 * 60 * 1000  # proactive thought cadence
 OVERLAY_FADE_MS = 150     # settings backdrop dim
 OVERLAY_SCALE_MS = 180    # settings panel scale-in
 THINKING_DOT_MS = 360     # per-dot step in the 3-dot thinking indicator
@@ -2399,6 +2400,8 @@ class AgentWindow(QMainWindow):
     _gui_visibility_request = Signal(bool, object)  # (show, completion event)
     _wake_word_detected = Signal(float)   # wake word score (from mic thread)
     _wake_word_error = Signal(str)        # listener startup/runtime error
+    _spontaneous_message = Signal(str)    # proactive observation (worker thread)
+    _spontaneous_finished = Signal()      # worker done; clear the busy flag
 
     def __init__(self):
         super().__init__()
@@ -2454,6 +2457,9 @@ class AgentWindow(QMainWindow):
         # Option 3 — wake-word listener (started in start_services).
         self._wake_word_service = None
         self._wake_word_error_shown = False
+        # Option A — proactive thoughts (opt-in QTimer, started on show).
+        self._spontaneous_timer = None
+        self._spontaneous_busy = False
         # Phase 6b panel timers (all created here, on the main thread) + state.
         self._system_timer = None
         self._weather_timer = None
@@ -2469,6 +2475,8 @@ class AgentWindow(QMainWindow):
         self._gui_visibility_request.connect(self._apply_gui_visibility)
         self._wake_word_detected.connect(self._on_wake_word)
         self._wake_word_error.connect(self._on_wake_word_error)
+        self._spontaneous_message.connect(self._on_spontaneous_message)
+        self._spontaneous_finished.connect(self._on_spontaneous_finished)
 
         # Conversation history shared with agent.run_agent_turn, loaded once.
         self.conversation_history = []
@@ -4920,6 +4928,82 @@ class AgentWindow(QMainWindow):
                 pass
 
     # ------------------------------------------------------------------
+    # Option A — proactive thoughts
+    # ------------------------------------------------------------------
+    def _start_spontaneous_thoughts(self):
+        """Start the 2-hour thought timer when the config flag is on."""
+        if self._spontaneous_timer is not None:
+            return
+        try:
+            cfg = dict(get_config_module().DEFAULTS)
+            try:
+                cfg.update(read_config_file_raw())
+            except Exception:
+                pass
+
+            enabled = cfg.get("SPONTANEOUS_THOUGHTS_ENABLED", False)
+            if isinstance(enabled, str):
+                enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
+            if not enabled:
+                return
+            if self._os_control is None:
+                print("[thoughts] OS control unavailable; disabled")
+                return
+
+            timer = QTimer(self)
+            timer.setInterval(SPONTANEOUS_INTERVAL_MS)
+            timer.timeout.connect(self._spontaneous_tick)
+            timer.start()
+            self._spontaneous_timer = timer
+            print("[thoughts] enabled (every 2h)")
+        except Exception as e:
+            print(f"[thoughts] failed to start: {e}")
+
+    def _spontaneous_tick(self):
+        """GUI-thread timer slot: start one background capture+vision run."""
+        if self._spontaneous_busy or self._processing or self._recording:
+            return
+        if self._os_control is None:
+            return
+        self._spontaneous_busy = True
+        threading.Thread(
+            target=self._spontaneous_work, daemon=True).start()
+
+    def _spontaneous_work(self):
+        """Capture the screen, ask the vision model, emit one observation."""
+        path = None
+        try:
+            result = self._os_control.screenshot_background()
+            if not result.startswith("Screenshot saved:"):
+                print(
+                    f"[thoughts] screenshot skipped: "
+                    f"{result.splitlines()[0][:120]}")
+                return
+            path = result.splitlines()[0].split(
+                "Screenshot saved:", 1)[1].strip()
+            text = get_agent().spontaneous_thought(path)
+            if text:
+                self._spontaneous_message.emit(text)
+        except Exception as exc:
+            print(f"[thoughts] failed: {exc}")
+        finally:
+            # Do not accumulate private screenshots on disk.
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            self._spontaneous_finished.emit()
+
+    def _on_spontaneous_message(self, text):
+        if not text:
+            return
+        self.chat.add_message(AssistantMessage(f"[proactive] {text}"))
+
+    def _on_spontaneous_finished(self):
+        self._spontaneous_busy = False
+
+    # ------------------------------------------------------------------
     # Background services — tray, hotkey, scheduler
     # ------------------------------------------------------------------
     def start_services(self):
@@ -4981,6 +5065,10 @@ class AgentWindow(QMainWindow):
         # Option 3 — wake word listener. Opt-in via config; missing models or
         # dependencies surface in the transcript, never as a startup crash.
         self._start_wake_word_service()
+
+        # Option A — proactive thoughts. Off by default (screenshots leave the
+        # machine); a missing vision key simply produces no messages.
+        self._start_spontaneous_thoughts()
 
     # -- Telegram document listener (Section 2) -------------------------
     def _start_telegram_doc_service(self):
@@ -5133,6 +5221,11 @@ class AgentWindow(QMainWindow):
                 wake_service.stop()
             except Exception:
                 pass
+        # Option A — stop the proactive-thought timer.
+        spontaneous_timer = self._spontaneous_timer
+        self._spontaneous_timer = None
+        if spontaneous_timer is not None:
+            spontaneous_timer.stop()
         # Stop the media poller so an in-flight thread can't emit into a
         # deleted window during teardown (Phase 6b follow-up).
         if getattr(self, "_media_poller", None) is not None:

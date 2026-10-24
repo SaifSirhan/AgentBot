@@ -4,9 +4,20 @@ Regression tests for provider failover and empty-reply handling.
 Run: python -m pytest tests/test_failover.py -v
 Or without pytest: python tests/test_failover.py
 """
+import os
 import sys
+import tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Keep tool-result mood writes out of the user's real AgentMemory.
+os.environ.setdefault(
+    "AGENTBOT_MOOD_FILE",
+    os.path.join(tempfile.gettempdir(), "agentbot_test_mood.json"))
+try:
+    os.remove(os.environ["AGENTBOT_MOOD_FILE"])
+except OSError:
+    pass
 
 import agent
 

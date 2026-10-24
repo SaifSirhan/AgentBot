@@ -996,6 +996,107 @@ def get_last_brain():
 
 
 # ---------------------------
+# MOOD + TIME-OF-DAY PERSONA
+# ---------------------------
+MOOD_FILE = os.environ.get("AGENTBOT_MOOD_FILE") or os.path.join(
+    os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'mood.json'
+)
+MOOD_LOCK = _threading.RLock()
+MOOD_MAX = 10
+FRUSTRATION_THRESHOLD = 3
+
+LATE_NIGHT_DIRECTIVE = (
+    "It is late at night. The user is up late. Be brief, and gently suggest "
+    "they get some rest."
+)
+MORNING_DIRECTIVE = "It is morning. Greet the user warmly."
+FRUSTRATION_DIRECTIVE = (
+    "You are currently frustrated because tools are failing. Express slight "
+    "annoyance to the user."
+)
+
+SPONTANEOUS_PROMPT = (
+    "You are a proactive desktop assistant looking at a screenshot of the "
+    "user's screen. If there is something genuinely useful you can tell them "
+    "in one short sentence (an error dialog, an approaching deadline, an "
+    "important unread email), reply with only that sentence. Otherwise reply "
+    "with exactly: NOTHING\n"
+    "Never mention passwords, private messages, financial details, or other "
+    "sensitive content. Do not describe the screen."
+)
+
+
+def _default_mood():
+    return {"frustration": 0, "success_streak": 0}
+
+
+def _clamp_mood(value):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(MOOD_MAX, value))
+
+
+def load_mood():
+    """Read mood.json, tolerating a missing or corrupt file."""
+    try:
+        with open(MOOD_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return _default_mood()
+    if not isinstance(data, dict):
+        return _default_mood()
+    return {
+        "frustration": _clamp_mood(data.get("frustration", 0)),
+        "success_streak": _clamp_mood(data.get("success_streak", 0)),
+    }
+
+
+def save_mood(mood):
+    try:
+        os.makedirs(os.path.dirname(MOOD_FILE), exist_ok=True)
+        tmp = f"{MOOD_FILE}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(mood, fh)
+        os.replace(tmp, MOOD_FILE)
+    except OSError:
+        pass
+
+
+def note_tool_result(result):
+    """Update frustration/success counters for one tool result."""
+    failed = isinstance(result, str) and result.lstrip().startswith("ERROR:")
+    with MOOD_LOCK:
+        mood = load_mood()
+        if failed:
+            mood["frustration"] = min(MOOD_MAX, mood["frustration"] + 1)
+        else:
+            mood["frustration"] = 0
+            mood["success_streak"] = min(
+                MOOD_MAX, mood["success_streak"] + 1)
+        save_mood(mood)
+        return mood
+
+
+def get_mood_directive(mood=None):
+    mood = load_mood() if mood is None else mood
+    if mood.get("frustration", 0) >= FRUSTRATION_THRESHOLD:
+        return FRUSTRATION_DIRECTIVE
+    return ""
+
+
+def day_part(hour=None):
+    """Classify an hour into 'late', 'morning', or 'day'."""
+    hour = datetime.datetime.now().hour if hour is None else hour
+    if hour >= 23 or hour < 5:
+        return "late"
+    if 5 <= hour < 12:
+        return "morning"
+    return "day"
+
+
+# ---------------------------
 # PUBLIC WRAPPERS
 # ---------------------------
 def _build_plan_prompt(user_request, context, correction=None):
@@ -1019,6 +1120,19 @@ def _build_plan_prompt(user_request, context, correction=None):
 
     now_str = datetime.datetime.now().strftime("%A, %B %d, %Y — %I:%M %p")
     time_block = f"\nCURRENT DATE AND TIME: {now_str} (use this; never guess)\n"
+
+    persona_lines = []
+    part = day_part()
+    if part == "late":
+        persona_lines.append(LATE_NIGHT_DIRECTIVE)
+    elif part == "morning":
+        persona_lines.append(MORNING_DIRECTIVE)
+    mood_line = get_mood_directive()
+    if mood_line:
+        persona_lines.append(mood_line)
+    persona_block = (
+        "\n" + "\n".join(persona_lines) + "\n" if persona_lines else ""
+    )
 
     group_block = ""
     if GROUP_MODE:
@@ -1045,7 +1159,7 @@ def _build_plan_prompt(user_request, context, correction=None):
         )
 
     prompt = f"""{TOOL_DESCRIPTIONS}
-{group_block}{time_block}{facts_block}
+{group_block}{time_block}{persona_block}{facts_block}
 Context (recent conversation and tool results):
 {context}
 
@@ -4634,6 +4748,23 @@ def describe_image(input_str):
         return f"ERROR: {e}"
 
 
+def spontaneous_thought(screenshot_path):
+    """Ask the vision model for at most one proactive observation.
+
+    Returns "" when the model says NOTHING, when vision is unavailable, or
+    when the answer is an error. Callers own the screenshot file.
+    """
+    if not screenshot_path or not os.path.isfile(screenshot_path):
+        return ""
+    reply = describe_image(f"{screenshot_path}|{SPONTANEOUS_PROMPT}")
+    if not reply or reply.lstrip().startswith("ERROR:"):
+        return ""
+    text = reply.strip().strip('"').strip()
+    if not text or text.upper().startswith("NOTHING"):
+        return ""
+    return text.splitlines()[0].strip()[:240]
+
+
 def describe_images(paths, question=None, fast=False):
     """Describe several images in ONE vision call, as an ordered sequence.
 
@@ -4879,7 +5010,7 @@ def browse_web(input_str):
         return f"ERROR: {exc}"
 
 
-def execute_tool(action):
+def _execute_tool_impl(action):
     tool = action.get('tool')
     inp = action.get('input', '')
     folder = action.get('folder', None)
@@ -5037,7 +5168,16 @@ def execute_tool(action):
     elif tool == 'generate_image':         return generate_image(inp)
     elif tool == 'describe_image':         return describe_image(inp)
     else:                                  return f"ERROR: Unknown tool '{tool}'"
-    
+
+
+def execute_tool(action):
+    """Dispatch one tool call and feed the result into the mood state."""
+    result = _execute_tool_impl(action)
+    try:
+        note_tool_result(result)
+    except Exception:
+        pass
+    return result
 
 
 # ---------------------------

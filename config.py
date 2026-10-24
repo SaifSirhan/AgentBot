@@ -72,6 +72,9 @@ DEFAULTS = {
 "WAKE_WORD_THRESHOLD": 0.5,
 "WAKE_WORD_DEVICE": "",
 "WAKE_WORD_COOLDOWN": 1.5,
+# Option A — proactive thoughts. Off by default: when enabled, a screenshot
+# is sent to the vision model every two hours.
+"SPONTANEOUS_THOUGHTS_ENABLED": False,
 # Phase 6c — GUI motion (pulses, fades, transitions). When false, every
 # animated element renders in its final state immediately.
 "ANIMATIONS_ENABLED": True,
