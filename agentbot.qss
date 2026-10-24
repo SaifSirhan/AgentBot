@@ -1,208 +1,53 @@
-/* AgentBot — black / mint terminal.
-   Monospace font is configured in Python for platform-safe fallback. */
-
 QWidget {
     background-color: #000000;
-    color: #70FFD4;
-    font-size: 11pt;
+    color: #66ffcc;
+    border: none;
     border-radius: 0px;
+    margin: 0px;
+    padding: 0px;
 }
 
-QMainWindow,
-QWidget#central,
-QWidget#chatContent,
-QWidget#chatViewport {
-    background-color: #000000;
-}
-
-/* Reset frames first: QLabel also inherits QFrame. */
 QFrame {
     border: none;
-    border-radius: 0px;
+    margin: 0px;
+    padding: 0px;
 }
 
-/* Explicitly marked structural panels only. */
+/* Right-panel cards: flat black terminal boxes, square mint outline. */
 QFrame[panel="true"] {
     background-color: #000000;
-    border: 1px solid #23483D;
+    border: 1px solid #66ffcc;
+    border-radius: 0px;
 }
 
-QFrame#systemPanel,
-QFrame#activityPanel {
-    border: 1px solid #70FFD4;
-}
-
-/* Labels never become bubbles. */
-QLabel {
-    background-color: transparent;
-    border: none;
-    padding: 0px;
-}
-
-QLabel[role="heading"] {
-    color: #70FFD4;
-    font-size: 10pt;
-    font-weight: bold;
-    padding-bottom: 8px;
-    border-bottom: 1px solid #23483D;
-}
-
-QLabel[role="secondary"],
-QLabel[role="timestamp"] {
-    color: #8AA99F;
-}
-
-QLabel[role="log"] {
-    color: #70FFD4;
-    margin: 0px;
-    padding: 3px 0px;
-}
-
-QLabel[role="log"][level="user"] {
-    color: #D5FFF0;
-}
-
-QLabel[role="log"][level="system"] {
-    color: #8AA99F;
-}
-
-QLabel[role="log"][level="error"] {
-    color: #FF8F9C;
-}
-
-/* Command prompt: separate permanent prefix + borderless editor. */
-QFrame#promptRow {
+QPlainTextEdit, QLineEdit {
     background-color: #000000;
     border: none;
-    border-top: 1px solid #23483D;
-}
-
-QLabel#promptPrefix {
-    color: #70FFD4;
-    font-weight: bold;
+    margin: 0px;
     padding: 0px;
-}
-
-QLineEdit#commandInput {
-    background-color: transparent;
-    color: #70FFD4;
-    border: none;
-    border-radius: 0px;
-    padding: 4px 0px;
-    selection-background-color: #70FFD4;
+    selection-background-color: #66ffcc;
     selection-color: #000000;
 }
 
-QLineEdit#commandInput:hover,
-QLineEdit#commandInput:focus {
+QPushButton {
     background-color: transparent;
     border: none;
-}
-
-QLineEdit#commandInput:disabled {
-    color: #8AA99F;
-}
-
-/* History surface. */
-QScrollArea#chatScroll {
-    background-color: #000000;
-    border: none;
-    padding: 0px;
-}
-
-QScrollArea#chatScroll::corner {
-    background-color: #000000;
-    border: none;
-}
-
-/* Narrow, square scrollbars. */
-QScrollBar:vertical {
-    background-color: #000000;
-    border: none;
-    width: 8px;
     margin: 0px;
-}
-
-QScrollBar::handle:vertical {
-    background-color: #23483D;
-    min-height: 28px;
-    border-radius: 0px;
-}
-
-QScrollBar::handle:vertical:hover,
-QScrollBar::handle:vertical:pressed {
-    background-color: #70FFD4;
-}
-
-QScrollBar::add-line:vertical,
-QScrollBar::sub-line:vertical {
-    height: 0px;
-    border: none;
-    background: none;
-}
-
-QScrollBar::add-page:vertical,
-QScrollBar::sub-page:vertical {
-    background: none;
-}
-
-QScrollBar:horizontal {
-    background-color: #000000;
-    border: none;
-    height: 8px;
-    margin: 0px;
-}
-
-QScrollBar::handle:horizontal {
-    background-color: #23483D;
-    min-width: 28px;
-    border-radius: 0px;
-}
-
-QScrollBar::handle:horizontal:hover,
-QScrollBar::handle:horizontal:pressed {
-    background-color: #70FFD4;
-}
-
-QScrollBar::add-line:horizontal,
-QScrollBar::sub-line:horizontal {
-    width: 0px;
-    border: none;
-    background: none;
-}
-
-QScrollBar::add-page:horizontal,
-QScrollBar::sub-page:horizontal {
-    background: none;
-}
-
-QToolTip {
-    background-color: #000000;
-    color: #70FFD4;
-    border: 1px solid #23483D;
-    padding: 6px 8px;
-}
-
-/* ------------------------------------------------------------------
-   AgentBot integration: the live input is a QPlainTextEdit so it can
-   auto-grow, not a QLineEdit. Same visual contract as commandInput.
-   ------------------------------------------------------------------ */
-QPlainTextEdit#commandInput {
-    background-color: transparent;
-    color: #70FFD4;
-    border: none;
-    border-radius: 0px;
     padding: 0px;
-    selection-background-color: #70FFD4;
-    selection-color: #000000;
+    text-align: left;
 }
 
-QPlainTextEdit#commandInput:hover,
-QPlainTextEdit#commandInput:focus {
+QPushButton:hover, QPushButton:focus {
     background-color: transparent;
-    border: none;
+    color: #ffffff;
+    text-decoration: underline;
 }
 
-QPlainTextEdit#commandInput:disabled {
-    color: #8AA99F;
+QPushButton:pressed {
+    background-color: transparent;
+    color: #aaffdd;
+}
+
+QPushButton:disabled {
+    color: #648276;
 }

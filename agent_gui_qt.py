@@ -52,12 +52,11 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontDatabase,
+    QFontMetrics,
     QGuiApplication,
     QIcon,
     QKeyEvent,
-    QLinearGradient,
     QPainter,
-    QPainterPath,
     QPen,
     QPixmap,
     QTextCursor,
@@ -133,19 +132,15 @@ COLOR_ACCENT_DIM   = "#23483D"
 FONT_UI = "Consolas"
 FONT_MONO = "Consolas"
 
-SIDEBAR_W = 226
 HEADER_H = 48
 
 # Phase 6a — right panel geometry + auto-hide breakpoints. MIN_W is far enough
 # above HIDE_BELOW that the hidden->shown transition has hysteresis (a resize
-# just under 1100 then a fragment back above cannot flap the panel); at 1100
-# the 720px chat column still gets its full width (1100-226-320 = 554 < 720 it
-# clamps, 1380-226-320 = 834 > 720 so the default already clears it).
+# just under 1100 then a fragment back above cannot flap the panel).
 RIGHT_PANEL_W = 320
 MIN_RIGHT_PANEL_W = 240
 HIDE_PANEL_BELOW = 1100
 SHOW_PANEL_AT = 1180
-CARD_RADIUS = 10
 CARD_PAD = 14
 CARD_SPACING = 12
 
@@ -178,9 +173,6 @@ OVERLAY_FADE_MS = 150     # settings backdrop dim
 OVERLAY_SCALE_MS = 180    # settings panel scale-in
 THINKING_DOT_MS = 360     # per-dot step in the 3-dot thinking indicator
 
-CONTENT_MAX_W = 720
-CONTENT_PAD = 24
-MSG_SPACING = 28
 FADE_MS = 150
 
 INPUT_LINE_H = 22     # single-line height for the input field
@@ -280,13 +272,11 @@ def terminal_font() -> QFont:
     return font
 
 
-def _add_panel_glow(panel: QFrame) -> None:
-    """Give a panel a mint halo. Each panel needs its own effect instance."""
-    effect = QGraphicsDropShadowEffect(panel)
-    effect.setBlurRadius(18.0)
-    effect.setOffset(0.0, 0.0)
-    effect.setColor(QColor(112, 255, 212, 65))
-    panel.setGraphicsEffect(effect)
+def zero_layout(layout):
+    """Terminal layout: no outer margin, no inter-widget gap."""
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    return layout
 
 
 _CODE_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+.-]*)\n?(.*?)```", re.DOTALL)
@@ -902,47 +892,14 @@ def _icon_button(icon: str, tooltip: str = "", size: int = 30,
     return btn
 
 
-def _nav_button(icon: str, label: str, active: bool = False) -> QPushButton:
-    """Sidebar nav row: SVG icon + text label, left aligned with hover.
-
-    The active row (Phase 6c G) gets a 3px mint strip on its left edge.
-    """
-    btn = QPushButton(f"   {label}")
-    btn.setFixedHeight(34)
-    btn.setIcon(_svg_icon(icon, 16, COLOR_ACCENT if active else COLOR_TEXT_MID))
-    btn.setIconSize(QSize(16, 16))
+def _sidebar_button(label: str, row_height: int) -> QPushButton:
+    """Sidebar action as plain terminal text: no icon, pill, or border."""
+    btn = QPushButton(label)
+    btn.setFlat(True)
+    btn.setAutoDefault(False)
+    btn.setFixedHeight(row_height)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    border_left = (f"border-left: 3px solid {COLOR_ACCENT};"
-                   if active else "border: none;")
-    btn.setStyleSheet(
-        f"""
-        QPushButton {{
-            background: {COLOR_SELECTED if active else "transparent"};
-            {border_left}
-            border-radius: 9px;
-            color: {COLOR_TEXT_HI if active else COLOR_TEXT_MID};
-            font-family: "{FONT_UI}";
-            font-size: 12px;
-            text-align: left;
-            padding-left: {7 if active else 10}px;
-        }}
-        QPushButton:hover {{ background: {COLOR_HOVER}; }}
-        """
-    )
-    if not active:
-        _orig_enter = btn.enterEvent
-        _orig_leave = btn.leaveEvent
-
-        def _enter(e):
-            btn.setIcon(_svg_icon(icon, 16, COLOR_TEXT_HI))
-            _orig_enter(e)
-
-        def _leave(e):
-            btn.setIcon(_svg_icon(icon, 16, COLOR_TEXT_MID))
-            _orig_leave(e)
-
-        btn.enterEvent = _enter
-        btn.leaveEvent = _leave
+    btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     return btn
 
 
@@ -966,8 +923,7 @@ class MeterRow(QWidget):
 
     A QFrame fill inside a QFrame trough is used rather than QProgressBar —
     QProgressBar's groove/chunk needs chunk-margin fiddling and its text
-    overlay fights the mint styling, whereas a fixed-width fill is exact and
-    reuses the same rounded-rect look as the rest of the app.
+    overlay fights the mint styling, whereas a fixed-width fill is exact.
     """
 
     TRACK_W = 96
@@ -984,12 +940,10 @@ class MeterRow(QWidget):
 
         self._track = QFrame()
         self._track.setFixedSize(self.TRACK_W, 6)
-        self._track.setStyleSheet(
-            f"background: {COLOR_BORDER}; border-radius: 3px;")
+        self._track.setStyleSheet(f"background: {COLOR_BORDER};")
         self._fill = QFrame(self._track)
         self._fill.setGeometry(0, 0, 0, 6)
-        self._fill.setStyleSheet(
-            f"background: {COLOR_ACCENT}; border-radius: 3px;")
+        self._fill.setStyleSheet(f"background: {COLOR_ACCENT};")
         row.addWidget(self._track)
 
         self._value = _dim_label("", size=11, color=COLOR_TEXT_HI, mono=True)
@@ -1122,13 +1076,8 @@ class CodeBlock(QFrame):
         self._code = code
         self.setObjectName("codeBlock")
         self.setStyleSheet(
-            f"""
-            QFrame#codeBlock {{
-                background: {COLOR_CODE_BG};
-                border: 1px solid {COLOR_BORDER};
-                border-radius: 8px;
-            }}
-            """
+            f"QFrame#codeBlock {{ border: 1px solid {COLOR_ACCENT}; "
+            f"border-radius: 0px; }}"
         )
 
         outer = QVBoxLayout(self)
@@ -1149,14 +1098,10 @@ class CodeBlock(QFrame):
         self.copy_btn.setStyleSheet(
             f"""
             QPushButton {{
-                background: transparent;
-                border: none;
-                border-radius: 6px;
                 color: {COLOR_TEXT_MID};
                 font-size: 14px;
             }}
             QPushButton:hover {{
-                background: {COLOR_HOVER};
                 color: {COLOR_TEXT_HI};
             }}
             """
@@ -1172,8 +1117,7 @@ class CodeBlock(QFrame):
         )
         self.code_label.setWordWrap(False)
         self.code_label.setStyleSheet(
-            f'background: transparent; color: {COLOR_TEXT_HI}; '
-            f'font-family: "{FONT_MONO}"; font-size: 13px;'
+            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_MONO}"; font-size: 13px;'
         )
         self.code_label.setContentsMargins(14, 0, 14, 12)
         # Long code lines must scroll inside the block, not widen the whole
@@ -1187,7 +1131,6 @@ class CodeBlock(QFrame):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._code_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._code_scroll.setStyleSheet("background: transparent; border: none;")
         self._code_scroll.setMinimumWidth(0)
         outer.addWidget(self._code_scroll)
 
@@ -1322,51 +1265,44 @@ class ShrinkableWidget(QWidget):
 
 
 class InputColumnHost(QWidget):
-    """Keeps the prompt row the same width as the chat message column."""
+    """Prompt row stretched to the full terminal width."""
 
     def __init__(self):
         super().__init__()
         self._column = QWidget()
         self._column.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
+        row = zero_layout(QHBoxLayout(self))
         row.addStretch(1)
         row.addWidget(self._column, 0)
         row.addStretch(1)
 
     def resizeEvent(self, event):
-        self._column.setFixedWidth(max(0, min(CONTENT_MAX_W, self.width())))
+        self._column.setFixedWidth(self.width())
         super().resizeEvent(event)
 
 
 class MessageBase(ShrinkableWidget):
-    """One chat message, laid out in a centred max-width column."""
+    """One chat message, laid out edge to edge."""
 
     def __init__(self):
         super().__init__()
         self._column = QWidget()
-        self._column.setMaximumWidth(CONTENT_MAX_W)
         self._column.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum
         )
         self._col_layout = QVBoxLayout(self._column)
         self._col_layout.setContentsMargins(0, 0, 0, 0)
-        self._col_layout.setSpacing(10)
+        self._col_layout.setSpacing(0)
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(CONTENT_PAD, 0, CONTENT_PAD, 0)
-        row.setSpacing(0)
+        row = zero_layout(QHBoxLayout(self))
         row.addStretch(1)
         row.addWidget(self._column, 0)
         row.addStretch(1)
 
     def resizeEvent(self, event):
-        # The two stretches above starve the column, so drive its width here:
-        # fill the target width when there is room, shrink when there is not.
-        avail = self.width() - 2 * CONTENT_PAD
-        self._column.setFixedWidth(max(0, min(CONTENT_MAX_W, avail)))
+        # The two stretches above starve the column, so drive its width here.
+        self._column.setFixedWidth(self.width())
         super().resizeEvent(event)
 
     def _prose(self, text: str) -> QLabel:
@@ -1394,22 +1330,11 @@ class MessageBase(ShrinkableWidget):
 
 
 class UserMessage(MessageBase):
-    """Subtle filled block behind the text. No bubble tail."""
+    """Terminal input line: plain text, no bubble, fill, or inset."""
 
     def __init__(self, text: str):
         super().__init__()
         self.raw_text = text
-        holder = QFrame()
-        holder.setObjectName("userMsg")
-        # Terminal history is plain text, not a bubble: no fill, no padding.
-        holder.setStyleSheet(
-            "QFrame#userMsg { background: transparent; border: none; }"
-            "QFrame#userMsg QLabel { background: transparent; }"
-        )
-        hl = QVBoxLayout(holder)
-        hl.setContentsMargins(0, 0, 0, 0)
-        holder_layout = QVBoxLayout()
-        hl.addLayout(holder_layout)
 
         for seg in _split_segments(text):
             if seg[0] == "prose":
@@ -1425,18 +1350,9 @@ class UserMessage(MessageBase):
                     f"background: transparent; color: {COLOR_TEXT_USER}; "
                     f"font-size: 15px;"
                 )
-                holder_layout.addWidget(lbl)
+                self._col_layout.addWidget(lbl)
             else:
-                holder_layout.addWidget(CodeBlock(seg[2]))
-
-        # Keep the filled block hugging its content, left-aligned in the column.
-        wrap = QWidget()
-        wrap_row = QHBoxLayout(wrap)
-        wrap_row.setContentsMargins(0, 0, 0, 0)
-        wrap_row.setSpacing(0)
-        wrap_row.addWidget(holder, 0, Qt.AlignmentFlag.AlignLeft)
-        wrap_row.addStretch(1)
-        self._col_layout.addWidget(wrap)
+                self._col_layout.addWidget(CodeBlock(seg[2]))
 
 
 class AssistantMessage(MessageBase):
@@ -1666,13 +1582,13 @@ class ChatView(QScrollArea):
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setContentsMargins(0, 0, 0, 0)
+        self.viewport().setContentsMargins(0, 0, 0, 0)
         self.viewport().setObjectName("chatViewport")
 
         self._body = QWidget()
         self._body.setObjectName("chatContent")
-        self._layout = QVBoxLayout(self._body)
-        self._layout.setContentsMargins(0, 24, 0, 24)
-        self._layout.setSpacing(MSG_SPACING)
+        self._layout = zero_layout(QVBoxLayout(self._body))
         self._layout.addStretch(1)
         self.chat_log = []  # (kind, text) record for Copy all / Export
 
@@ -1749,95 +1665,43 @@ class ChatView(QScrollArea):
 # Sidebar
 # ----------------------------------------------------------------------
 class Sidebar(QFrame):
-    """Left collapsible drawer. Width animates on toggle."""
+    """Left command rail. Flat terminal text; no icons, pills, or borders."""
 
     def __init__(self):
         super().__init__()
-        # Fixed at rest so the layout never shrinks it below its content
-        # (which clipped the nav labels). toggle_sidebar drives min+max together.
-        self.setFixedWidth(SIDEBAR_W)
-        self.setStyleSheet(f"background: {COLOR_SIDEBAR};")
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        metrics = QFontMetrics(self.font())
+        row_height = max(metrics.height(), metrics.lineSpacing())
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout = zero_layout(QVBoxLayout(self))
 
-        title = QLabel("  AgentBot")
-        title.setStyleSheet(
-            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_UI}"; '
-            f"font-size: 14px; font-weight: bold;"
-        )
-        title.setFixedHeight(44)
+        title = QLabel("AgentBot")
+        title.setFixedHeight(row_height)
         layout.addWidget(title)
 
-        self.new_chat = QPushButton("   New chat")
-        self.new_chat.setFixedHeight(36)
-        self.new_chat.setIcon(_svg_icon("plus", 16, COLOR_ACCENT))
-        self.new_chat.setIconSize(QSize(16, 16))
-        self.new_chat.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.new_chat.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: transparent;
-                border: 1px solid {COLOR_ACCENT};
-                border-radius: 0px;
-                color: {COLOR_ACCENT};
-                font-family: "{FONT_UI}";
-                font-size: 12px;
-                font-weight: bold;
-                text-align: left;
-                padding-left: 10px;
-            }}
-            QPushButton:hover {{ background: {COLOR_HOVER}; }}
-            """
-        )
+        self.new_chat = _sidebar_button("New chat", row_height)
         layout.addWidget(self.new_chat)
-        layout.addSpacing(14)
 
-        section = QLabel("  CONVERSATION")
-        section.setStyleSheet(
-            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
-            f"font-size: 10px; font-weight: bold;"
-        )
-        layout.addWidget(section)
-
-        nav = QWidget()
-        nav_layout = QVBoxLayout(nav)
-        nav_layout.setContentsMargins(10, 0, 10, 0)
-        nav_layout.setSpacing(2)
-        self.current_chat_btn = _nav_button("chat", "Current chat", active=True)
-        nav_layout.addWidget(self.current_chat_btn)
-        layout.addWidget(nav)
+        self.current_chat_btn = _sidebar_button("Current chat", row_height)
+        layout.addWidget(self.current_chat_btn)
 
         layout.addStretch(1)
 
-        divider = QFrame()
-        divider.setFixedHeight(1)
-        divider.setStyleSheet(f"background: {COLOR_BORDER};")
-        layout.addSpacing(12)
-        layout.addWidget(divider)
-        layout.addSpacing(12)
-
-        bottom = QWidget()
-        bottom_layout = QVBoxLayout(bottom)
-        bottom_layout.setContentsMargins(10, 0, 10, 10)
-        bottom_layout.setSpacing(2)
-        # Named buttons so AgentWindow can wire each to its handler (Phase 5d).
+        # Named buttons so AgentWindow can wire each to its handler.
         self.nav_buttons = {}
-        for icon, label in (
-            ("settings", "Settings"),
-            ("tasks", "Tasks"),
-            ("book", "Index docs"),
-            ("pulse", "Activity log"),
-            ("clipboard", "Copy all"),
-            ("export", "Export chat"),
-        ):
-            b = _nav_button(icon, label)
+        for label in ("Settings", "Tasks", "Index docs", "Activity log",
+                      "Copy all", "Export chat"):
+            b = _sidebar_button(label, row_height)
             self.nav_buttons[label] = b
-            bottom_layout.addWidget(b)
+            layout.addWidget(b)
         self.settings_btn = self.nav_buttons["Settings"]
-        layout.addWidget(bottom)
+
+        # The rail is exactly as wide as its longest row: no gutter, no
+        # padding, no clipping from a hand-measured font advance.
+        rows = [title, self.new_chat, self.current_chat_btn,
+                *self.nav_buttons.values()]
+        self.rest_width = max(widget.sizeHint().width() for widget in rows)
+        self.setFixedWidth(self.rest_width)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
 
 # ----------------------------------------------------------------------
@@ -1901,25 +1765,6 @@ class InfoCard(QFrame):
         self.placeholder.setText(text)
         self.placeholder.setVisible(True)
 
-    def paintEvent(self, event):
-        """Phase 6c F — a very subtle vertical depth gradient over the card.
-
-        The base colour and border come from QSS; this overlays a barely-there
-        light-to-dark wash. Kept under ~2% alpha so it reads as depth, not as
-        a visible gradient.
-        """
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        grad = QLinearGradient(0, 0, 0, self.height())
-        grad.setColorAt(0.0, QColor(255, 255, 255, 4))   # ~0.015 alpha
-        grad.setColorAt(1.0, QColor(0, 0, 0, 5))         # ~0.02 alpha
-        path = QPainterPath()
-        path.addRoundedRect(0.5, 0.5, self.width() - 1, self.height() - 1,
-                            CARD_RADIUS, CARD_RADIUS)
-        painter.fillPath(path, grad)
-        painter.end()
-
 
 class TelegramEntry(QFrame):
     """One Telegram document summary.
@@ -1931,8 +1776,6 @@ class TelegramEntry(QFrame):
     def __init__(self, sender: str, file_name: str, summary: str):
         super().__init__()
         self.setObjectName("telegramEntry")
-        self.setStyleSheet(
-            f"QFrame#telegramEntry {{ border-left: 2px solid {COLOR_BORDER}; }}")
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 2, 0, 2)
@@ -2063,16 +1906,11 @@ class RightPanel(QFrame):
         self.cards_layout.setSpacing(CARD_SPACING)
 
         self.cards = {}
-        glow_names = {"SYSTEM": "systemPanel", "ACTIVITY": "activityPanel"}
         for title in self.CARD_TITLES:
             if title == "TELEGRAM":
                 card = TelegramPanel()
             else:
-                card = InfoCard(
-                    title, object_name=glow_names.get(title, "infoCard"))
-            if title in glow_names:
-                card._panel_glow = True
-                _add_panel_glow(card)
+                card = InfoCard(title)
             self.cards[title] = card
             self.cards_layout.addWidget(card)
             if title in (self._FIXED_HEIGHTS):
@@ -2204,8 +2042,6 @@ class RightPanel(QFrame):
 
         self.media_art = QLabel()
         self.media_art.setFixedSize(60, 60)
-        self.media_art.setStyleSheet(
-            f"background: {COLOR_RAISED}; border-radius: 6px;")
         self.media_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mrow.addWidget(self.media_art)
 
@@ -2215,8 +2051,8 @@ class RightPanel(QFrame):
         tcol.setSpacing(2)
         self.media_title = _dim_label("", size=12, color=COLOR_TEXT_HI)
         self.media_title.setStyleSheet(
-            f'background: transparent; color: {COLOR_TEXT_HI}; '
-            f'font-family: "{FONT_UI}"; font-size: 12px; font-weight: bold;')
+            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_UI}"; '
+            f"font-size: 12px; font-weight: bold;")
         self.media_artist = _dim_label("", size=11, color=COLOR_TEXT_MID)
         self.media_album = _dim_label("", size=10, color=COLOR_TEXT_LOW)
         for w in (self.media_title, self.media_artist, self.media_album):
@@ -2319,7 +2155,6 @@ class RightPanel(QFrame):
         self.media_art.setPixmap(QPixmap())
         self.media_art.setText("\u266b")  # music note fallback
         self.media_art.setStyleSheet(
-            f"background: {COLOR_RAISED}; border-radius: 6px; "
             f"color: {COLOR_TEXT_LOW}; font-size: 22px;")
 
     # -- SYSTEM ---------------------------------------------------------
@@ -2408,6 +2243,7 @@ class AgentWindow(QMainWindow):
         self.setWindowTitle("Agent")
         self.resize(1380, 720)
         self.setMinimumWidth(900)
+        self.setContentsMargins(0, 0, 0, 0)
 
         self._sidebar_anim = None
         self._worker = None
@@ -2501,9 +2337,7 @@ class AgentWindow(QMainWindow):
             "border: 2px solid transparent; }")
         self._drop_overlay.setGeometry(central.rect())
         self._drop_overlay.hide()
-        root = QHBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root = zero_layout(QHBoxLayout(central))
 
         self.sidebar = Sidebar()
         self._wire_sidebar()
@@ -2685,10 +2519,6 @@ class AgentWindow(QMainWindow):
             card = self.panel.cards.get(title)
             if card is None:
                 continue
-            # A widget can hold only one graphics effect; the entrance fade
-            # would replace (and destroy) the SYSTEM/ACTIVITY drop-shadow glow.
-            if getattr(card, "_panel_glow", False):
-                continue
             effect = QGraphicsOpacityEffect(card)
             card.setGraphicsEffect(effect)
             anim = QPropertyAnimation(effect, b"opacity", card)
@@ -2696,8 +2526,6 @@ class AgentWindow(QMainWindow):
             anim.setStartValue(0.0)
             anim.setEndValue(1.0)
             anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            # setGraphicsEffect(None) on finish releases the effect so the
-            # card's own paintEvent gradient is not routed through it.
             anim.finished.connect(lambda c=card: c.setGraphicsEffect(None))
             QTimer.singleShot(i * CARD_STAGGER_MS, anim.start)
             self._card_anims.append(anim)
@@ -2987,9 +2815,7 @@ class AgentWindow(QMainWindow):
     def _build_main_column(self) -> QWidget:
         col = QWidget()
         col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout = QVBoxLayout(col)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout = zero_layout(QVBoxLayout(col))
 
         layout.addWidget(self._build_header())
 
@@ -3010,7 +2836,7 @@ class AgentWindow(QMainWindow):
         header.setStyleSheet(f"background: {COLOR_BG};")
 
         row = QHBoxLayout(header)
-        row.setContentsMargins(10, 0, 10, 0)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
 
         self.sidebar_btn = _icon_button("menu", "Toggle sidebar")
@@ -3068,42 +2894,34 @@ class AgentWindow(QMainWindow):
 
     def _build_input_area(self) -> QWidget:
         outer = QWidget()
-        outer.setStyleSheet(f"background: {COLOR_BG};")
-        col = QVBoxLayout(outer)
-        col.setContentsMargins(CONTENT_PAD, 8, CONTENT_PAD, 16)
-        col.setSpacing(0)
+        col = zero_layout(QVBoxLayout(outer))
 
-        # Centre the prompt in the same max-width column as the messages.
+        # Prompt fills the terminal width edge to edge.
         holder = InputColumnHost()
         self._input_column = holder._column
-        self._input_col_layout = QVBoxLayout(self._input_column)
-        self._input_col_layout.setContentsMargins(0, 0, 0, 0)
-        self._input_col_layout.setSpacing(0)
+        self._input_col_layout = zero_layout(QVBoxLayout(self._input_column))
 
-        # Attachment chips sit above the pill, inside the same column.
+        # Attachment chips sit above the prompt, inside the same column.
         self.attach_strip = QWidget()
         self.attach_strip.setStyleSheet("background: transparent;")
-        self.attach_strip_row = QHBoxLayout(self.attach_strip)
-        self.attach_strip_row.setContentsMargins(4, 0, 4, 6)
-        self.attach_strip_row.setSpacing(6)
+        self.attach_strip_row = zero_layout(QHBoxLayout(self.attach_strip))
         self.attach_strip_row.addStretch(1)
         self.attach_strip.setVisible(False)
         self._input_col_layout.addWidget(self.attach_strip)
 
-        # Section 1 — permanent shell prefix + borderless editor
-        # (agentbot.qss: QFrame#promptRow / QLabel#promptPrefix /
-        # QPlainTextEdit#commandInput). Attach / mic / send stay on the right.
+        # Permanent shell prefix + borderless editor. Attach / mic / send stay
+        # on the right; the row itself carries no padding or separator.
         self.input_pill = QFrame()
         self.input_pill.setObjectName("promptRow")
-        pill_row = QHBoxLayout(self.input_pill)
-        pill_row.setContentsMargins(0, 12, 0, 0)
-        pill_row.setSpacing(10)
+        self.input_pill.setContentsMargins(0, 0, 0, 0)
+        pill_row = zero_layout(QHBoxLayout(self.input_pill))
 
-        self.prompt_prefix = QLabel("root@agent:~#")
+        self.prompt_prefix = QLabel("root@agent:~# ")
         self.prompt_prefix.setObjectName("promptPrefix")
+        self.prompt_prefix.setMargin(0)
+        self.prompt_prefix.setIndent(0)
         self.prompt_prefix.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        pill_row.addWidget(self.prompt_prefix, 0, Qt.AlignmentFlag.AlignTop)
 
         self.input_field = QPlainTextEdit()
         self.input_field.setObjectName("commandInput")
@@ -3112,12 +2930,30 @@ class AgentWindow(QMainWindow):
         self.input_field.viewport().setAcceptDrops(False)
         self.input_field.setPlaceholderText("Type a command…")
         self.input_field.setFrameShape(QFrame.Shape.NoFrame)
+        # QPlainTextEdit has no QLineEdit-style setTextMargins(); zero the
+        # document, viewport, and contents margins for the same result.
+        self.input_field.setContentsMargins(0, 0, 0, 0)
+        self.input_field.viewport().setContentsMargins(0, 0, 0, 0)
+        self.input_field.setViewportMargins(0, 0, 0, 0)
+        self.input_field.document().setDocumentMargin(0)
         self.input_field.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.input_field.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.input_field.setFixedHeight(INPUT_LINE_H)
         self.input_field.textChanged.connect(self._on_input_changed)
         self.input_field.installEventFilter(self)
-        pill_row.addWidget(self.input_field, 1)
+
+        # Prefix and editor share one top edge inside a centred text group, so
+        # the caret sits exactly one character after the prompt even while the
+        # taller action buttons set the row height.
+        text_host = QWidget()
+        text_col = zero_layout(QVBoxLayout(text_host))
+        text_col.addStretch(1)
+        text_row = zero_layout(QHBoxLayout())
+        text_row.addWidget(self.prompt_prefix, 0, Qt.AlignmentFlag.AlignTop)
+        text_row.addWidget(self.input_field, 1, Qt.AlignmentFlag.AlignTop)
+        text_col.addLayout(text_row)
+        text_col.addStretch(1)
+        pill_row.addWidget(text_host, 1)
 
         self.attach_btn = _icon_button("clip", "Attach files")
         self.attach_btn.clicked.connect(self._pick_files)
@@ -4745,11 +4581,12 @@ class AgentWindow(QMainWindow):
     # ------------------------------------------------------------------
     def toggle_sidebar(self):
         visible = self.sidebar.isVisible()
+        width = self.sidebar.rest_width
         if visible:
-            start, end = SIDEBAR_W, 0
+            start, end = width, 0
         else:
             self.sidebar.setVisible(True)
-            start, end = 0, SIDEBAR_W
+            start, end = 0, width
 
         # Drive min and max together: the sidebar is fixed-width at rest, so
         # animating only one bound would leave the other pinning the width.
