@@ -81,6 +81,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -140,6 +141,7 @@ HEADER_H = 48
 # the 720px chat column still gets its full width (1100-226-320 = 554 < 720 it
 # clamps, 1380-226-320 = 834 > 720 so the default already clears it).
 RIGHT_PANEL_W = 320
+MIN_RIGHT_PANEL_W = 240
 HIDE_PANEL_BELOW = 1100
 SHOW_PANEL_AT = 1180
 CARD_RADIUS = 10
@@ -154,16 +156,12 @@ CARD_SPACING = 12
 H_NOW_PLAYING = 150
 H_SYSTEM = 110
 H_WEATHER = 80
-H_NOTIFICATIONS = 150
+H_TELEGRAM = 240
+TELEGRAM_MAX_ENTRIES = 20
 ACTIVITY_MAX_LINES = 6
 SYSTEM_REFRESH_MS = 2000
 WEATHER_REFRESH_MS = 10 * 60 * 1000
 MEDIA_REFRESH_MS = 1000
-
-# Notification type -> dot colour (Phase 6b).
-COLOR_NOTIF_SCHEDULED = COLOR_ACCENT
-COLOR_NOTIF_WATCHER = COLOR_WARN
-COLOR_NOTIF_REMINDER = COLOR_DANGER
 
 # Phase 6c — motion timings (ms).
 PULSE_READY_MS = 2500     # calm breathing while Ready
@@ -171,7 +169,7 @@ PULSE_THINKING_MS = 1200  # faster while Thinking…
 MIC_RING_MS = 1200        # outer recording ring expand+fade loop
 CARD_FADE_MS = 220        # per-card entrance fade
 CARD_STAGGER_MS = 60      # delay between successive cards
-ENTRY_FADE_MS = 150       # new activity/notification line (matches Phase 2)
+ENTRY_FADE_MS = 150       # new activity line (matches Phase 2)
 NUMBER_EASE_MS = 400      # SYSTEM value interpolation
 PANEL_SLIDE_MS = 200      # right-panel width slide
 OVERLAY_FADE_MS = 150     # settings backdrop dim
@@ -1862,7 +1860,7 @@ class InfoCard(QFrame):
         outer.setSpacing(8)
 
         # Header is a row (not a bare label) so a card can add a trailing
-        # control — Phase 6b's NOTIFICATIONS "clear" button uses this slot.
+        # control — the Telegram card's "clear" button uses this slot.
         head_row = QHBoxLayout()
         head_row.setContentsMargins(0, 0, 0, 0)
         head_row.setSpacing(6)
@@ -1921,21 +1919,126 @@ class InfoCard(QFrame):
         painter.end()
 
 
-class RightPanel(QFrame):
-    """Fixed-width column of stacked info cards, scrollable.
+class TelegramEntry(QFrame):
+    """One Telegram document summary.
 
-    Wrapped in an internal QScrollArea so Phase 6b can fill the cards without
-    any layout restructuring — at five empty cards it never actually scrolls.
+    Sender, file name and summary come from Telegram and are untrusted, so
+    every label is PlainText and is only ever changed with setText().
+    """
+
+    def __init__(self, sender: str, file_name: str, summary: str):
+        super().__init__()
+        self.setObjectName("telegramEntry")
+        self.setStyleSheet(
+            f"QFrame#telegramEntry {{ border-left: 2px solid {COLOR_BORDER}; }}")
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 2, 0, 2)
+        lay.setSpacing(2)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(6)
+        self.sender_label = _dim_label(
+            sender, size=10, mono=True, color=COLOR_ACCENT)
+        self.file_label = _dim_label(
+            file_name, size=10, mono=True, color=COLOR_TEXT_LOW)
+        for lbl in (self.sender_label, self.file_label):
+            lbl.setTextFormat(Qt.TextFormat.PlainText)
+            lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+        head.addWidget(self.sender_label)
+        head.addWidget(self.file_label, 1)
+        lay.addLayout(head)
+
+        self.summary_label = _dim_label(
+            summary, size=11, mono=True, color=COLOR_TEXT_MID, wrap=True)
+        self.summary_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.summary_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self.summary_label)
+
+
+class TelegramPanel(InfoCard):
+    """Right-panel card listing Telegram document summaries.
+
+    Newest first, capped at TELEGRAM_MAX_ENTRIES, with an internal scroll area
+    so long summaries don't stretch the whole card column.
+    """
+
+    def __init__(self):
+        super().__init__("TELEGRAM", placeholder="no documents yet")
+        self.setMinimumHeight(H_TELEGRAM)
+        self.entries = []
+
+        self.clear_btn = QPushButton("clear")
+        self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_btn.setFixedHeight(16)
+        self.clear_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent; border: none;
+                color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}";
+                font-size: 10px; padding: 0 2px;
+            }}
+            QPushButton:hover {{ color: {COLOR_TEXT_HI}; }}
+            """
+        )
+        self.clear_btn.clicked.connect(self.clear)
+        self.header_layout.addWidget(self.clear_btn)
+
+        self.list_scroll = QScrollArea()
+        self.list_scroll.setWidgetResizable(True)
+        self.list_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.list_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list_scroll.setVisible(False)
+
+        self.list_host = QWidget()
+        self.list_layout = QVBoxLayout(self.list_host)
+        self.list_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_layout.setSpacing(8)
+        self.list_layout.addStretch(1)
+        self.list_scroll.setWidget(self.list_host)
+        self.body_layout.insertWidget(0, self.list_scroll, 1)
+
+    def add_summary(self, sender: str, file_name: str, summary: str):
+        entry = TelegramEntry(str(sender), str(file_name), str(summary))
+        self.entries.insert(0, entry)
+        self.list_layout.insertWidget(0, entry)
+        while len(self.entries) > TELEGRAM_MAX_ENTRIES:
+            old = self.entries.pop()
+            self.list_layout.removeWidget(old)
+            old.deleteLater()
+        self.placeholder.setVisible(False)
+        self.list_scroll.setVisible(True)
+
+    def clear(self):
+        for entry in self.entries:
+            self.list_layout.removeWidget(entry)
+            entry.deleteLater()
+        self.entries = []
+        self.list_scroll.setVisible(False)
+        self.placeholder.setText("no documents yet")
+        self.placeholder.setVisible(True)
+
+
+class RightPanel(QFrame):
+    """Column of stacked info cards, scrollable and splitter-resizable.
+
+    Wrapped in an internal QScrollArea so the cards can be filled without any
+    layout restructuring.
     """
 
     CARD_TITLES = ("ACTIVITY", "NOW PLAYING", "SYSTEM", "WEATHER",
-                   "NOTIFICATIONS")
+                   "TELEGRAM")
 
     def __init__(self):
         super().__init__()
         self.setObjectName("rightPanel")
-        self.setFixedWidth(RIGHT_PANEL_W)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setMinimumWidth(200)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         # Phase 6c: set by AgentWindow; gates the per-entry fade-in.
         self.animations_enabled = True
 
@@ -1960,7 +2063,11 @@ class RightPanel(QFrame):
         self.cards = {}
         glow_names = {"SYSTEM": "systemPanel", "ACTIVITY": "activityPanel"}
         for title in self.CARD_TITLES:
-            card = InfoCard(title, object_name=glow_names.get(title, "infoCard"))
+            if title == "TELEGRAM":
+                card = TelegramPanel()
+            else:
+                card = InfoCard(
+                    title, object_name=glow_names.get(title, "infoCard"))
             if title in glow_names:
                 card._panel_glow = True
                 _add_panel_glow(card)
@@ -1970,8 +2077,6 @@ class RightPanel(QFrame):
                 card.setFixedHeight(self._FIXED_HEIGHTS[title])
         self.cards_layout.addStretch(1)
 
-        # NOTIFICATIONS and ACTIVITY are flexible; NOTIFICATIONS keeps a floor.
-        self.cards["NOTIFICATIONS"].setMinimumHeight(H_NOTIFICATIONS)
         # ACTIVITY shows at most ACTIVITY_MAX_LINES single-line steps, so cap it
         # rather than letting the scroll area stretch it into a tall log pane.
         self.cards["ACTIVITY"].setMaximumHeight(
@@ -1979,12 +2084,12 @@ class RightPanel(QFrame):
 
         scroll.setWidget(body)
         outer.addWidget(scroll)
+        self.scroll_area = scroll
 
         self._build_activity()
         self._build_now_playing()
         self._build_system()
         self._build_weather()
-        self._build_notifications()
 
     _FIXED_HEIGHTS = {
         "NOW PLAYING": H_NOW_PLAYING,
@@ -2270,86 +2375,13 @@ class RightPanel(QFrame):
             self.weather_main.setText("unavailable")
             self.weather_loc.setText("")
 
-    # -- NOTIFICATIONS --------------------------------------------------
-    def _build_notifications(self):
-        card = self.cards["NOTIFICATIONS"]
-        card.placeholder.setVisible(False)
-
-        self.notif_clear_btn = QPushButton("clear")
-        self.notif_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.notif_clear_btn.setFixedHeight(16)
-        self.notif_clear_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: transparent; border: none;
-                color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}";
-                font-size: 10px; padding: 0 2px;
-            }}
-            QPushButton:hover {{ color: {COLOR_TEXT_HI}; }}
-            """
-        )
-        card.header_layout.addWidget(self.notif_clear_btn)
-
-        self.notif_events = []
-        self.notif_labels = []  # (dot, text) row widgets
-        self.notif_empty = _dim_label("no events yet", size=11,
-                                      color=COLOR_TEXT_LOW)
-        self.notif_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        card.body_layout.insertWidget(0, self.notif_empty)
-        for _ in range(5):
-            row = QWidget()
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(0, 0, 0, 0)
-            rl.setSpacing(6)
-            dot = QLabel("\u25cf")
-            dot.setFixedWidth(10)
-            rl.addWidget(dot)
-            txt = _dim_label("", size=11, color=COLOR_TEXT_MID, mono=True)
-            txt.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse)
-            rl.addWidget(txt, 1)
-            row.setVisible(False)
-            card.body_layout.insertWidget(card.body_layout.count() - 1, row)
-            self.notif_labels.append((dot, txt, row))
-        self._render_notifications()
-
-    def add_notification(self, kind: str, text: str, when=None):
-        """Push one event. kind: 'scheduled' | 'watcher' | 'reminder'."""
-        ts = (when or datetime.datetime.now()).strftime("%H:%M")
-        self.notif_events.insert(0, (kind, ts, text))
-        del self.notif_events[5:]
-        self._render_notifications()
-
-    def clear_notifications(self):
-        self.notif_events = []
-        self._render_notifications()
-
-    def _render_notifications(self):
-        if not self.notif_events:
-            self.notif_empty.setVisible(True)
-            for _dot, _txt, row in self.notif_labels:
-                row.setVisible(False)
-            return
-        self.notif_empty.setVisible(False)
-        colors = {
-            "scheduled": COLOR_NOTIF_SCHEDULED,
-            "watcher": COLOR_NOTIF_WATCHER,
-            "reminder": COLOR_NOTIF_REMINDER,
-        }
-        for i, (dot, txt, row) in enumerate(self.notif_labels):
-            if i < len(self.notif_events):
-                kind, ts, text = self.notif_events[i]
-                # Fade a row that is newly populated or whose content changed.
-                newly = not row.isVisible() or txt.text() != f"{ts}  {self._ellipsize(text, 34)}"
-                dot.setStyleSheet(
-                    f"background: transparent; "
-                    f"color: {colors.get(kind, COLOR_TEXT_LOW)}; font-size: 9px;")
-                txt.setText(f"{ts}  {self._ellipsize(text, 34)}")
-                row.setVisible(True)
-                if newly:
-                    self._fade_in(row)
-            else:
-                row.setVisible(False)
+    # -- TELEGRAM -------------------------------------------------------
+    def add_telegram_summary(self, sender: str, file_name: str, summary: str):
+        card = self.cards["TELEGRAM"]
+        card.add_summary(sender, file_name, summary)
+        # The card is last in the column; bring it into view when a document
+        # arrives instead of leaving it below the fold.
+        self.scroll_area.ensureWidgetVisible(card)
 
 
 
@@ -2391,6 +2423,7 @@ class AgentWindow(QMainWindow):
         # fresh launch always opens with the panel visible.
         self._right_panel_visible = True
         self._right_panel_auto = True  # not user-toggled — safe to auto-hide
+        self._right_panel_last_width = RIGHT_PANEL_W
         # Phase 6c: read the motion flag once and cache it. Toggling it in
         # settings applies on next launch (no mid-session hot-reload).
         self._animations_enabled = self._read_animations_flag()
@@ -2453,16 +2486,25 @@ class AgentWindow(QMainWindow):
         self._wire_sidebar()
         root.addWidget(self.sidebar)
 
-        root.addWidget(self._build_main_column(), 1)
-
-        # Phase 6a — right info panel. Added after the chat column so the chat
-        # owns the flex (stretch 1) and the panel is a fixed 320px at the far
-        # right. The border divider lives on the panel's inner wrapper (in
-        # _build_right_panel), not on the panel itself, so it survives a
-        # hide/show toggle.
+        # Chat and the info panel share a splitter so the divider can be
+        # dragged. The sidebar stays fixed; the chat keeps the stretch.
         self.right_panel = self._build_right_panel()
-        root.addWidget(self.right_panel)
-        self.panel.notif_clear_btn.clicked.connect(self.panel.clear_notifications)
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter.setObjectName("mainSplitter")
+        self._main_splitter.setHandleWidth(6)
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.setStyleSheet(
+            "QSplitter::handle:horizontal { background: transparent; }"
+            f"QSplitter::handle:horizontal:hover "
+            f"{{ background: {COLOR_ACCENT_DIM}; }}"
+        )
+        self._main_splitter.addWidget(self._build_main_column())
+        self._main_splitter.addWidget(self.right_panel)
+        self._main_splitter.setStretchFactor(0, 1)
+        self._main_splitter.setStretchFactor(1, 0)
+        self._main_splitter.setSizes([900, RIGHT_PANEL_W])
+        self._main_splitter.splitterMoved.connect(self._on_splitter_moved)
+        root.addWidget(self._main_splitter, 1)
 
         self.setCentralWidget(central)
 
@@ -2473,7 +2515,9 @@ class AgentWindow(QMainWindow):
         self._right_panel_inner = RightPanel()
         self._right_panel_inner.animations_enabled = self._animations_enabled
         wrapper = QWidget()
-        wrapper.setFixedWidth(RIGHT_PANEL_W)
+        wrapper.setMinimumWidth(MIN_RIGHT_PANEL_W)
+        wrapper.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         wrap_layout = QVBoxLayout(wrapper)
         wrap_layout.setContentsMargins(0, 0, 0, 0)
         wrap_layout.setSpacing(0)
@@ -2494,7 +2538,7 @@ class AgentWindow(QMainWindow):
         return self._right_panel_inner
 
     # ------------------------------------------------------------------
-    # Phase 6b — panel data wiring (SYSTEM / WEATHER / NOTIFICATIONS)
+    # Phase 6b — panel data wiring (SYSTEM / WEATHER / NOW PLAYING)
     # ------------------------------------------------------------------
     def start_panel_timers(self):
         """Start the panel polling timers. Called once the window is shown.
@@ -2740,25 +2784,46 @@ class AgentWindow(QMainWindow):
         elif not self._right_panel_visible and w >= SHOW_PANEL_AT:
             self._set_right_panel_visible(True, animate=False)
 
+    def _on_splitter_moved(self, _pos, _index):
+        if self._right_panel_visible:
+            width = self.right_panel.width()
+            if width >= MIN_RIGHT_PANEL_W:
+                self._right_panel_last_width = width
+
+    def _restore_panel_width(self):
+        splitter = getattr(self, "_main_splitter", None)
+        if splitter is None or splitter.width() <= 0:
+            return
+        total = splitter.width()
+        target = max(MIN_RIGHT_PANEL_W, self._right_panel_last_width)
+        target = min(target, max(MIN_RIGHT_PANEL_W, total - 200))
+        splitter.setSizes([max(1, total - target), target])
+
     def _set_right_panel_visible(self, visible: bool, animate: bool = True):
+        was_visible = self._right_panel_visible
+        if not visible and self.right_panel.width() >= MIN_RIGHT_PANEL_W:
+            self._right_panel_last_width = self.right_panel.width()
+
         self._right_panel_visible = visible
         self.panel_toggle_btn.setIcon(_svg_icon(
             "chevrons_left" if visible else "chevrons_right", 18, COLOR_TEXT_MID))
         self.panel_toggle_btn.setToolTip(
             "Hide info panel" if visible else "Show info panel")
 
-        # Phase 6c H — slide the panel width 320 <-> 0 (200ms ease-in-out).
-        # The wrapper's min-width is held at 0 and only max-width is animated,
-        # so the chat column reflows smoothly instead of snapping.
+        # Slide the splitter pane between its remembered width and zero.
+        # Minimum width is relaxed during the animation and restored after.
         self._stop_panel_anim()
         if animate and self._animations_enabled:
             self.right_panel.setMinimumWidth(0)
+            self.right_panel.setMaximumWidth(16777215)
             self.right_panel.setVisible(True)
             anim = QPropertyAnimation(self.right_panel, b"maximumWidth",
                                       self.right_panel)
             anim.setDuration(PANEL_SLIDE_MS)
-            anim.setStartValue(self.right_panel.width())
-            anim.setEndValue(RIGHT_PANEL_W if visible else 0)
+            anim.setStartValue(self.right_panel.width() if was_visible else 0)
+            anim.setEndValue(
+                max(MIN_RIGHT_PANEL_W, self._right_panel_last_width)
+                if visible else 0)
             anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
             if visible:
                 anim.finished.connect(self._after_panel_shown)
@@ -2766,11 +2831,16 @@ class AgentWindow(QMainWindow):
                 anim.finished.connect(self._after_panel_hidden)
             anim.start()
             self._panel_anim = anim
+        elif visible:
+            self.right_panel.setMinimumWidth(MIN_RIGHT_PANEL_W)
+            self.right_panel.setMaximumWidth(16777215)
+            self.right_panel.setVisible(True)
+            QTimer.singleShot(0, self._restore_panel_width)
+            QTimer.singleShot(0, self._animate_card_entrance)
         else:
-            self.right_panel.setFixedWidth(RIGHT_PANEL_W)
-            self.right_panel.setVisible(visible)
-            if visible:
-                QTimer.singleShot(0, self._animate_card_entrance)
+            self.right_panel.setMinimumWidth(0)
+            self.right_panel.setMaximumWidth(0)
+            self.right_panel.setVisible(False)
 
         # Guardrails: stop panel motion while hidden; entrance on re-show.
         if not visible:
@@ -2786,16 +2856,18 @@ class AgentWindow(QMainWindow):
             self._panel_anim = None
 
     def _after_panel_shown(self):
-        # Re-pin the fixed width once the slide finishes so the layout is
-        # exactly 320 again (maximumWidth animation leaves min at 0).
+        # Release the width caps and re-apply the remembered splitter size.
         self._panel_anim = None
-        self.right_panel.setFixedWidth(RIGHT_PANEL_W)
+        self.right_panel.setMaximumWidth(16777215)
+        self.right_panel.setMinimumWidth(MIN_RIGHT_PANEL_W)
+        self._restore_panel_width()
         self._animate_card_entrance()
 
     def _after_panel_hidden(self):
         self._panel_anim = None
+        self.right_panel.setMinimumWidth(0)
+        self.right_panel.setMaximumWidth(0)
         self.right_panel.setVisible(False)
-        self.right_panel.setFixedWidth(RIGHT_PANEL_W)
 
     def toggle_right_panel(self):
         """Header chevron -> show/hide the right info panel (Phase 6a).
@@ -4880,17 +4952,16 @@ class AgentWindow(QMainWindow):
 
     def _render_telegram_result(self, item):
         try:
-            kind, chat_id, message_id, payload = item
+            kind, chat_id, message_id, payload, *rest = item
         except (TypeError, ValueError):
             return
+        meta = rest[0] if rest and isinstance(rest[0], dict) else {}
 
         if kind == "summary":
-            source = (
-                f"TELEGRAM \u00b7 chat {chat_id} \u00b7 "
-                f"msg {message_id} \u00b7 untrusted"
-            )
-            self.chat.add_message(
-                UntrustedTextMessage(str(payload), source=source))
+            sender = str(meta.get("sender") or f"chat {chat_id}")
+            file_name = str(meta.get("file_name") or f"msg {message_id}")
+            self.panel.add_telegram_summary(
+                sender, file_name, str(payload))
         elif kind in ("rejected", "error"):
             self.chat.add_message(UntrustedTextMessage(
                 f"{kind}: {payload}", source="TELEGRAM DOCS"))
@@ -5117,7 +5188,6 @@ class AgentWindow(QMainWindow):
         """
         if request_text.startswith("REMINDER:"):
             reminder_text = request_text[len("REMINDER:"):].strip()
-            self.panel.add_notification("reminder", reminder_text)
             self._fire_reminder_direct(reminder_text)
             return
         # A scheduled task or watcher event runs a full agent turn. If one is
@@ -5125,8 +5195,6 @@ class AgentWindow(QMainWindow):
         # instead — that is the bug this fixes).
         is_watcher = request_text.startswith("FILE WATCHER:")
         label = "[watcher]" if is_watcher else "[scheduled]"
-        self.panel.add_notification(
-            "watcher" if is_watcher else "scheduled", request_text)
         self.chat.add_message(AssistantMessage(f"{label} {request_text}"))
         if self._processing:
             self._queue_scheduled(request_text)

@@ -402,7 +402,9 @@ class PipelineTests(unittest.TestCase):
     def test_document_reaches_summary(self):
         item, seen = asyncio.run(
             self._run_pipeline('{"summary":"summary text"}'))
-        self.assertEqual(item, ("summary", 1, 7, "summary text"))
+        self.assertEqual(item[:4], ("summary", 1, 7, "summary text"))
+        self.assertEqual(item[4]["sender"], "id 2")
+        self.assertEqual(item[4]["file_name"], "doc.txt")
         self.assertTrue(seen)
         self.assertEqual(seen[0][0]["role"], "system")
         self.assertNotIn("hello", seen[0][0]["content"])
@@ -478,6 +480,35 @@ class PipelineTests(unittest.TestCase):
         stop.set()
         await asyncio.wait_for(task, timeout=3)
         return item, seen
+
+
+class SenderLabelTests(unittest.TestCase):
+    def test_prefers_cached_name(self):
+        event = SimpleNamespace(
+            sender=SimpleNamespace(first_name="Alice"),
+            sender_id=2,
+        )
+        self.assertEqual(ts.sender_label(event), "Alice")
+
+    def test_falls_back_to_username(self):
+        event = SimpleNamespace(
+            sender=SimpleNamespace(first_name=None, username="alice"),
+            sender_id=2,
+        )
+        self.assertEqual(ts.sender_label(event), "alice")
+
+    def test_falls_back_to_sender_id(self):
+        event = SimpleNamespace(sender_id=42)
+        self.assertEqual(ts.sender_label(event), "id 42")
+
+    def test_document_name_strips_directories(self):
+        message = SimpleNamespace(
+            file=SimpleNamespace(name="C:\\temp\\report.pdf"))
+        self.assertEqual(ts.document_name(message), "report.pdf")
+
+    def test_document_name_defaults(self):
+        message = SimpleNamespace(file=SimpleNamespace(name=""))
+        self.assertEqual(ts.document_name(message), "document")
 
 
 class ServiceTests(unittest.TestCase):

@@ -2,7 +2,8 @@
 Telegram document listener — MASTER_PLAN Section 2.
 
 One dedicated asyncio thread owns a single Telethon client and feeds validated
-document summaries to the GUI through a plain ``queue.Queue``. The GUI drains
+document summaries — plus sender and file-name metadata — to the GUI through a
+plain ``queue.Queue``. The GUI drains
 that queue on a QTimer; no Qt object is ever touched from the asyncio thread.
 
 Security boundary:
@@ -703,6 +704,25 @@ def select_document(event, allowed_chats, allowed_senders):
     return message, suffix, None
 
 
+def sender_label(event) -> str:
+    """Best-effort sender name from Telethon's cached entity, else the id."""
+    sender = getattr(event, "sender", None)
+    if sender is None:
+        sender = getattr(getattr(event, "message", None), "sender", None)
+    for attr in ("first_name", "title", "username"):
+        value = getattr(sender, attr, None)
+        if value:
+            return str(value)
+    sender_id = getattr(event, "sender_id", None)
+    return f"id {sender_id}" if sender_id is not None else "unknown"
+
+
+def document_name(message) -> str:
+    name = PurePath(
+        getattr(getattr(message, "file", None), "name", "") or "").name
+    return name or "document"
+
+
 async def listen(
     *,
     session,
@@ -743,7 +763,7 @@ async def listen(
             return
 
         try:
-            jobs.put_nowait((message, suffix))
+            jobs.put_nowait((message, suffix, sender_label(event)))
         except asyncio.QueueFull:
             publish(
                 results, ("rejected", event.chat_id, message.id, "queue full")
@@ -751,7 +771,7 @@ async def listen(
 
     async def worker():
         while True:
-            message, suffix = await jobs.get()
+            message, suffix, sender = await jobs.get()
             chat_id = getattr(message, "chat_id", None)
             message_id = getattr(message, "id", None)
             try:
@@ -771,7 +791,9 @@ async def listen(
                 except Exception as exc:
                     raise ValueError("Invalid model output") from exc
 
-                publish(results, ("summary", chat_id, message_id, summary))
+                publish(results, (
+                    "summary", chat_id, message_id, summary,
+                    {"sender": sender, "file_name": document_name(message)}))
                 _log.info(
                     "summary ok chat=%s msg=%s chars=%d",
                     chat_id,
