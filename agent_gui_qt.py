@@ -33,6 +33,7 @@ import re
 import sys
 import threading
 import time
+from pathlib import Path
 
 from PySide6.QtCore import (
     Qt,
@@ -48,6 +49,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QFont,
+    QFontDatabase,
     QGuiApplication,
     QIcon,
     QKeyEvent,
@@ -64,6 +67,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QInputDialog,
@@ -96,42 +100,33 @@ except Exception:
     scheduler = None
 
 # --------------------------- palette ---------------------------
-# Mirrors gui_widgets.py, with the mint accent shifted greener (hue 153->147,
-# saturation 60%->70%). Keep backgrounds/borders/text in sync with the theme.
-COLOR_BG         = "#0d0f14"
-COLOR_BG_ALT     = "#141720"
-COLOR_SIDEBAR    = "#111319"
-COLOR_RAISED     = "#171a22"
-COLOR_CODE_BG    = "#080a0e"
-COLOR_INPUT_BG   = "#14171f"
-COLOR_BORDER     = "#23262f"
-COLOR_HOVER      = "#1c2029"
-COLOR_SELECTED   = "#16241e"
-COLOR_USER_PILL  = "#232838"
-COLOR_TEXT_HI    = "#e8eaef"
-COLOR_TEXT_MID   = "#9aa1af"
-COLOR_TEXT_LOW   = "#5f6673"
+# Section 1 terminal theme: black surfaces, mint foreground, dim mint
+# secondary. Kept as constants because a lot of the existing widgets style
+# themselves inline; agentbot.qss handles the structural rules and these keep
+# the inline styles on the same palette.
+COLOR_BG         = "#000000"
+COLOR_BG_ALT     = "#000000"
+COLOR_SIDEBAR    = "#000000"
+COLOR_RAISED     = "#0a1a15"
+COLOR_CODE_BG    = "#000000"
+COLOR_INPUT_BG   = "#000000"
+COLOR_BORDER     = "#23483D"
+COLOR_HOVER      = "#0e241d"
+COLOR_SELECTED   = "#123026"
+COLOR_TEXT_HI    = "#70FFD4"
+COLOR_TEXT_USER  = "#D5FFF0"
+COLOR_TEXT_MID   = "#8AA99F"
+COLOR_TEXT_LOW   = "#8AA99F"
 
-COLOR_WARN       = "#eab308"
-COLOR_DANGER     = "#dc2626"
-COLOR_DANGER_HOVER = "#b91c1c"
+COLOR_WARN       = "#ffd166"
+COLOR_DANGER     = "#FF8F9C"
+COLOR_DANGER_HOVER = "#ff6b7c"
 
-# mint accent — shifted greener (was #3ecf8e / #2fb87c / #1f4d3a)
-COLOR_ACCENT       = "#4fe08f"
-COLOR_ACCENT_HOVER = "#3bc476"
-COLOR_ACCENT_DIM   = "#1c5a3f"
+COLOR_ACCENT       = "#70FFD4"
+COLOR_ACCENT_HOVER = "#8CFFE0"
+COLOR_ACCENT_DIM   = "#23483D"
 
-# Phase 6a — right info panel
-# A subtle step up from the chat bg (#0d0f14) and the input pill (#14171f), so
-# the cards read as raised panels without a border-heavy look. Reuses the
-# existing border colour (no new border token needed).
-COLOR_CARD         = "#14171d"
-# Card header accent: the mint dimmed toward the background. Base mint #4fe08f
-# at ~40% lightness -> #2a6b52; nudged one step to #2f7d5e so it stays legible
-# against the card bg at 11px.
-COLOR_HEAD_ACCENT  = "#2f7d5e"
-
-FONT_UI = "Segoe UI"
+FONT_UI = "Consolas"
 FONT_MONO = "Consolas"
 
 SIDEBAR_W = 226
@@ -270,6 +265,26 @@ def _svg_pixmap(name: str, size: int, color: str) -> QPixmap:
 
 def _svg_icon(name: str, size: int, color: str) -> QIcon:
     return QIcon(_svg_pixmap(name, size, color))
+
+
+def terminal_font() -> QFont:
+    """Platform-safe monospace font for the terminal theme."""
+    available = set(QFontDatabase.families())
+    for family in ("Cascadia Mono", "Consolas", "DejaVu Sans Mono"):
+        if family in available:
+            return QFont(family, 11)
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    font.setPointSize(11)
+    return font
+
+
+def _add_panel_glow(panel: QFrame) -> None:
+    """Give a panel a mint halo. Each panel needs its own effect instance."""
+    effect = QGraphicsDropShadowEffect(panel)
+    effect.setBlurRadius(18.0)
+    effect.setOffset(0.0, 0.0)
+    effect.setColor(QColor(112, 255, 212, 65))
+    panel.setGraphicsEffect(effect)
 
 
 _CODE_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+.-]*)\n?(.*?)```", re.DOTALL)
@@ -1302,6 +1317,26 @@ class ShrinkableWidget(QWidget):
         return QSize(0, super().sizeHint().height())
 
 
+class InputColumnHost(QWidget):
+    """Keeps the prompt row the same width as the chat message column."""
+
+    def __init__(self):
+        super().__init__()
+        self._column = QWidget()
+        self._column.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addStretch(1)
+        row.addWidget(self._column, 0)
+        row.addStretch(1)
+
+    def resizeEvent(self, event):
+        self._column.setFixedWidth(max(0, min(CONTENT_MAX_W, self.width())))
+        super().resizeEvent(event)
+
+
 class MessageBase(ShrinkableWidget):
     """One chat message, laid out in a centred max-width column."""
 
@@ -1362,17 +1397,13 @@ class UserMessage(MessageBase):
         self.raw_text = text
         holder = QFrame()
         holder.setObjectName("userMsg")
+        # Terminal history is plain text, not a bubble: no fill, no padding.
         holder.setStyleSheet(
-            f"""
-            QFrame#userMsg {{
-                background: {COLOR_USER_PILL};
-                border-radius: 8px;
-            }}
-            QFrame#userMsg QLabel {{ background: transparent; }}
-            """
+            "QFrame#userMsg { background: transparent; border: none; }"
+            "QFrame#userMsg QLabel { background: transparent; }"
         )
         hl = QVBoxLayout(holder)
-        hl.setContentsMargins(14, 12, 14, 12)
+        hl.setContentsMargins(0, 0, 0, 0)
         holder_layout = QVBoxLayout()
         hl.addLayout(holder_layout)
 
@@ -1387,7 +1418,7 @@ class UserMessage(MessageBase):
                     Qt.TextInteractionFlag.TextSelectableByMouse
                 )
                 lbl.setStyleSheet(
-                    f"background: transparent; color: {COLOR_TEXT_HI}; "
+                    f"background: transparent; color: {COLOR_TEXT_USER}; "
                     f"font-size: 15px;"
                 )
                 holder_layout.addWidget(lbl)
@@ -1419,6 +1450,48 @@ class AssistantMessage(MessageBase):
             self._col_layout.addWidget(chip)
 
 
+class UntrustedTextMessage(MessageBase):
+    """Plain-text block for untrusted external content (Telegram summaries).
+
+    Never uses markdown or RichText: a document summary is data, not markup.
+    """
+
+    def __init__(self, text: str, source: str = ""):
+        super().__init__()
+        self.raw_text = f"{source}\n{text}" if source else text
+        self.source_label = None
+
+        if source:
+            caption = QLabel(source)
+            caption.setProperty("role", "secondary")
+            caption.setTextFormat(Qt.TextFormat.PlainText)
+            caption.setWordWrap(True)
+            caption.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self._col_layout.addWidget(caption)
+            self.source_label = caption
+
+        body = QLabel()
+        body.setProperty("role", "log")
+        body.setTextFormat(Qt.TextFormat.PlainText)
+        body.setText(text)
+        body.setWordWrap(True)
+        body.setMinimumWidth(0)
+        body.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        body.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        body.setStyleSheet(
+            f"background: transparent; color: {COLOR_TEXT_HI}; font-size: 14px;"
+        )
+        self._col_layout.addWidget(body)
+        self.body_label = body
+
+
 # ----------------------------------------------------------------------
 # Chat view with scroll-lock
 # ----------------------------------------------------------------------
@@ -1438,27 +1511,14 @@ class ChatView(QScrollArea):
 
     def __init__(self):
         super().__init__()
+        self.setObjectName("chatScroll")
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setStyleSheet(
-            f"""
-            QScrollArea {{ background: {COLOR_BG}; border: none; }}
-            QScrollBar:vertical {{
-                background: {COLOR_BG}; width: 10px; margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
-                background: #22262f; border-radius: 5px; min-height: 30px;
-            }}
-            QScrollBar::handle:vertical:hover {{ background: #313745; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            """
-        )
+        self.viewport().setObjectName("chatViewport")
 
         self._body = QWidget()
-        self._body.setStyleSheet(f"background: {COLOR_BG};")
+        self._body.setObjectName("chatContent")
         self._layout = QVBoxLayout(self._body)
         self._layout.setContentsMargins(0, 24, 0, 24)
         self._layout.setSpacing(MSG_SPACING)
@@ -1562,23 +1622,23 @@ class Sidebar(QFrame):
 
         self.new_chat = QPushButton("   New chat")
         self.new_chat.setFixedHeight(36)
-        self.new_chat.setIcon(_svg_icon("plus", 16, "#06281a"))
+        self.new_chat.setIcon(_svg_icon("plus", 16, COLOR_ACCENT))
         self.new_chat.setIconSize(QSize(16, 16))
         self.new_chat.setCursor(Qt.CursorShape.PointingHandCursor)
         self.new_chat.setStyleSheet(
             f"""
             QPushButton {{
-                background: {COLOR_ACCENT};
-                border: none;
-                border-radius: 10px;
-                color: #06281a;
+                background: transparent;
+                border: 1px solid {COLOR_ACCENT};
+                border-radius: 0px;
+                color: {COLOR_ACCENT};
                 font-family: "{FONT_UI}";
                 font-size: 12px;
                 font-weight: bold;
                 text-align: left;
                 padding-left: 10px;
             }}
-            QPushButton:hover {{ background: {COLOR_ACCENT_HOVER}; }}
+            QPushButton:hover {{ background: {COLOR_HOVER}; }}
             """
         )
         layout.addWidget(self.new_chat)
@@ -1640,20 +1700,12 @@ class InfoCard(QFrame):
     real QWidget with its own layout so 6b can just addWidget into it.
     """
 
-    def __init__(self, title: str, placeholder: str = "\u2014"):
+    def __init__(self, title: str, placeholder: str = "\u2014",
+                 object_name: str = "infoCard"):
         super().__init__()
         self.title = title
-        self.setObjectName("infoCard")
-        self.setStyleSheet(
-            f"""
-            QFrame#infoCard {{
-                background: {COLOR_CARD};
-                border: 1px solid {COLOR_BORDER};
-                border-radius: {CARD_RADIUS}px;
-            }}
-            QFrame#infoCard QLabel {{ background: transparent; }}
-            """
-        )
+        self.setObjectName(object_name)
+        self.setProperty("panel", True)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(CARD_PAD, CARD_PAD, CARD_PAD, CARD_PAD)
         outer.setSpacing(8)
@@ -1664,10 +1716,7 @@ class InfoCard(QFrame):
         head_row.setContentsMargins(0, 0, 0, 0)
         head_row.setSpacing(6)
         head = QLabel(title)
-        head.setStyleSheet(
-            f'color: {COLOR_HEAD_ACCENT}; font-family: "{FONT_UI}"; '
-            f"font-size: 11px; font-weight: bold; letter-spacing: 0.5px;"
-        )
+        head.setProperty("role", "heading")
         head_row.addWidget(head)
         head_row.addStretch(1)
         self.header_layout = head_row
@@ -1682,9 +1731,7 @@ class InfoCard(QFrame):
         self.placeholder = QLabel(placeholder)
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setWordWrap(True)
-        self.placeholder.setStyleSheet(
-            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; font-size: 13px;'
-        )
+        self.placeholder.setProperty("role", "secondary")
         self.body_layout.insertWidget(0, self.placeholder)
         outer.addWidget(self.body, 1)
 
@@ -1698,10 +1745,7 @@ class InfoCard(QFrame):
             self.placeholder = QLabel()
             self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.placeholder.setWordWrap(True)
-            self.placeholder.setStyleSheet(
-                f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
-                f"font-size: 13px;"
-            )
+            self.placeholder.setProperty("role", "secondary")
             self.body_layout.insertWidget(0, self.placeholder)
         self.placeholder.setText(text)
         self.placeholder.setVisible(True)
@@ -1738,8 +1782,8 @@ class RightPanel(QFrame):
 
     def __init__(self):
         super().__init__()
+        self.setObjectName("rightPanel")
         self.setFixedWidth(RIGHT_PANEL_W)
-        self.setStyleSheet(f"background: {COLOR_BG};")
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         # Phase 6c: set by AgentWindow; gates the per-entry fade-in.
         self.animations_enabled = True
@@ -1753,24 +1797,9 @@ class RightPanel(QFrame):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            f"""
-            QScrollArea {{ background: {COLOR_BG}; border: none; }}
-            QScrollBar:vertical {{
-                background: {COLOR_BG}; width: 10px; margin: 0;
-            }}
-            QScrollBar::handle:vertical {{
-                background: #22262f; border-radius: 5px; min-height: 30px;
-            }}
-            QScrollBar::handle:vertical:hover {{ background: #313745; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            """
-        )
 
         body = QWidget()
-        body.setStyleSheet(f"background: {COLOR_BG};")
+        body.setObjectName("panelContent")
         self.cards_layout = QVBoxLayout(body)
         # 0 left / 16 right: the chat column already carries its own 24px right
         # padding, so this keeps a total 40px gutter without over-padding.
@@ -1778,8 +1807,12 @@ class RightPanel(QFrame):
         self.cards_layout.setSpacing(CARD_SPACING)
 
         self.cards = {}
+        glow_names = {"SYSTEM": "systemPanel", "ACTIVITY": "activityPanel"}
         for title in self.CARD_TITLES:
-            card = InfoCard(title)
+            card = InfoCard(title, object_name=glow_names.get(title, "infoCard"))
+            if title in glow_names:
+                card._panel_glow = True
+                _add_panel_glow(card)
             self.cards[title] = card
             self.cards_layout.addWidget(card)
             if title in (self._FIXED_HEIGHTS):
@@ -2185,13 +2218,11 @@ class AgentWindow(QMainWindow):
         self.setWindowTitle("Agent")
         self.resize(1380, 720)
         self.setMinimumWidth(900)
-        self.setStyleSheet(f"background: {COLOR_BG};")
 
         self._sidebar_anim = None
         self._worker = None
         self._processing = False
         self._settings_overlay = None
-        self._input_outer = None
         self._tray_icon = None
         self._hotkey_installed = False
         self._recording = False
@@ -2222,6 +2253,10 @@ class AgentWindow(QMainWindow):
         self._entry_anims = []
         self._sidebar_strip_pulse = None
         self._panel_anim = None
+        # Section 2 — Telegram document listener (started in start_services).
+        self._telegram_service = None
+        self._telegram_results = None
+        self._telegram_timer = None
         # Phase 6b panel timers (all created here, on the main thread) + state.
         self._system_timer = None
         self._weather_timer = None
@@ -2243,6 +2278,7 @@ class AgentWindow(QMainWindow):
             self.conversation_history = []
 
         central = QWidget()
+        central.setObjectName("central")
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -2413,6 +2449,10 @@ class AgentWindow(QMainWindow):
             card = self.panel.cards.get(title)
             if card is None:
                 continue
+            # A widget can hold only one graphics effect; the entrance fade
+            # would replace (and destroy) the SYSTEM/ACTIVITY drop-shadow glow.
+            if getattr(card, "_panel_glow", False):
+                continue
             effect = QGraphicsOpacityEffect(card)
             card.setGraphicsEffect(effect)
             anim = QPropertyAnimation(effect, b"opacity", card)
@@ -2512,7 +2552,6 @@ class AgentWindow(QMainWindow):
         super().resizeEvent(event)
         if self._settings_overlay is not None:
             self._settings_overlay.setGeometry(self.rect())
-        self._sync_input_column_width()
         self._apply_panel_autohide()
 
     def _apply_panel_autohide(self):
@@ -2600,14 +2639,6 @@ class AgentWindow(QMainWindow):
         show = not self._right_panel_visible
         self._set_right_panel_visible(show)
         self._right_panel_auto = not (show and self.width() < HIDE_PANEL_BELOW)
-
-    def _sync_input_column_width(self):
-        # Match the input column to the message column: cap at CONTENT_MAX_W,
-        # shrink when the window is narrower than that.
-        if self._input_outer is None:
-            return
-        avail = self._input_outer.width() - 2 * CONTENT_PAD
-        self._input_column.setFixedWidth(max(0, min(CONTENT_MAX_W, avail)))
 
     def keyPressEvent(self, event):
         if (event.key() == Qt.Key.Key_Escape
@@ -2706,21 +2737,12 @@ class AgentWindow(QMainWindow):
         col.setContentsMargins(CONTENT_PAD, 8, CONTENT_PAD, 16)
         col.setSpacing(0)
 
-        # Centre the pill in the same max-width column as the messages.
-        holder = ShrinkableWidget()
-        holder_row = QHBoxLayout(holder)
-        holder_row.setContentsMargins(0, 0, 0, 0)
-        holder_row.setSpacing(0)
-        holder_row.addStretch(1)
-        self._input_column = QWidget()
-        self._input_column.setMaximumWidth(CONTENT_MAX_W)
-        self._input_column.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+        # Centre the prompt in the same max-width column as the messages.
+        holder = InputColumnHost()
+        self._input_column = holder._column
         self._input_col_layout = QVBoxLayout(self._input_column)
         self._input_col_layout.setContentsMargins(0, 0, 0, 0)
         self._input_col_layout.setSpacing(0)
-        holder_row.addWidget(self._input_column, 0)
-        holder_row.addStretch(1)
 
         # Attachment chips sit above the pill, inside the same column.
         self.attach_strip = QWidget()
@@ -2732,31 +2754,28 @@ class AgentWindow(QMainWindow):
         self.attach_strip.setVisible(False)
         self._input_col_layout.addWidget(self.attach_strip)
 
+        # Section 1 — permanent shell prefix + borderless editor
+        # (agentbot.qss: QFrame#promptRow / QLabel#promptPrefix /
+        # QPlainTextEdit#commandInput). Attach / mic / send stay on the right.
         self.input_pill = QFrame()
-        self.input_pill.setObjectName("inputPill")
-        self.input_pill.setStyleSheet(
-            f"""
-            QFrame#inputPill {{
-                background: {COLOR_INPUT_BG};
-                border: 1px solid {COLOR_BORDER};
-                border-radius: 18px;
-            }}
-            """
-        )
+        self.input_pill.setObjectName("promptRow")
         pill_row = QHBoxLayout(self.input_pill)
-        pill_row.setContentsMargins(14, 8, 8, 8)
-        pill_row.setSpacing(8)
+        pill_row.setContentsMargins(0, 12, 0, 0)
+        pill_row.setSpacing(10)
+
+        self.prompt_prefix = QLabel("root@agent:~#")
+        self.prompt_prefix.setObjectName("promptPrefix")
+        self.prompt_prefix.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        pill_row.addWidget(self.prompt_prefix, 0, Qt.AlignmentFlag.AlignTop)
 
         self.input_field = QPlainTextEdit()
-        self.input_field.setPlaceholderText("Message AgentBot…")
+        self.input_field.setObjectName("commandInput")
+        self.input_field.setPlaceholderText("Type a command…")
         self.input_field.setFrameShape(QFrame.Shape.NoFrame)
         self.input_field.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.input_field.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.input_field.setFixedHeight(INPUT_LINE_H)
-        self.input_field.setStyleSheet(
-            f'background: transparent; color: {COLOR_TEXT_HI}; '
-            f'border: none; font-size: 14px;'
-        )
         self.input_field.textChanged.connect(self._on_input_changed)
         self.input_field.installEventFilter(self)
         pill_row.addWidget(self.input_field, 1)
@@ -2803,7 +2822,6 @@ class AgentWindow(QMainWindow):
 
         self._input_col_layout.addWidget(self.input_pill)
         col.addWidget(holder)
-        self._input_outer = holder
         self._set_mic_state("idle")   # paint the initial mic look
         self._refresh_send_btn()
         self._install_send_hover_lift()
@@ -4448,6 +4466,102 @@ class AgentWindow(QMainWindow):
         except Exception as e:
             print(f"[tts] warmup skipped: {e}")
 
+        # Section 2 — Telegram document listener. Opt-in via config; config
+        # and authorisation problems surface in the transcript, not as a
+        # startup exception.
+        self._start_telegram_doc_service()
+
+    # -- Telegram document listener (Section 2) -------------------------
+    def _start_telegram_doc_service(self):
+        """Start the dedicated Telegram listener and its GUI drain timer.
+
+        Called once the window is shown. The service runs on its own daemon
+        thread with its own asyncio loop; this method only creates the
+        main-thread QTimer that drains its result queue.
+        """
+        if self._telegram_service is not None:
+            return
+
+        try:
+            import telegram_service
+        except Exception as exc:
+            self.chat.add_message(UntrustedTextMessage(
+                f"listener unavailable: {type(exc).__name__}",
+                source="TELEGRAM DOCS"))
+            return
+
+        try:
+            settings = telegram_service.load_settings()
+            if not settings.enabled:
+                return
+            service = telegram_service.TelegramDocService(settings)
+            if not service.start():
+                return
+        except telegram_service.TelegramDocConfigError as exc:
+            self.chat.add_message(UntrustedTextMessage(
+                f"listener not started: {exc}", source="TELEGRAM DOCS"))
+            return
+        except Exception as exc:
+            self.chat.add_message(UntrustedTextMessage(
+                f"listener failed to start: {type(exc).__name__}",
+                source="TELEGRAM DOCS"))
+            return
+
+        self._telegram_service = service
+        self._telegram_results = service.results
+        timer = QTimer(self)
+        timer.setInterval(telegram_service.RESULT_POLL_MS)
+        timer.timeout.connect(self._drain_telegram_results)
+        timer.start()
+        self._telegram_timer = timer
+
+    def _drain_telegram_results(self):
+        """Main-thread drain: the only place Telegram results touch widgets."""
+        if self._telegram_results is None:
+            return
+        try:
+            import telegram_service
+            telegram_service.drain_results(
+                self._telegram_results, self._render_telegram_result, limit=20)
+        except Exception as exc:
+            self._stop_telegram_doc_service()
+            self.chat.add_message(UntrustedTextMessage(
+                f"polling stopped: {type(exc).__name__}",
+                source="TELEGRAM DOCS"))
+
+    def _render_telegram_result(self, item):
+        try:
+            kind, chat_id, message_id, payload = item
+        except (TypeError, ValueError):
+            return
+
+        if kind == "summary":
+            source = (
+                f"TELEGRAM \u00b7 chat {chat_id} \u00b7 "
+                f"msg {message_id} \u00b7 untrusted"
+            )
+            self.chat.add_message(
+                UntrustedTextMessage(str(payload), source=source))
+        elif kind in ("rejected", "error"):
+            self.chat.add_message(UntrustedTextMessage(
+                f"{kind}: {payload}", source="TELEGRAM DOCS"))
+        elif kind == "service_error":
+            self.chat.add_message(UntrustedTextMessage(
+                f"listener stopped: {payload}", source="TELEGRAM DOCS"))
+            self._stop_telegram_doc_service()
+
+    def _stop_telegram_doc_service(self):
+        """Cooperative shutdown. Never joins the thread on the GUI thread."""
+        timer = self._telegram_timer
+        if timer is not None:
+            timer.stop()
+            self._telegram_timer = None
+        service = self._telegram_service
+        if service is not None:
+            service.stop()
+            self._telegram_service = None
+        self._telegram_results = None
+
     # -- tray -----------------------------------------------------------
     def _start_tray(self):
         if tray is None:
@@ -4494,6 +4608,13 @@ class AgentWindow(QMainWindow):
             get_agent().save_conversation_history(self.conversation_history)
         except Exception:
             pass
+        # Section 2 — ask the Telegram listener to disconnect. Cooperative:
+        # the daemon thread exits on its own; never join on the GUI thread.
+        telegram_service = self._telegram_service
+        self._stop_telegram_doc_service()
+        if telegram_service is not None:
+            # A normal quit must not leave a stale session lock behind.
+            telegram_service.release_lock()
         # Stop the media poller so an in-flight thread can't emit into a
         # deleted window during teardown (Phase 6b follow-up).
         if getattr(self, "_media_poller", None) is not None:
@@ -4678,6 +4799,13 @@ class AgentWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setFont(terminal_font())
+    qss_path = Path(__file__).resolve().with_name("agentbot.qss")
+    try:
+        app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(f"[gui] stylesheet not loaded: {exc}")
     app.setQuitOnLastWindowClosed(False)  # app lives in the tray
     window = AgentWindow()
     window.show_greeting()

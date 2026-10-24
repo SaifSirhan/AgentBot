@@ -2,6 +2,7 @@
 .session
 *.session
 *.session-journal
+*.session.lock
 credentials.json
 config.json
 config.json.bak*
