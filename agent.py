@@ -3429,6 +3429,58 @@ def youtube_search(query):
         return f"ERROR: {e}"
 
 
+OPERA_CDP_ENDPOINT = "http://localhost:9222"
+
+
+def _cdp_playwright():
+    # Imported lazily so the app starts even if Playwright is missing; the
+    # sync API is safe here because tool calls run off the Qt/asyncio threads.
+    from playwright.sync_api import sync_playwright
+    return sync_playwright
+
+
+def _play_in_music_tab(url):
+    """Hand ``url`` to an existing music.youtube.com tab over CDP.
+
+    Returns "reused" when an existing music tab was navigated, "opened" when
+    a new CDP-controlled tab was created, and None when Opera is not
+    reachable with --remote-debugging-port=9222.
+    """
+    try:
+        with _cdp_playwright()() as p:
+            browser = p.chromium.connect_over_cdp(
+                OPERA_CDP_ENDPOINT, timeout=5000)
+
+            page = None
+            contexts = list(browser.contexts)
+            for context in contexts:
+                for candidate in context.pages:
+                    try:
+                        candidate_url = candidate.url
+                    except Exception:
+                        continue
+                    if "music.youtube.com" in candidate_url:
+                        page = candidate
+                        break
+                if page is not None:
+                    break
+
+            status = "reused"
+            if page is None:
+                if contexts:
+                    page = contexts[0].new_page()
+                else:
+                    page = browser.new_context().new_page()
+                status = "opened"
+
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            page.bring_to_front()
+            return status
+    except Exception as e:
+        print(f"[opera-cdp] unavailable, opening a new tab: {e}")
+        return None
+
+
 def play_on_youtube(query):
     """Search YouTube for a song and play it in Opera via URL autoplay."""
     import urllib.parse
@@ -3457,9 +3509,14 @@ def play_on_youtube(query):
     except Exception as e:
         return f"ERROR: {e}"
 
-    # Step 2 — open the autoplay URL in Opera (their real browser)
+    # Step 2 — navigate the existing music tab when Opera exposes CDP;
+    # otherwise fall back to the old new-tab behaviour.
     play_url = f"https://music.youtube.com/watch?v={video_id}&autoplay=1"
-    return _open_in_new_tab(play_url, label=f"Playing: {query}")
+    status = _play_in_music_tab(play_url)
+    if status is None:
+        return _open_in_new_tab(play_url, label=f"Playing: {query}")
+    where = "existing" if status == "reused" else "new"
+    return f"Playing in {where} YouTube Music tab: {query}"
 
 
 def get_video_links(query):
