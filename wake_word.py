@@ -8,6 +8,11 @@ file is missing the service refuses to start instead of listening for a
 different phrase. Set ``WAKE_WORD_MODEL`` to a pretrained name (for example
 ``hey_jarvis``) to exercise the pipeline without a custom model.
 
+The pip package does not ship the pretrained models; download them first with
+``python -c "import openwakeword.utils as u; u.download_models()"``. ONNX is
+preferred whenever onnxruntime is installed because tflite-runtime has no
+Windows wheels.
+
 Audio: 16 kHz, mono, 16-bit, 1280-sample (80 ms) chunks. The stream is closed
 while recording, while paused, and on shutdown so the Windows microphone
 indicator turns off.
@@ -73,6 +78,59 @@ def resolve_model(spec: str) -> str:
     return spec
 
 
+def _module_available(name: str) -> bool:
+    import importlib.util
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _pretrained_paths(spec: str) -> tuple[Path, Path]:
+    """Return the (tflite, onnx) paths for a pre-trained model name."""
+    import openwakeword
+    key = spec.replace(" ", "_")
+    matches = [name for name in openwakeword.MODELS if key in name]
+    if not matches:
+        raise WakeWordError(f"unknown pre-trained wake-word model: {spec}")
+    tflite = Path(openwakeword.MODELS[matches[0]]["model_path"])
+    return tflite, tflite.with_suffix(".onnx")
+
+
+def resolve_runtime(spec: str) -> tuple[str, str]:
+    """Resolve a model spec to (model_path, inference_framework)."""
+    path = Path(spec).expanduser()
+
+    if path.is_file():
+        suffix = path.suffix.lower()
+        if suffix == ".onnx":
+            return str(path), "onnx"
+        if suffix != ".tflite":
+            raise WakeWordError(f"unsupported wake-word model: {spec}")
+        if _module_available("tflite_runtime"):
+            return str(path), "tflite"
+        sibling = path.with_suffix(".onnx")
+        if sibling.is_file() and _module_available("onnxruntime"):
+            return str(sibling), "onnx"
+        raise WakeWordError(
+            "tflite-runtime is not installed (it has no Windows wheels). "
+            f"Place {sibling.name} beside {path.name} and install onnxruntime, "
+            "or provide an ONNX model.")
+
+    tflite, onnx = _pretrained_paths(spec)
+    if not tflite.is_file() and not onnx.is_file():
+        raise WakeWordError(
+            "pre-trained wake-word models are not downloaded. Run: "
+            'python -c "import openwakeword.utils as u; u.download_models()"')
+    if onnx.is_file() and _module_available("onnxruntime"):
+        return str(onnx), "onnx"
+    if tflite.is_file() and _module_available("tflite_runtime"):
+        return str(tflite), "tflite"
+    raise WakeWordError(
+        f"{spec} has no usable runtime. Install onnxruntime for ONNX models "
+        "(pip install onnxruntime); tflite-runtime is not available on Windows.")
+
+
 def _load_dependencies():
     import numpy as np
     import pyaudio
@@ -80,12 +138,9 @@ def _load_dependencies():
     return pyaudio, np, Model
 
 
-def _build_model(model_cls, spec: str):
-    if Path(spec).is_file():
-        framework = "onnx" if spec.lower().endswith(".onnx") else "tflite"
-        return model_cls(
-            wakeword_models=[spec], inference_framework=framework)
-    return model_cls(wakeword_models=[spec])
+def _build_model(model_cls, model_path: str, framework: str):
+    return model_cls(
+        wakeword_models=[model_path], inference_framework=framework)
 
 
 class WakeWordService:
@@ -103,6 +158,7 @@ class WakeWordService:
         self._on_detect = on_detect
         self._on_error = on_error
         self._spec = resolve_model(model)  # may raise before any thread starts
+        self._model_path, self._framework = resolve_runtime(self._spec)
         self._threshold = max(0.01, min(1.0, float(threshold)))
         self._device_index = device_index
         self._cooldown = max(0.0, float(cooldown))
@@ -163,6 +219,10 @@ class WakeWordService:
     @property
     def model_spec(self) -> str:
         return self._spec
+
+    @property
+    def inference_framework(self) -> str:
+        return self._framework
 
     # ------------------------------------------------------------------
     # Internals
@@ -241,7 +301,8 @@ class WakeWordService:
         pyaudio_module = np = None
         try:
             pyaudio_module, np, model_cls = _load_dependencies()
-            self._model = _build_model(model_cls, self._spec)
+            self._model = _build_model(
+                model_cls, self._model_path, self._framework)
             self._audio = pyaudio_module.PyAudio()
 
             while not self._stop.is_set():

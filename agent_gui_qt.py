@@ -4718,7 +4718,9 @@ class AgentWindow(QMainWindow):
             )
             service.start()
             self._wake_word_service = service
-            print(f"[wake] listening ({service.model_spec})")
+            print(
+                f"[wake] listening ({service.model_spec}, "
+                f"{service.inference_framework})")
         except Exception as e:
             self._wake_word_service = None
             print(f"[wake] failed to start: {e}")

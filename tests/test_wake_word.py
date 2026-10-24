@@ -255,6 +255,83 @@ class WakeWordTests(unittest.TestCase):
     def test_pretrained_name_passes_through(self):
         self.assertEqual(wake_word.resolve_model("hey_jarvis"), "hey_jarvis")
 
+    def test_tflite_falls_back_to_sibling_onnx(self):
+        tflite = self.tmp / "agent.tflite"
+        tflite.write_bytes(b"fake-model")
+        onnx = tflite.with_suffix(".onnx")
+        onnx.write_bytes(b"fake-model")
+        with mock.patch.object(
+            wake_word, "_module_available",
+            side_effect=lambda name: name == "onnxruntime",
+        ):
+            self.assertEqual(
+                wake_word.resolve_runtime(str(tflite)), (str(onnx), "onnx"))
+
+    def test_tflite_without_runtime_explains_windows(self):
+        tflite = self.tmp / "agent.tflite"
+        tflite.write_bytes(b"fake-model")
+        with mock.patch.object(wake_word, "_module_available", return_value=False):
+            with self.assertRaisesRegex(wake_word.WakeWordError, "Windows wheels"):
+                wake_word.resolve_runtime(str(tflite))
+
+    def test_pretrained_model_prefers_onnx(self):
+        tflite = self.tmp / "hey_jarvis_v0.1.tflite"
+        onnx = self.tmp / "hey_jarvis_v0.1.onnx"
+        onnx.write_bytes(b"fake-model")
+        with mock.patch.object(
+            wake_word, "_pretrained_paths", return_value=(tflite, onnx),
+        ), mock.patch.object(
+            wake_word, "_module_available",
+            side_effect=lambda name: name == "onnxruntime",
+        ):
+            self.assertEqual(
+                wake_word.resolve_runtime("hey_jarvis"), (str(onnx), "onnx"))
+
+    def test_pretrained_model_uses_tflite_when_no_onnx(self):
+        tflite = self.tmp / "hey_jarvis_v0.1.tflite"
+        tflite.write_bytes(b"fake-model")
+        onnx = tflite.with_suffix(".onnx")
+        with mock.patch.object(
+            wake_word, "_pretrained_paths", return_value=(tflite, onnx),
+        ), mock.patch.object(
+            wake_word, "_module_available",
+            side_effect=lambda name: name == "tflite_runtime",
+        ):
+            self.assertEqual(
+                wake_word.resolve_runtime("hey_jarvis"), (str(tflite), "tflite"))
+
+    def test_missing_pretrained_models_point_to_download(self):
+        with mock.patch.object(
+            wake_word, "_pretrained_paths",
+            return_value=(self.tmp / "nope.tflite", self.tmp / "nope.onnx"),
+        ):
+            with self.assertRaisesRegex(wake_word.WakeWordError, "download_models"):
+                wake_word.resolve_runtime("hey_jarvis")
+
+    def test_pretrained_service_builds_with_resolved_path(self):
+        onnx = self.tmp / "hey_jarvis_v0.1.onnx"
+        onnx.write_bytes(b"fake-model")
+        with mock.patch.object(
+            wake_word, "_pretrained_paths",
+            return_value=(self.tmp / "hey_jarvis_v0.1.tflite", onnx),
+        ), mock.patch.object(
+            wake_word, "_module_available",
+            side_effect=lambda name: name == "onnxruntime",
+        ):
+            service = wake_word.WakeWordService(
+                on_detect=lambda score: None, model="hey_jarvis")
+            service.start()
+            try:
+                self.assertTrue(self.wait_for(lambda: bool(self.models)))
+                self.assertEqual(
+                    self.models[0].kwargs,
+                    {"wakeword_models": [str(onnx)],
+                     "inference_framework": "onnx"},
+                )
+                self.assertEqual(service.inference_framework, "onnx")
+            finally:
+                service.stop()
+
     def test_missing_dependency_reports_error(self):
         errors = []
         with mock.patch.object(
