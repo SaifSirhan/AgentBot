@@ -60,6 +60,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QTextCursor,
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -2478,6 +2479,20 @@ class AgentWindow(QMainWindow):
 
         central = QWidget()
         central.setObjectName("central")
+        self.setAcceptDrops(True)
+        self._drop_highlighted = False
+        self._central_widget = central
+        # Drag highlight lives on a transparent overlay: the stacked children
+        # would paint over a border drawn by the central widget itself.
+        self._drop_overlay = QFrame(central)
+        self._drop_overlay.setObjectName("dropOverlay")
+        self._drop_overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._drop_overlay.setStyleSheet(
+            "QFrame#dropOverlay { background: transparent; "
+            "border: 2px solid transparent; }")
+        self._drop_overlay.setGeometry(central.rect())
+        self._drop_overlay.hide()
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -2765,6 +2780,10 @@ class AgentWindow(QMainWindow):
         super().resizeEvent(event)
         if self._settings_overlay is not None:
             self._settings_overlay.setGeometry(self.rect())
+        if getattr(self, "_central_widget", None) is not None:
+            self._drop_overlay.setGeometry(self._central_widget.rect())
+            if self._drop_overlay.isVisible():
+                self._drop_overlay.raise_()
         self._apply_panel_autohide()
 
     def _apply_panel_autohide(self):
@@ -2880,6 +2899,74 @@ class AgentWindow(QMainWindow):
         show = not self._right_panel_visible
         self._set_right_panel_visible(show)
         self._right_panel_auto = not (show and self.width() < HIDE_PANEL_BELOW)
+
+    # ------------------------------------------------------------------
+    # Drag & drop file input
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _dropped_paths(mime):
+        if mime is None or not mime.hasUrls():
+            return []
+        paths = []
+        for url in mime.urls():
+            path = url.toLocalFile()
+            if path:
+                paths.append(os.path.normpath(path))
+        return paths
+
+    def dragEnterEvent(self, event):
+        if self._dropped_paths(event.mimeData()):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            self._set_drop_highlight(True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._dropped_paths(event.mimeData()):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._set_drop_highlight(False)
+        event.accept()
+
+    def dropEvent(self, event):
+        paths = self._dropped_paths(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        self._set_drop_highlight(False)
+        self._insert_dropped_paths(paths)
+
+    def _set_drop_highlight(self, active):
+        if self._drop_highlighted == active:
+            return
+        self._drop_highlighted = active
+        color = COLOR_ACCENT if active else "transparent"
+        self._drop_overlay.setStyleSheet(
+            f"QFrame#dropOverlay {{ background: transparent; "
+            f"border: 2px solid {color}; }}")
+        self._drop_overlay.setGeometry(self._central_widget.rect())
+        self._drop_overlay.setVisible(active)
+        if active:
+            self._drop_overlay.raise_()
+
+    def _insert_dropped_paths(self, paths):
+        text = ", ".join(paths)
+        existing = self.input_field.toPlainText().strip()
+        if existing:
+            text = f"{existing}, {text}"
+        self.input_field.setPlainText(text)
+        cursor = self.input_field.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.input_field.setTextCursor(cursor)
+        self.input_field.ensureCursorVisible()
+        self.input_field.setFocus()
 
     def keyPressEvent(self, event):
         if (event.key() == Qt.Key.Key_Escape
@@ -3012,6 +3099,9 @@ class AgentWindow(QMainWindow):
 
         self.input_field = QPlainTextEdit()
         self.input_field.setObjectName("commandInput")
+        # Let file drops bubble to AgentWindow instead of the editor.
+        self.input_field.setAcceptDrops(False)
+        self.input_field.viewport().setAcceptDrops(False)
         self.input_field.setPlaceholderText("Type a command…")
         self.input_field.setFrameShape(QFrame.Shape.NoFrame)
         self.input_field.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
