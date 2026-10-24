@@ -40,6 +40,8 @@ kokoro
 faster-whisper
 sounddevice
 numpy
+openwakeword         # local wake-word detection (wake_word.py)
+pyaudio              # microphone capture for the wake-word listener
 pycaw                # Windows volume control
 comtypes             # required by pycaw
 

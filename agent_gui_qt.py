@@ -2364,6 +2364,8 @@ class AgentWindow(QMainWindow):
     _voice_event = Signal(str)       # recording/transcription status from worker
     _weather_ready = Signal(str)     # parsed weather text (from worker thread)
     _gui_visibility_request = Signal(bool, object)  # (show, completion event)
+    _wake_word_detected = Signal(float)   # wake word score (from mic thread)
+    _wake_word_error = Signal(str)        # listener startup/runtime error
 
     def __init__(self):
         super().__init__()
@@ -2415,6 +2417,9 @@ class AgentWindow(QMainWindow):
         self._os_control = None
         self._gui_was_visible = True
         self._gui_was_minimized = False
+        # Option 3 — wake-word listener (started in start_services).
+        self._wake_word_service = None
+        self._wake_word_error_shown = False
         # Phase 6b panel timers (all created here, on the main thread) + state.
         self._system_timer = None
         self._weather_timer = None
@@ -2428,6 +2433,8 @@ class AgentWindow(QMainWindow):
         self._voice_event.connect(self._on_voice_event)
         self._weather_ready.connect(self._on_weather_ready)
         self._gui_visibility_request.connect(self._apply_gui_visibility)
+        self._wake_word_detected.connect(self._on_wake_word)
+        self._wake_word_error.connect(self._on_wake_word_error)
 
         # Conversation history shared with agent.run_agent_turn, loaded once.
         self.conversation_history = []
@@ -4675,6 +4682,80 @@ class AgentWindow(QMainWindow):
                 event.set()
 
     # ------------------------------------------------------------------
+    # Option 3 — wake word
+    # ------------------------------------------------------------------
+    def _start_wake_word_service(self):
+        """Start the openWakeWord listener when WAKE_WORD_ENABLED is true."""
+        if self._wake_word_service is not None:
+            return
+        try:
+            cfg = dict(get_config_module().DEFAULTS)
+            try:
+                cfg.update(read_config_file_raw())
+            except Exception:
+                pass
+
+            enabled = cfg.get("WAKE_WORD_ENABLED", False)
+            if isinstance(enabled, str):
+                enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
+            if not enabled:
+                return
+
+            model = str(cfg.get("WAKE_WORD_MODEL") or "agent")
+            threshold = float(cfg.get("WAKE_WORD_THRESHOLD", 0.5))
+            cooldown = float(cfg.get("WAKE_WORD_COOLDOWN", 1.5))
+            device_raw = str(cfg.get("WAKE_WORD_DEVICE", "") or "").strip()
+            device_index = int(device_raw) if device_raw else None
+
+            import wake_word
+            service = wake_word.WakeWordService(
+                on_detect=self._wake_word_detected.emit,
+                model=model,
+                threshold=threshold,
+                device_index=device_index,
+                cooldown=cooldown,
+                on_error=self._wake_word_error.emit,
+            )
+            service.start()
+            self._wake_word_service = service
+            print(f"[wake] listening ({service.model_spec})")
+        except Exception as e:
+            self._wake_word_service = None
+            print(f"[wake] failed to start: {e}")
+            self.chat.add_message(AssistantMessage(f"Wake word disabled: {e}"))
+
+    def _on_wake_word(self, score):
+        """GUI-thread slot: reuse the F9 start-recording path."""
+        if self._processing or self._recording:
+            self._resume_wake_word()
+            return
+        self._hotkey_press()
+
+    def _on_wake_word_error(self, message):
+        print(f"[wake] {message}")
+        if self._wake_word_error_shown:
+            return
+        self._wake_word_error_shown = True
+        self.chat.add_message(
+            AssistantMessage(f"Wake word unavailable: {message}"))
+
+    def _pause_wake_word(self):
+        service = self._wake_word_service
+        if service is not None:
+            try:
+                service.pause()
+            except Exception:
+                pass
+
+    def _resume_wake_word(self):
+        service = self._wake_word_service
+        if service is not None:
+            try:
+                service.resume()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
     # Background services — tray, hotkey, scheduler
     # ------------------------------------------------------------------
     def start_services(self):
@@ -4732,6 +4813,10 @@ class AgentWindow(QMainWindow):
         # and authorisation problems surface in the transcript, not as a
         # startup exception.
         self._start_telegram_doc_service()
+
+        # Option 3 — wake word listener. Opt-in via config; missing models or
+        # dependencies surface in the transcript, never as a startup crash.
+        self._start_wake_word_service()
 
     # -- Telegram document listener (Section 2) -------------------------
     def _start_telegram_doc_service(self):
@@ -4877,6 +4962,14 @@ class AgentWindow(QMainWindow):
         if telegram_service is not None:
             # A normal quit must not leave a stale session lock behind.
             telegram_service.release_lock()
+        # Option 3 — close the wake-word mic stream so the mic light turns off.
+        wake_service = self._wake_word_service
+        self._wake_word_service = None
+        if wake_service is not None:
+            try:
+                wake_service.stop()
+            except Exception:
+                pass
         # Stop the media poller so an in-flight thread can't emit into a
         # deleted window during teardown (Phase 6b follow-up).
         if getattr(self, "_media_poller", None) is not None:
@@ -4960,6 +5053,7 @@ class AgentWindow(QMainWindow):
         if self._recording or self._processing:
             return
         self._recording = True
+        self._pause_wake_word()
         self._set_mic_state("recording")
         self.set_status("Recording… click the mic or release F9 to send", busy=True)
 
@@ -4994,11 +5088,13 @@ class AgentWindow(QMainWindow):
             self._recording = False
             self._set_mic_state("idle")
             self.set_status(payload[len("error:"):], busy=False)
+            self._resume_wake_word()
             return
         if payload == "recording_started":
             return
         if payload.startswith("transcript:"):
             self._handle_transcript(payload[len("transcript:"):])
+            self._resume_wake_word()
 
     def _handle_transcript(self, text):
         # Match the old GUI: type it into the input, then send immediately.

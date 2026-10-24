@@ -64,6 +64,14 @@ DEFAULTS = {
 "BROWSER_APPROVAL_TIMEOUT": 120,
 "BROWSER_VISION_ENABLED": False,
 "BROWSER_VISION_MODEL": "deepseek-flash",
+# Option 3 — wake word. Off by default; enable only after installing
+# openwakeword/pyaudio and providing a custom "agent" model (none is
+# pre-trained) or choosing a pretrained fallback such as hey_jarvis.
+"WAKE_WORD_ENABLED": False,
+"WAKE_WORD_MODEL": "agent",
+"WAKE_WORD_THRESHOLD": 0.5,
+"WAKE_WORD_DEVICE": "",
+"WAKE_WORD_COOLDOWN": 1.5,
 # Phase 6c — GUI motion (pulses, fades, transitions). When false, every
 # animated element renders in its final state immediately.
 "ANIMATIONS_ENABLED": True,
