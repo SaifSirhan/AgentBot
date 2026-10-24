@@ -56,8 +56,8 @@ DEFAULTS = {
 # Section 4 — restricted browser agent. Disabled until both the flag and at
 # least one HTTPS origin allowlist entry are set. Vision sends screenshots to
 # an external model, so it stays off until explicitly enabled.
-"BROWSER_ENABLED": False,
-"BROWSER_ALLOWED_ORIGINS": "",
+"BROWSER_ENABLED": True,
+"BROWSER_ALLOWED_ORIGINS": "https://example.com,https://quotes.toscrape.com",
 "BROWSER_HEADLESS": False,
 "BROWSER_MAX_STEPS": 15,
 "BROWSER_TASK_TIMEOUT": 180,
@@ -67,8 +67,8 @@ DEFAULTS = {
 # Option 3 — wake word. Off by default; enable only after installing
 # openwakeword/pyaudio and providing a custom "agent" model (none is
 # pre-trained) or choosing a pretrained fallback such as hey_jarvis.
-"WAKE_WORD_ENABLED": False,
-"WAKE_WORD_MODEL": "agent",
+"WAKE_WORD_ENABLED": True,
+"WAKE_WORD_MODEL": "hey_jarvis",
 "WAKE_WORD_THRESHOLD": 0.5,
 "WAKE_WORD_DEVICE": "",
 "WAKE_WORD_COOLDOWN": 1.5,

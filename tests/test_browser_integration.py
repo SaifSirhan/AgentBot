@@ -94,9 +94,11 @@ class BrowserToolIntegrationTests(unittest.TestCase):
 
     def test_vision_defaults_off_in_config(self):
         import config
-        self.assertIs(config.DEFAULTS["BROWSER_ENABLED"], False)
+        self.assertIs(config.DEFAULTS["BROWSER_ENABLED"], True)
         self.assertIs(config.DEFAULTS["BROWSER_VISION_ENABLED"], False)
-        self.assertEqual(config.DEFAULTS["BROWSER_ALLOWED_ORIGINS"], "")
+        self.assertEqual(
+            config.DEFAULTS["BROWSER_ALLOWED_ORIGINS"],
+            "https://example.com,https://quotes.toscrape.com")
         self.assertEqual(config.DEFAULTS["BROWSER_MAX_STEPS"], 15)
 
 

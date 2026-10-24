@@ -27,9 +27,11 @@ w.show()
 for _ in range(20):
     app.processEvents()
 
-# Disabled by default: no listener, no error.
+# Explicitly disabled: no listener, no error.
 assert w._wake_word_service is None
-with mock.patch.object(g, "read_config_file_raw", return_value={}):
+with mock.patch.object(g, "read_config_file_raw", return_value={
+    "WAKE_WORD_ENABLED": False,
+}):
     w._start_wake_word_service()
 assert w._wake_word_service is None
 
