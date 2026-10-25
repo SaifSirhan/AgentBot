@@ -27,6 +27,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import datetime
+import html
 import io
 import json
 import os
@@ -296,6 +297,15 @@ li {{ margin: 2px 0; }}
 code {{ font-family: "{FONT_MONO}"; font-size: 13px; }}
 a {{ color: {COLOR_ACCENT}; }}
 """
+
+AGENT_BANNER = (
+    " ###  ####  ##### #   # #####\n"
+    "#   # #     #     ##  #   #  \n"
+    "#   # # ### ####  # # #   #  \n"
+    "##### #   # #     #  ##   #  \n"
+    "#   # #   # #     #   #   #  \n"
+    "#   #  #### ##### #   #   #  "
+)
 
 
 # ----------------------------------------------------------------------
@@ -760,6 +770,7 @@ class AgentWorker(QObject):
 
     completed = Signal(object)   # (final_message, step_log)
     failed = Signal(str)         # error text
+    step = Signal(str)           # one raw step_log line, live
 
     def __init__(self, user_input, conversation_history, attached_paths=None):
         super().__init__()
@@ -781,7 +792,8 @@ class AgentWorker(QObject):
                       if self._attached_paths else "")
             self._history.append(f"User: {self._user_input}{suffix}")
             with contextlib.redirect_stdout(log_capture):
-                step_log = agent.run_agent_turn(effective_input, self._history)
+                step_log = agent.run_agent_turn(
+                    effective_input, self._history, on_step=self.step.emit)
         except Exception as e:
             self.failed.emit(f"⚠️ Agent error: {e}")
             return
@@ -1060,6 +1072,26 @@ def markdown_to_html(text: str) -> str:
     return html
 
 
+_SPEAKER_PREFIX = {
+    "user": '<span style="color: #ffffff; font-weight: 700;">You:</span>&#160;',
+    # No colour: the label inherits the active theme's bright primary.
+    "agent": '<span style="font-weight: 700;">Agent:</span>&#160;',
+}
+
+
+def _inject_speaker(html_text: str, speaker: str) -> str:
+    """Put the speaker label inside the first rendered block so the message
+    text wraps naturally after it instead of starting on its own row."""
+    prefix = _SPEAKER_PREFIX.get(speaker)
+    if not prefix:
+        return html_text
+    match = re.search(
+        r"<(p|li|h[1-6]|pre)\b[^>]*>", html_text, flags=re.IGNORECASE)
+    if match is None:
+        return html_text
+    return html_text[:match.end()] + prefix + html_text[match.end():]
+
+
 def _split_segments(text: str):
     """Split text into ('prose', str) and ('code', lang, str) segments."""
     segments = []
@@ -1277,10 +1309,13 @@ class MessageBase(ShrinkableWidget):
         self._column.setFixedWidth(self.width())
         super().resizeEvent(event)
 
-    def _prose(self, text: str) -> QLabel:
+    def _prose(self, text: str, speaker: str | None = None) -> QLabel:
         lbl = QLabel()
         lbl.setTextFormat(Qt.TextFormat.RichText)
-        lbl.setText(markdown_to_html(text))
+        rendered = markdown_to_html(text.strip())
+        if speaker:
+            rendered = _inject_speaker(rendered, speaker)
+        lbl.setText(rendered)
         lbl.setWordWrap(True)
         lbl.setMinimumWidth(0)
         lbl.setTextInteractionFlags(
@@ -1291,50 +1326,80 @@ class MessageBase(ShrinkableWidget):
         lbl.setStyleSheet("font-size: 15px;")
         return lbl
 
-    def _render(self, text: str):
+    def _render(self, text: str, speaker: str | None = None):
+        pending = speaker
         for seg in _split_segments(text):
             if seg[0] == "prose":
-                self._col_layout.addWidget(self._prose(seg[1]))
+                self._col_layout.addWidget(self._prose(seg[1], pending))
+                pending = None
             else:
+                if pending:
+                    self._col_layout.addWidget(self._prose("", pending))
+                    pending = None
                 self._col_layout.addWidget(CodeBlock(seg[2]))
+        if pending:
+            self._col_layout.addWidget(self._prose("", pending))
 
 
 class UserMessage(MessageBase):
-    """Terminal input line: plain text, no bubble, fill, or inset."""
+    """Terminal input line: You: prefix, plain text, no bubble or inset."""
 
     def __init__(self, text: str):
         super().__init__()
         self.raw_text = text
-
-        for seg in _split_segments(text):
-            if seg[0] == "prose":
-                lbl = QLabel()
-                lbl.setTextFormat(Qt.TextFormat.RichText)
-                lbl.setText(markdown_to_html(seg[1]))
-                lbl.setWordWrap(True)
-                lbl.setMinimumWidth(0)
-                lbl.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextSelectableByMouse
-                )
-                lbl.setStyleSheet("font-size: 15px;")
-                self._col_layout.addWidget(lbl)
-            else:
-                self._col_layout.addWidget(CodeBlock(seg[2]))
+        self._render(text, speaker="user")
 
 
 class AssistantMessage(MessageBase):
-    """Full-width prose, no background. Optional activity chip below."""
+    """Full-width prose, Agent: prefix, optional activity chip below."""
 
     def __init__(self, text: str, step_log=None):
         super().__init__()
         self.raw_text = text
-        self._render(text)
+        self._render(text, speaker="agent")
 
         summary = activity_summary(step_log)
         if summary:
             chip = ActivityChip(summary, "\n".join(
                 l for l in step_log if isinstance(l, str)))
             self._col_layout.addWidget(chip)
+
+
+class BannerMessage(MessageBase):
+    """Startup block-letter banner; inherits the theme's primary colour."""
+
+    def __init__(self, art: str):
+        super().__init__()
+        label = QLabel(art)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setProperty("tone", "hi")
+        label.setStyleSheet(
+            f'font-family: "{FONT_MONO}"; font-size: 18px;')
+        label.setWordWrap(False)
+        label.setMinimumWidth(0)
+        label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._col_layout.addSpacing(4)
+        self._col_layout.addWidget(label)
+        self._col_layout.addSpacing(6)
+
+
+class SystemMessage(MessageBase):
+    """Dim, bracketed shell notice: [SYSTEM] text."""
+
+    def __init__(self, text: str):
+        super().__init__()
+        label = QLabel()
+        label.setProperty("tone", "dim")
+        label.setTextFormat(Qt.TextFormat.RichText)
+        safe = html.escape(text).replace("\n", "<br>")
+        label.setText(f"<b>[SYSTEM]</b>&#160;{safe}")
+        label.setWordWrap(True)
+        label.setMinimumWidth(0)
+        label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setStyleSheet("font-size: 15px;")
+        self._col_layout.addWidget(label)
 
 
 class UntrustedTextMessage(MessageBase):
@@ -1615,6 +1680,14 @@ class ChatView(QScrollArea):
         if was_pinned:
             self._pinned = True
             QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def remove_message(self, widget: QWidget):
+        """Drop a transient widget (e.g. the [SYSTEM] Thinking… line)."""
+        if widget is None:
+            return
+        self._layout.removeWidget(widget)
+        widget.setParent(None)
+        widget.deleteLater()
 
     def clear(self):
         """Remove every message widget and reset the recorded log."""
@@ -2164,6 +2237,8 @@ class AgentWindow(QMainWindow):
         self._log_panel = None
         self._main_col_layout = None
         self._last_step_log = None
+        self._live_steps = []
+        self._thinking_message = None
         # Phase 6a: right panel state is in-memory only (never persisted), so a
         # fresh launch always opens with the panel visible.
         self._right_panel_visible = True
@@ -2925,13 +3000,30 @@ class AgentWindow(QMainWindow):
         self.input_field.setEnabled(False)
         self.set_status("Reading attachments…" if attached_paths else "Thinking…",
                         busy=True)
-        # Clear the previous turn's steps when a new turn starts (Phase 6b).
-        self.panel.set_activity_idle()
+        self._live_steps = []
+        self.panel.set_activity(["Thinking…"])
+        self._thinking_message = SystemMessage("Thinking…")
+        self.chat.add_message(self._thinking_message, fade=False)
 
         self._worker = AgentWorker(text, self.conversation_history, attached_paths)
         self._worker.completed.connect(self._on_turn_completed)
         self._worker.failed.connect(self._on_turn_failed)
+        self._worker.step.connect(self._on_worker_step)
         self._worker.start()
+
+    def _on_worker_step(self, line):
+        """Stream one raw step into the ACTIVITY panel while the turn runs."""
+        text = " ".join(str(line).split())
+        if not text:
+            return
+        self._live_steps.append(text)
+        self._live_steps = self._live_steps[-50:]
+        self.panel.set_activity(self._live_steps)
+
+    def _clear_thinking_message(self):
+        message = self._thinking_message
+        self._thinking_message = None
+        self.chat.remove_message(message)
 
     def _end_turn(self):
         self._processing = False
@@ -2944,15 +3036,16 @@ class AgentWindow(QMainWindow):
     def _on_turn_completed(self, payload):
         message, step_log = payload
         self._last_step_log = step_log
+        self._clear_thinking_message()
         self.chat.add_message(AssistantMessage(message, step_log=step_log))
         # Keep the finished turn's steps on the ACTIVITY card until the next
-        # turn starts. AgentWorker only emits the captured log at completion
-        # (stdout redirect), so there is no per-step signal to stream from.
+        # turn starts.
         self.panel.set_activity(step_log)
         self._speak_reply(message)
         self._end_turn()
 
     def _on_turn_failed(self, error_text):
+        self._clear_thinking_message()
         self.chat.add_message(AssistantMessage(error_text))
         self._end_turn()
 
@@ -3840,6 +3933,8 @@ class AgentWindow(QMainWindow):
             pass
         self.chat.clear()
         self._last_step_log = None
+        self._live_steps = []
+        self._thinking_message = None
         self.panel.set_activity_idle()
         if self._log_panel is not None:
             self._refresh_log_panel()
@@ -4113,13 +4208,12 @@ class AgentWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def show_greeting(self):
+        self.chat.add_message(BannerMessage(AGENT_BANNER), fade=False)
+        self.chat.add_message(SystemMessage(
+            "System Online. Type /help for commands."), fade=False)
         if self.conversation_history:
-            self.chat.add_message(AssistantMessage(
+            self.chat.add_message(SystemMessage(
                 f"Resumed — {len(self.conversation_history)} messages from last session."
-            ), fade=False)
-        else:
-            self.chat.add_message(AssistantMessage(
-                "Hi! Ask me anything. Type a message below and press Enter."
             ), fade=False)
 
     # ------------------------------------------------------------------

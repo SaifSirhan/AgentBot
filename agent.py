@@ -5183,7 +5183,27 @@ def execute_tool(action):
 # ---------------------------
 # AGENT TURN ORCHESTRATION
 # ---------------------------
-def run_agent_turn(user_input, conversation_history):
+class _StepLog(list):
+    """Step log that reports each appended raw line to an optional callback.
+
+    The GUI uses the callback to stream tool activity while the turn is still
+    running; callers that do not pass one get an ordinary list.
+    """
+
+    def __init__(self, on_step=None):
+        super().__init__()
+        self._on_step = on_step
+
+    def append(self, item):
+        super().append(item)
+        if self._on_step is not None:
+            try:
+                self._on_step(str(item))
+            except Exception:
+                pass
+
+
+def run_agent_turn(user_input, conversation_history, on_step=None):
     """Run a turn and record an eval trace around it.
 
     Returns the same step_log (list[str]) as _run_agent_turn_impl. The trace
@@ -5201,7 +5221,8 @@ def run_agent_turn(user_input, conversation_history):
     except Exception:
         prompt_for_hash = ""
 
-    step_log = _run_agent_turn_impl(user_input, conversation_history)
+    step_log = _run_agent_turn_impl(
+        user_input, conversation_history, on_step=on_step)
 
     if _evals is not None:
         try:
@@ -5246,9 +5267,9 @@ def run_agent_turn(user_input, conversation_history):
     return step_log
 
 
-def _run_agent_turn_impl(user_input, conversation_history):
+def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
     # Request setup and bounded tool-call loop.
-    step_log = []
+    step_log = _StepLog(on_step)
     last_signature = None
     # Force-inject RAG context for content-ish questions
     try:
