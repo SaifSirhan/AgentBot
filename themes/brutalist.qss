@@ -1,0 +1,166 @@
+QWidget {
+    background-color: #000000;
+    color: #66ffcc;
+    border: none;
+    border-radius: 0px;
+    margin: 0px;
+    padding: 0px;
+}
+
+QFrame {
+    border: none;
+    margin: 0px;
+    padding: 0px;
+}
+
+/* Right-panel cards: flat black terminal boxes, square mint outline. */
+QFrame[panel="true"] {
+    background-color: #000000;
+    border: 1px solid #66ffcc;
+    border-radius: 0px;
+}
+
+/* Code blocks: flat text inside a square outline. */
+QFrame#codeBlock {
+    border: 1px solid #66ffcc;
+    border-radius: 0px;
+}
+
+/* Collapsible activity chip. */
+QFrame#chipHeader {
+    background-color: #000000;
+    border: 1px solid #23483d;
+    border-radius: 0px;
+}
+
+QFrame#chipHeader:hover {
+    border-color: #66ffcc;
+}
+
+QPlainTextEdit#chipBody {
+    background-color: #000000;
+    color: #8aa99f;
+    border: 1px solid #23483d;
+    border-radius: 0px;
+    padding: 6px;
+    font-size: 11px;
+}
+
+/* Data bars. */
+QFrame#meterTrack {
+    background-color: #23483d;
+}
+
+QFrame#meterFill {
+    background-color: #66ffcc;
+}
+
+/* Semantic label tones: the theme file owns every text color. */
+QLabel[tone="hi"] {
+    color: #66ffcc;
+}
+
+QLabel[tone="dim"] {
+    color: #8aa99f;
+}
+
+QLabel[tone="warn"] {
+    color: #ffd166;
+}
+
+QLabel[tone="danger"] {
+    color: #ff8f9c;
+}
+
+QPlainTextEdit, QLineEdit {
+    background-color: #000000;
+    border: none;
+    margin: 0px;
+    padding: 0px;
+    selection-background-color: #66ffcc;
+    selection-color: #000000;
+}
+
+QPushButton {
+    background-color: transparent;
+    border: none;
+    margin: 0px;
+    padding: 0px;
+    text-align: left;
+}
+
+QPushButton:hover, QPushButton:focus {
+    background-color: transparent;
+    color: #ffffff;
+    text-decoration: underline;
+}
+
+QPushButton:pressed {
+    background-color: transparent;
+    color: #aaffdd;
+}
+
+QPushButton:disabled {
+    color: #648276;
+}
+
+/* Square, low-chrome scrollbars. */
+QScrollBar:vertical {
+    background-color: #000000;
+    border: none;
+    width: 8px;
+    margin: 0px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #23483d;
+    min-height: 24px;
+    border-radius: 0px;
+}
+
+QScrollBar::handle:vertical:hover,
+QScrollBar::handle:vertical:pressed {
+    background-color: #66ffcc;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0px;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: none;
+}
+
+QScrollBar:horizontal {
+    background-color: #000000;
+    border: none;
+    height: 8px;
+    margin: 0px;
+}
+
+QScrollBar::handle:horizontal {
+    background-color: #23483d;
+    min-width: 24px;
+    border-radius: 0px;
+}
+
+QScrollBar::handle:horizontal:hover,
+QScrollBar::handle:horizontal:pressed {
+    background-color: #66ffcc;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0px;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: none;
+}

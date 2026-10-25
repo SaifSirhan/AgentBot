@@ -78,6 +78,8 @@ DEFAULTS = {
 # Phase 6c — GUI motion (pulses, fades, transitions). When false, every
 # animated element renders in its final state immediately.
 "ANIMATIONS_ENABLED": True,
+# GUI theme file under themes/ (brutalist | crt_green).
+"GUI_THEME": "brutalist",
 }
 
 

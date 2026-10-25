@@ -24,7 +24,7 @@ import telegram_service as ts  # noqa: E402
 app = QApplication([])
 app.setStyle("Fusion")
 app.setFont(g.terminal_font())
-app.setStyleSheet((ROOT / "agentbot.qss").read_text(encoding="utf-8"))
+app.setStyleSheet((ROOT / "themes" / "brutalist.qss").read_text(encoding="utf-8"))
 
 w = g.AgentWindow()
 w.show()

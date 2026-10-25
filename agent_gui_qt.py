@@ -41,7 +41,6 @@ from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QObject,
-    QParallelAnimationGroup,
     QPropertyAnimation,
     QRect,
     QSize,
@@ -69,7 +68,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
-    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QInputDialog,
@@ -105,8 +103,7 @@ except Exception:
 # --------------------------- palette ---------------------------
 # Section 1 terminal theme: black surfaces, mint foreground, dim mint
 # secondary. Kept as constants because a lot of the existing widgets style
-# themselves inline; agentbot.qss handles the structural rules and these keep
-# the inline styles on the same palette.
+# themselves inline; themes/*.qss handles the structural and color rules.
 COLOR_BG         = "#000000"
 COLOR_BG_ALT     = "#000000"
 COLOR_SIDEBAR    = "#000000"
@@ -129,6 +126,17 @@ COLOR_ACCENT       = "#70FFD4"
 COLOR_ACCENT_HOVER = "#8CFFE0"
 COLOR_ACCENT_DIM   = "#23483D"
 
+# Inline labels declare a semantic tone; the theme QSS owns the actual color.
+_TONE_BY_COLOR = {
+    COLOR_TEXT_HI: "hi",
+    COLOR_TEXT_USER: "hi",
+    COLOR_ACCENT: "hi",
+    COLOR_TEXT_MID: "dim",
+    COLOR_TEXT_LOW: "dim",
+    COLOR_WARN: "warn",
+    COLOR_DANGER: "danger",
+}
+
 FONT_UI = "Consolas"
 FONT_MONO = "Consolas"
 
@@ -142,7 +150,7 @@ MIN_RIGHT_PANEL_W = 240
 HIDE_PANEL_BELOW = 1100
 SHOW_PANEL_AT = 1180
 CARD_PAD = 14
-CARD_SPACING = 12
+CARD_SPACING = 16
 
 # Phase 6b — panel card heights + refresh cadence (all timers live on the GUI
 # thread; Phase 5a showed a QTimer created off-thread never fires).
@@ -290,8 +298,7 @@ h2 {{ font-size: 18px; font-weight: 600; margin: 16px 0 8px 0; }}
 h3 {{ font-size: 16px; font-weight: 600; margin: 14px 0 6px 0; }}
 ul, ol {{ margin: 0 0 10px 0; -qt-list-indent: 1; }}
 li {{ margin: 2px 0; }}
-code {{ font-family: "{FONT_MONO}"; font-size: 13px;
-        background-color: {COLOR_RAISED}; color: {COLOR_ACCENT}; }}
+code {{ font-family: "{FONT_MONO}"; font-size: 13px; }}
 a {{ color: {COLOR_ACCENT}; }}
 """
 
@@ -617,6 +624,23 @@ def read_config_file_raw():
         return {}
 
 
+THEMES_DIR = Path(__file__).resolve().with_name("themes")
+THEME_NAMES = ("brutalist", "crt_green")
+
+
+def read_theme_name() -> str:
+    try:
+        name = str(read_config_file_raw().get("GUI_THEME", "brutalist")).strip()
+    except Exception:
+        name = "brutalist"
+    return name if name in THEME_NAMES else "brutalist"
+
+
+def theme_stylesheet(name: str) -> str:
+    name = name if name in THEME_NAMES else "brutalist"
+    return (THEMES_DIR / f"{name}.qss").read_text(encoding="utf-8")
+
+
 def write_config_keys(updates):
     """Merge `updates` into the raw config file and write it back.
 
@@ -659,6 +683,14 @@ def activity_summary(step_log):
 # ----------------------------------------------------------------------
 HELP_TEXT = (
     "Slash commands — bypass the AI and go straight to the tool:\n\n"
+    "Interface:\n\n"
+    "/settings          → open the settings overlay\n"
+    "/tasks             → scheduled tasks\n"
+    "/index             → index a folder for RAG\n"
+    "/export            → export the conversation\n"
+    "/copy              → copy the conversation\n"
+    "/activity          → toggle the activity log\n"
+    "/clear             → clear the chat and history\n\n"
     "/send  Contact|message\n"
     "       e.g.  /send JEE|helo\n\n"
     "/edit  Contact|old text|new text\n"
@@ -892,25 +924,14 @@ def _icon_button(icon: str, tooltip: str = "", size: int = 30,
     return btn
 
 
-def _sidebar_button(label: str, row_height: int) -> QPushButton:
-    """Sidebar action as plain terminal text: no icon, pill, or border."""
-    btn = QPushButton(label)
-    btn.setFlat(True)
-    btn.setAutoDefault(False)
-    btn.setFixedHeight(row_height)
-    btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-    return btn
-
-
 # ----------------------------------------------------------------------
 # Panel card content widgets (Phase 6b)
 # ----------------------------------------------------------------------
 def _dim_label(text: str, size: int = 11, color: str = COLOR_TEXT_LOW,
                mono: bool = False, wrap: bool = False) -> QLabel:
     lbl = QLabel(text)
+    lbl.setProperty("tone", _TONE_BY_COLOR.get(color, "dim"))
     lbl.setStyleSheet(
-        f'background: transparent; color: {color}; '
         f'font-family: "{FONT_MONO if mono else FONT_UI}"; font-size: {size}px;'
     )
     if wrap:
@@ -939,11 +960,11 @@ class MeterRow(QWidget):
         row.addWidget(self._name)
 
         self._track = QFrame()
+        self._track.setObjectName("meterTrack")
         self._track.setFixedSize(self.TRACK_W, 6)
-        self._track.setStyleSheet(f"background: {COLOR_BORDER};")
         self._fill = QFrame(self._track)
+        self._fill.setObjectName("meterFill")
         self._fill.setGeometry(0, 0, 0, 6)
-        self._fill.setStyleSheet(f"background: {COLOR_ACCENT};")
         row.addWidget(self._track)
 
         self._value = _dim_label("", size=11, color=COLOR_TEXT_HI, mono=True)
@@ -1075,10 +1096,6 @@ class CodeBlock(QFrame):
         super().__init__()
         self._code = code
         self.setObjectName("codeBlock")
-        self.setStyleSheet(
-            f"QFrame#codeBlock {{ border: 1px solid {COLOR_ACCENT}; "
-            f"border-radius: 0px; }}"
-        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1095,17 +1112,7 @@ class CodeBlock(QFrame):
         self.copy_btn.setToolTip("Copy")
         self.copy_btn.setFixedSize(28, 28)
         self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.copy_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                color: {COLOR_TEXT_MID};
-                font-size: 14px;
-            }}
-            QPushButton:hover {{
-                color: {COLOR_TEXT_HI};
-            }}
-            """
-        )
+        self.copy_btn.setStyleSheet("font-size: 14px;")
         self.copy_btn.clicked.connect(self._copy)
         self.copy_btn.setVisible(False)
         bar_row.addWidget(self.copy_btn)
@@ -1117,7 +1124,7 @@ class CodeBlock(QFrame):
         )
         self.code_label.setWordWrap(False)
         self.code_label.setStyleSheet(
-            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_MONO}"; font-size: 13px;'
+            f'font-family: "{FONT_MONO}"; font-size: 13px;'
         )
         self.code_label.setContentsMargins(14, 0, 14, 12)
         # Long code lines must scroll inside the block, not widen the whole
@@ -1141,20 +1148,10 @@ class CodeBlock(QFrame):
     def _copy(self):
         QGuiApplication.clipboard().setText(self._code)
         self.copy_btn.setText("\u2713")  # check
-        self.copy_btn.setStyleSheet(
-            self.copy_btn.styleSheet().replace(
-                f"color: {COLOR_TEXT_MID};", f"color: {COLOR_ACCENT};"
-            )
-        )
         self._copy_timer.start(1500)
 
     def _reset_copy_icon(self):
         self.copy_btn.setText("\u2398")
-        self.copy_btn.setStyleSheet(
-            self.copy_btn.styleSheet().replace(
-                f"color: {COLOR_ACCENT};", f"color: {COLOR_TEXT_MID};"
-            )
-        )
 
     def enterEvent(self, event):
         self.copy_btn.setVisible(True)
@@ -1183,30 +1180,19 @@ class ActivityChip(QWidget):
         self.header = QFrame()
         self.header.setObjectName("chipHeader")
         self.header.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.header.setStyleSheet(
-            f"""
-            QFrame#chipHeader {{
-                background: {COLOR_RAISED};
-                border: 1px solid {COLOR_BORDER};
-                border-radius: 6px;
-            }}
-            QFrame#chipHeader:hover {{ background: {COLOR_HOVER}; }}
-            """
-        )
         head_row = QHBoxLayout(self.header)
         head_row.setContentsMargins(9, 4, 9, 4)
         head_row.setSpacing(6)
 
         self.chevron = QLabel("\u25b8")
-        self.chevron.setStyleSheet(
-            f"color: {COLOR_TEXT_LOW}; font-size: 10px; background: transparent;"
-        )
+        self.chevron.setProperty("tone", "dim")
+        self.chevron.setStyleSheet("font-size: 10px;")
         head_row.addWidget(self.chevron)
 
         label = QLabel(summary)
+        label.setProperty("tone", "dim")
         label.setStyleSheet(
-            f'color: {COLOR_TEXT_MID}; font-family: "{FONT_UI}"; '
-            f"font-size: 11px; background: transparent;"
+            f'font-family: "{FONT_UI}"; font-size: 11px;'
         )
         head_row.addWidget(label)
         head_row.addStretch(1)
@@ -1215,14 +1201,10 @@ class ActivityChip(QWidget):
         outer.addWidget(self.header)
 
         self.body = QPlainTextEdit(detail)
+        self.body.setObjectName("chipBody")
         self.body.setReadOnly(True)
         self.body.setFrameShape(QFrame.Shape.NoFrame)
         self.body.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.body.setStyleSheet(
-            f'background: {COLOR_RAISED}; color: {COLOR_TEXT_LOW}; '
-            f'border: 1px solid {COLOR_BORDER}; border-radius: 6px; '
-            f'font-family: "{FONT_MONO}"; font-size: 11px; padding: 6px;'
-        )
         self.body.setVisible(False)
         outer.addWidget(self.body)
 
@@ -1316,9 +1298,7 @@ class MessageBase(ShrinkableWidget):
             | Qt.TextInteractionFlag.LinksAccessibleByMouse
         )
         lbl.setOpenExternalLinks(True)
-        lbl.setStyleSheet(
-            f'background: transparent; color: {COLOR_TEXT_HI}; font-size: 15px;'
-        )
+        lbl.setStyleSheet("font-size: 15px;")
         return lbl
 
     def _render(self, text: str):
@@ -1346,10 +1326,7 @@ class UserMessage(MessageBase):
                 lbl.setTextInteractionFlags(
                     Qt.TextInteractionFlag.TextSelectableByMouse
                 )
-                lbl.setStyleSheet(
-                    f"background: transparent; color: {COLOR_TEXT_USER}; "
-                    f"font-size: 15px;"
-                )
+                lbl.setStyleSheet("font-size: 15px;")
                 self._col_layout.addWidget(lbl)
             else:
                 self._col_layout.addWidget(CodeBlock(seg[2]))
@@ -1384,6 +1361,7 @@ class UntrustedTextMessage(MessageBase):
         if source:
             caption = QLabel(source)
             caption.setProperty("role", "secondary")
+            caption.setProperty("tone", "dim")
             caption.setTextFormat(Qt.TextFormat.PlainText)
             caption.setWordWrap(True)
             caption.setTextInteractionFlags(
@@ -1405,9 +1383,7 @@ class UntrustedTextMessage(MessageBase):
         body.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
-        body.setStyleSheet(
-            f"background: transparent; color: {COLOR_TEXT_HI}; font-size: 14px;"
-        )
+        body.setStyleSheet("font-size: 14px;")
         self._col_layout.addWidget(body)
         self.body_label = body
 
@@ -1662,49 +1638,6 @@ class ChatView(QScrollArea):
 
 
 # ----------------------------------------------------------------------
-# Sidebar
-# ----------------------------------------------------------------------
-class Sidebar(QFrame):
-    """Left command rail. Flat terminal text; no icons, pills, or borders."""
-
-    def __init__(self):
-        super().__init__()
-        metrics = QFontMetrics(self.font())
-        row_height = max(metrics.height(), metrics.lineSpacing())
-
-        layout = zero_layout(QVBoxLayout(self))
-
-        title = QLabel("AgentBot")
-        title.setFixedHeight(row_height)
-        layout.addWidget(title)
-
-        self.new_chat = _sidebar_button("New chat", row_height)
-        layout.addWidget(self.new_chat)
-
-        self.current_chat_btn = _sidebar_button("Current chat", row_height)
-        layout.addWidget(self.current_chat_btn)
-
-        layout.addStretch(1)
-
-        # Named buttons so AgentWindow can wire each to its handler.
-        self.nav_buttons = {}
-        for label in ("Settings", "Tasks", "Index docs", "Activity log",
-                      "Copy all", "Export chat"):
-            b = _sidebar_button(label, row_height)
-            self.nav_buttons[label] = b
-            layout.addWidget(b)
-        self.settings_btn = self.nav_buttons["Settings"]
-
-        # The rail is exactly as wide as its longest row: no gutter, no
-        # padding, no clipping from a hand-measured font advance.
-        rows = [title, self.new_chat, self.current_chat_btn,
-                *self.nav_buttons.values()]
-        self.rest_width = max(widget.sizeHint().width() for widget in rows)
-        self.setFixedWidth(self.rest_width)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-
-
-# ----------------------------------------------------------------------
 # Right info panel (Phase 6a)
 # ----------------------------------------------------------------------
 class InfoCard(QFrame):
@@ -1747,6 +1680,7 @@ class InfoCard(QFrame):
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setWordWrap(True)
         self.placeholder.setProperty("role", "secondary")
+        self.placeholder.setProperty("tone", "dim")
         self.body_layout.insertWidget(0, self.placeholder)
         outer.addWidget(self.body, 1)
 
@@ -1761,6 +1695,7 @@ class InfoCard(QFrame):
             self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.placeholder.setWordWrap(True)
             self.placeholder.setProperty("role", "secondary")
+            self.placeholder.setProperty("tone", "dim")
             self.body_layout.insertWidget(0, self.placeholder)
         self.placeholder.setText(text)
         self.placeholder.setVisible(True)
@@ -1819,16 +1754,7 @@ class TelegramPanel(InfoCard):
         self.clear_btn = QPushButton("clear")
         self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clear_btn.setFixedHeight(16)
-        self.clear_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: transparent; border: none;
-                color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}";
-                font-size: 10px; padding: 0 2px;
-            }}
-            QPushButton:hover {{ color: {COLOR_TEXT_HI}; }}
-            """
-        )
+        self.clear_btn.setStyleSheet("font-size: 10px;")
         self.clear_btn.clicked.connect(self.clear)
         self.header_layout.addWidget(self.clear_btn)
 
@@ -1888,7 +1814,7 @@ class RightPanel(QFrame):
         self.animations_enabled = True
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(0)
 
         scroll = QScrollArea()
@@ -1900,9 +1826,9 @@ class RightPanel(QFrame):
         body = QWidget()
         body.setObjectName("panelContent")
         self.cards_layout = QVBoxLayout(body)
-        # 0 left / 16 right: the chat column already carries its own 24px right
-        # padding, so this keeps a total 40px gutter without over-padding.
-        self.cards_layout.setContentsMargins(0, 16, 16, 16)
+        # The scroll area itself is inset 16px on every side, so the cards
+        # float in the void; 16px between cards keeps the stack airy.
+        self.cards_layout.setContentsMargins(0, 0, 0, 0)
         self.cards_layout.setSpacing(CARD_SPACING)
 
         self.cards = {}
@@ -2041,6 +1967,8 @@ class RightPanel(QFrame):
         mrow.setSpacing(10)
 
         self.media_art = QLabel()
+        self.media_art.setObjectName("mediaArt")
+        self.media_art.setProperty("tone", "dim")
         self.media_art.setFixedSize(60, 60)
         self.media_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mrow.addWidget(self.media_art)
@@ -2051,8 +1979,7 @@ class RightPanel(QFrame):
         tcol.setSpacing(2)
         self.media_title = _dim_label("", size=12, color=COLOR_TEXT_HI)
         self.media_title.setStyleSheet(
-            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_UI}"; '
-            f"font-size: 12px; font-weight: bold;")
+            f'font-family: "{FONT_UI}"; font-size: 12px; font-weight: bold;')
         self.media_artist = _dim_label("", size=11, color=COLOR_TEXT_MID)
         self.media_album = _dim_label("", size=10, color=COLOR_TEXT_LOW)
         for w in (self.media_title, self.media_artist, self.media_album):
@@ -2154,8 +2081,7 @@ class RightPanel(QFrame):
                 return
         self.media_art.setPixmap(QPixmap())
         self.media_art.setText("\u266b")  # music note fallback
-        self.media_art.setStyleSheet(
-            f"color: {COLOR_TEXT_LOW}; font-size: 22px;")
+        self.media_art.setStyleSheet("font-size: 22px;")
 
     # -- SYSTEM ---------------------------------------------------------
     def _build_system(self):
@@ -2245,15 +2171,12 @@ class AgentWindow(QMainWindow):
         self.setMinimumWidth(900)
         self.setContentsMargins(0, 0, 0, 0)
 
-        self._sidebar_anim = None
         self._worker = None
         self._processing = False
         self._settings_overlay = None
         self._tray_icon = None
         self._hotkey_installed = False
         self._recording = False
-        self._mic_state = "idle"
-        self._mic_pulse = None
         self._scheduled_queue = []
         self.attachments = []
         self._log_panel = None
@@ -2267,18 +2190,16 @@ class AgentWindow(QMainWindow):
         # Phase 6c: read the motion flag once and cache it. Toggling it in
         # settings applies on next launch (no mid-session hot-reload).
         self._animations_enabled = self._read_animations_flag()
+        self._theme = read_theme_name()
         # Phase 6c animation state (all anims live on the main thread).
         self._status_pulse = None
         self._status_state = "ready"
-        self._mic_ring = None
-        self._mic_ring_anim = None
         self._thinking_dots = None
         self._thinking_timer = None
         self._thinking_index = 0
         self._minimized = False
         self._card_anims = []
         self._entry_anims = []
-        self._sidebar_strip_pulse = None
         self._panel_anim = None
         # Section 2 — Telegram document listener (started in start_services).
         self._telegram_service = None
@@ -2339,12 +2260,7 @@ class AgentWindow(QMainWindow):
         self._drop_overlay.hide()
         root = zero_layout(QHBoxLayout(central))
 
-        self.sidebar = Sidebar()
-        self._wire_sidebar()
-        root.addWidget(self.sidebar)
-
-        # Chat and the info panel share a splitter so the divider can be
-        # dragged. The sidebar stays fixed; the chat keeps the stretch.
+        # Chat and the info panel share a splitter; the chat keeps the stretch.
         self.right_panel = self._build_right_panel()
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._main_splitter.setObjectName("mainSplitter")
@@ -2375,18 +2291,8 @@ class AgentWindow(QMainWindow):
         wrapper.setMinimumWidth(MIN_RIGHT_PANEL_W)
         wrapper.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        wrap_layout = QVBoxLayout(wrapper)
-        wrap_layout.setContentsMargins(0, 0, 0, 0)
-        wrap_layout.setSpacing(0)
-        border = QFrame()
-        border.setFixedWidth(1)
-        border.setStyleSheet(f"background: {COLOR_BORDER};")
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        row.addWidget(border)
-        row.addWidget(self._right_panel_inner, 1)
-        wrap_layout.addLayout(row)
+        wrap_layout = zero_layout(QVBoxLayout(wrapper))
+        wrap_layout.addWidget(self._right_panel_inner)
         return wrapper
 
     @property
@@ -2461,47 +2367,9 @@ class AgentWindow(QMainWindow):
         state.
         """
         self._set_status_pulse(self._status_state)
-        self._start_sidebar_strip_pulse()
         # Card entrance: only when the panel is actually visible at launch.
         if self._right_panel_visible:
             QTimer.singleShot(0, self._animate_card_entrance)
-
-    # ------------------------------------------------------------------
-    # Phase 6c G — sidebar active-item strip pulse
-    # ------------------------------------------------------------------
-    def _start_sidebar_strip_pulse(self):
-        """Pulse the active sidebar row's mint strip opacity subtly.
-
-        Chosen over a sliding y-position strip because only one item can be
-        active at a time here, so there is nothing to slide between — a gentle
-        0.85 -> 1.0 -> 0.85 breath over 3s conveys "this is the current view"
-        without inventing a moving target.
-        """
-        if not self._animations_enabled or self._minimized:
-            return
-        btn = getattr(self.sidebar, "current_chat_btn", None)
-        if btn is None:
-            return
-        effect = QGraphicsOpacityEffect(btn)
-        btn.setGraphicsEffect(effect)
-        anim = QPropertyAnimation(effect, b"opacity", btn)
-        anim.setDuration(3000)
-        anim.setStartValue(1.0)
-        anim.setKeyValueAt(0.5, 0.85)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-        anim.setLoopCount(-1)
-        anim.start()
-        self._sidebar_strip_pulse = anim
-
-    def _stop_sidebar_strip_pulse(self):
-        anim = getattr(self, "_sidebar_strip_pulse", None)
-        if anim is not None:
-            anim.stop()
-            self._sidebar_strip_pulse = None
-        btn = getattr(self.sidebar, "current_chat_btn", None)
-        if btn is not None:
-            btn.setGraphicsEffect(None)
 
     # ------------------------------------------------------------------
     # Phase 6c D — staggered card entrance
@@ -2595,23 +2463,6 @@ class AgentWindow(QMainWindow):
         detail, location = parse_weather(raw_text)
         self.panel.update_weather(detail, location)
 
-    def _wire_sidebar(self):
-        """Connect the sidebar nav + New chat buttons (Phase 5d).
-
-        Each mirrors its handler in agent_gui.py: Settings -> open_settings,
-        Tasks -> schedule dialog, Index docs -> RAG indexing, Activity log ->
-        toggle the in-window log, Copy all -> clipboard, Export chat -> save
-        dialog, New chat -> clear the conversation.
-        """
-        nb = self.sidebar.nav_buttons
-        nb["Settings"].clicked.connect(self.open_settings)
-        nb["Tasks"].clicked.connect(self.open_schedule_dialog)
-        nb["Index docs"].clicked.connect(self.on_index_documents)
-        nb["Activity log"].clicked.connect(self.toggle_log)
-        nb["Copy all"].clicked.connect(self.copy_all)
-        nb["Export chat"].clicked.connect(self.export_conversation)
-        self.sidebar.new_chat.clicked.connect(self.new_chat)
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self._settings_overlay is not None:
@@ -2660,10 +2511,6 @@ class AgentWindow(QMainWindow):
             self._right_panel_last_width = self.right_panel.width()
 
         self._right_panel_visible = visible
-        self.panel_toggle_btn.setIcon(_svg_icon(
-            "chevrons_left" if visible else "chevrons_right", 18, COLOR_TEXT_MID))
-        self.panel_toggle_btn.setToolTip(
-            "Hide info panel" if visible else "Show info panel")
 
         # Slide the splitter pane between its remembered width and zero.
         # Minimum width is relaxed during the animation and restored after.
@@ -2816,6 +2663,9 @@ class AgentWindow(QMainWindow):
         col = QWidget()
         col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = zero_layout(QVBoxLayout(col))
+        # Exactly two terminal columns of breathing room off the left wall.
+        layout.setContentsMargins(
+            QFontMetrics(self.font()).horizontalAdvance("  "), 0, 0, 0)
 
         layout.addWidget(self._build_header())
 
@@ -2833,32 +2683,24 @@ class AgentWindow(QMainWindow):
     def _build_header(self) -> QWidget:
         header = QWidget()
         header.setFixedHeight(HEADER_H)
-        header.setStyleSheet(f"background: {COLOR_BG};")
 
         row = QHBoxLayout(header)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
 
-        self.sidebar_btn = _icon_button("menu", "Toggle sidebar")
-        self.sidebar_btn.clicked.connect(self.toggle_sidebar)
-        row.addWidget(self.sidebar_btn)
-
         title = QLabel("Agent")
-        title.setStyleSheet(
-            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_UI}"; '
-            f"font-size: 15px; font-weight: bold;"
-        )
+        title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        title.setProperty("tone", "hi")
         row.addWidget(title)
         row.addSpacing(6)
 
         self.status_dot = QLabel("\u25cf")
-        self.status_dot.setStyleSheet(f"color: {COLOR_ACCENT}; font-size: 10px;")
+        self.status_dot.setStyleSheet("font-size: 10px;")
         row.addWidget(self.status_dot)
 
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet(
-            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; font-size: 11px;'
-        )
+        self.status_label.setStyleSheet("font-size: 11px;")
+        self.status_label.setProperty("tone", "dim")
         row.addWidget(self.status_label)
 
         # Phase 6c I — three-dot thinking indicator, right of the status text.
@@ -2877,18 +2719,14 @@ class AgentWindow(QMainWindow):
         row.addWidget(self.thinking_dots)
         row.addStretch(1)
 
-        # The old GUI's \u21bb header button is "New chat" (clear_chat), not a
-        # refresh — see agent_gui.py:284 -> _new_chat.
-        self.header_new_chat = _icon_button("newchat", "New chat", size=28)
-        self.header_new_chat.clicked.connect(self.new_chat)
-        row.addWidget(self.header_new_chat)
-        # Phase 6a — right-panel toggle, sitting between New chat and the gear.
-        self.panel_toggle_btn = _icon_button("chevrons_left", "Hide info panel")
-        self.panel_toggle_btn.clicked.connect(self.toggle_right_panel)
-        row.addWidget(self.panel_toggle_btn)
-        gear = _icon_button("settings", "Settings")
-        gear.clicked.connect(self.open_settings)
-        row.addWidget(gear)
+        self.theme_btn = QPushButton("[Theme]")
+        self.theme_btn.setFlat(True)
+        self.theme_btn.setAutoDefault(False)
+        self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.theme_btn.setToolTip(f"Theme: {self._theme} — click to switch")
+        self.theme_btn.clicked.connect(self._cycle_theme)
+        row.addWidget(self.theme_btn)
 
         return header
 
@@ -2909,8 +2747,8 @@ class AgentWindow(QMainWindow):
         self.attach_strip.setVisible(False)
         self._input_col_layout.addWidget(self.attach_strip)
 
-        # Permanent shell prefix + borderless editor. Attach / mic / send stay
-        # on the right; the row itself carries no padding or separator.
+        # Permanent shell prefix + borderless editor. Enter is the only
+        # submit path; the row carries no controls, padding, or separator.
         self.input_pill = QFrame()
         self.input_pill.setObjectName("promptRow")
         self.input_pill.setContentsMargins(0, 0, 0, 0)
@@ -2942,9 +2780,7 @@ class AgentWindow(QMainWindow):
         self.input_field.textChanged.connect(self._on_input_changed)
         self.input_field.installEventFilter(self)
 
-        # Prefix and editor share one top edge inside a centred text group, so
-        # the caret sits exactly one character after the prompt even while the
-        # taller action buttons set the row height.
+        # Prefix and editor share one top edge.
         text_host = QWidget()
         text_col = zero_layout(QVBoxLayout(text_host))
         text_col.addStretch(1)
@@ -2955,217 +2791,9 @@ class AgentWindow(QMainWindow):
         text_col.addStretch(1)
         pill_row.addWidget(text_host, 1)
 
-        self.attach_btn = _icon_button("clip", "Attach files")
-        self.attach_btn.clicked.connect(self._pick_files)
-        pill_row.addWidget(self.attach_btn, 0, Qt.AlignmentFlag.AlignBottom)
-
-        # Mic button (Phase 5d): click to START recording, click again to STOP
-        # and transcribe (click-to-toggle). F9 remains press-and-hold and drives
-        # the same state, so the button reflects F9 activity too.
-        # Phase 6c B wraps it in a fixed 40x40 holder so the recording ring can
-        # overlay the button without disturbing the pill row layout.
-        self.mic_holder = QWidget()
-        self.mic_holder.setFixedSize(40, 40)
-        self.mic_ring = QFrame(self.mic_holder)
-        self.mic_ring.setGeometry(4, 4, 32, 32)
-        self.mic_ring.setStyleSheet(
-            f"background: transparent; border: 2px solid {COLOR_DANGER}; "
-            f"border-radius: 16px;"
-        )
-        self.mic_ring.setVisible(False)
-        self.mic_btn = QPushButton(self.mic_holder)
-        self.mic_btn.setToolTip("Record voice message")
-        self.mic_btn.setGeometry(4, 4, 32, 32)
-        self.mic_btn.setFixedSize(32, 32)
-        self.mic_btn.setIconSize(QSize(18, 18))
-        self.mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.mic_btn.clicked.connect(self._toggle_recording)
-        self.mic_btn.raise_()
-        pill_row.addWidget(self.mic_holder, 0, Qt.AlignmentFlag.AlignBottom)
-
-        self.send_btn = QPushButton()
-        self.send_btn.setToolTip("Send")
-        self.send_btn.setFixedSize(32, 32)
-        self.send_btn.setIconSize(QSize(16, 16))
-        self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Phase 6c H — hover lift: a soft shadow reads as the button rising.
-        # (No geometry/scale transform — those jitter under Qt.)
-        self._send_hover_enter = None
-        self._send_hover_leave = None
-        self.send_btn.clicked.connect(self.send)
-        pill_row.addWidget(self.send_btn, 0, Qt.AlignmentFlag.AlignBottom)
-
         self._input_col_layout.addWidget(self.input_pill)
         col.addWidget(holder)
-        self._set_mic_state("idle")   # paint the initial mic look
-        self._refresh_send_btn()
-        self._install_send_hover_lift()
         return outer
-
-    def _install_send_hover_lift(self):
-        """Phase 6c H — add a soft shadow on hover so the send button lifts."""
-        from PySide6.QtWidgets import QGraphicsDropShadowEffect
-        btn = self.send_btn
-        orig_enter = btn.enterEvent
-        orig_leave = btn.leaveEvent
-
-        def enter(e):
-            if self._animations_enabled and btn.isEnabled():
-                eff = QGraphicsDropShadowEffect(btn)
-                eff.setBlurRadius(14)
-                eff.setOffset(0, 3)
-                eff.setColor(QColor(0, 0, 0, 130))
-                btn.setGraphicsEffect(eff)
-            orig_enter(e)
-
-        def leave(e):
-            btn.setGraphicsEffect(None)
-            orig_leave(e)
-
-        btn.enterEvent = enter
-        btn.leaveEvent = leave
-        self._send_hover_enter = enter
-        self._send_hover_leave = leave
-
-    def _refresh_send_btn(self):
-        has_text = bool(self._get_input_text()) or bool(self.attachments)
-        enabled = has_text and not self._processing
-        self.send_btn.setEnabled(enabled)
-        self.send_btn.setIcon(
-            _svg_icon("send", 16, COLOR_BG if enabled else COLOR_TEXT_LOW))
-        self.send_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: {COLOR_ACCENT if enabled else COLOR_RAISED};
-                border: none;
-                border-radius: 16px;
-            }}
-            QPushButton:hover {{
-                background: {COLOR_ACCENT_HOVER if enabled else COLOR_RAISED};
-            }}
-            """
-        )
-
-    # ------------------------------------------------------------------
-    # Mic button — click-to-toggle (Phase 5d)
-    # ------------------------------------------------------------------
-    def _set_mic_state(self, state: str):
-        """Paint the mic button for 'idle' | 'recording' | 'transcribing'.
-
-        F9 (press-and-hold) and the button (click-toggle) both route through
-        _start_recording/_stop_recording, and those call this, so the button
-        always mirrors the true recording state.
-        """
-        self._mic_state = state
-        if state == "recording":
-            self.mic_btn.setIcon(_svg_icon("mic", 18, "#ffffff"))
-            self.mic_btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    background: {COLOR_DANGER}; border: 1px solid {COLOR_DANGER};
-                    border-radius: 16px;
-                }}
-                QPushButton:hover {{ background: {COLOR_DANGER_HOVER}; }}
-                """
-            )
-            self._start_mic_pulse()
-        elif state == "transcribing":
-            self._stop_mic_pulse()
-            self.mic_btn.setIcon(_svg_icon("mic", 18, COLOR_WARN))
-            self.mic_btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    background: transparent; border: 1px solid {COLOR_WARN};
-                    border-radius: 16px;
-                }}
-                """
-            )
-        else:  # idle
-            self._stop_mic_pulse()
-            self.mic_btn.setIcon(_svg_icon("mic", 18, COLOR_TEXT_MID))
-            self.mic_btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    background: transparent; border: none; border-radius: 16px;
-                }}
-                QPushButton:hover {{ background: {COLOR_HOVER}; }}
-                """
-            )
-
-    def _start_mic_pulse(self):
-        """Recording feedback: inner icon opacity pulse + outer expanding ring.
-
-        The inner pulse is the Phase 5d behaviour (0.7 -> 1.0, loops). The
-        outer ring (Phase 6c) expands 1.0 -> 1.25 and fades 0.6 -> 0.0, also
-        looping, so the two read as one "recording" motion.
-        """
-        self._stop_mic_pulse()
-        if not self._animations_enabled:
-            return
-        effect = QGraphicsOpacityEffect(self.mic_btn)
-        self.mic_btn.setGraphicsEffect(effect)
-        anim = QPropertyAnimation(effect, b"opacity", self.mic_btn)
-        anim.setDuration(1200)
-        anim.setStartValue(1.0)
-        anim.setKeyValueAt(0.5, 0.7)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-        anim.setLoopCount(-1)  # loop forever until recording stops
-        anim.start()
-        self._mic_pulse = anim
-        self._start_mic_ring()
-
-    def _start_mic_ring(self):
-        """Outer recording ring: expand + fade out, looping."""
-        self._stop_mic_ring()
-        if not self._animations_enabled:
-            return
-        self.mic_ring.setVisible(True)
-        self.mic_ring.setGeometry(4, 4, 32, 32)
-        ring_effect = QGraphicsOpacityEffect(self.mic_ring)
-        self.mic_ring.setGraphicsEffect(ring_effect)
-        # Animate the opacity (geometry scaling of the ring is driven by the
-        # same property animation's key values on a separate geometry anim).
-        group = QParallelAnimationGroup(self)
-        op = QPropertyAnimation(ring_effect, b"opacity", self.mic_ring)
-        op.setDuration(MIC_RING_MS)
-        op.setStartValue(0.6)
-        op.setEndValue(0.0)
-        op.setEasingCurve(QEasingCurve.Type.OutQuad)
-        group.addAnimation(op)
-        geo = QPropertyAnimation(self.mic_ring, b"geometry", self.mic_ring)
-        geo.setDuration(MIC_RING_MS)
-        geo.setStartValue(QRect(4, 4, 32, 32))
-        geo.setEndValue(QRect(0, 0, 40, 40))
-        geo.setEasingCurve(QEasingCurve.Type.OutQuad)
-        group.addAnimation(geo)
-        group.setLoopCount(-1)
-        group.start()
-        self._mic_ring_anim = group
-
-    def _stop_mic_ring(self):
-        anim = getattr(self, "_mic_ring_anim", None)
-        if anim is not None:
-            anim.stop()
-            self._mic_ring_anim = None
-        self.mic_ring.setGraphicsEffect(None)
-        self.mic_ring.setGeometry(4, 4, 32, 32)
-        self.mic_ring.setVisible(False)
-
-    def _stop_mic_pulse(self):
-        anim = getattr(self, "_mic_pulse", None)
-        if anim is not None:
-            anim.stop()
-            self._mic_pulse = None
-        self.mic_btn.setGraphicsEffect(None)
-        self._stop_mic_ring()
-
-    def _toggle_recording(self):
-        """Click-to-toggle: start recording, or stop + transcribe if already on."""
-        if self._recording:
-            self._stop_recording()
-        else:
-            self._start_recording()
 
     # ------------------------------------------------------------------
     # Input helpers
@@ -3178,7 +2806,6 @@ class AgentWindow(QMainWindow):
 
     def _on_input_changed(self):
         self._autogrow_input()
-        self._refresh_send_btn()
 
     def _autogrow_input(self):
         doc = self.input_field.document()
@@ -3189,29 +2816,8 @@ class AgentWindow(QMainWindow):
             self.input_field.setFixedHeight(height)
 
     # ------------------------------------------------------------------
-    # Attachments — faithful port of agent_gui._pick_files /
-    # _render_attachments / _remove_attachment
+    # Attachments — drag & drop only; the paperclip button was removed.
     # ------------------------------------------------------------------
-    def _pick_files(self):
-        from PySide6.QtWidgets import QFileDialog
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Attach files", "",
-            "All supported (*.txt *.md *.py *.js *.ts *.json *.csv *.log "
-            "*.html *.xml *.yaml *.yml *.ini *.cfg *.sh *.bat *.ps1 *.sql "
-            "*.pdf *.docx *.xlsx *.png *.jpg *.jpeg *.bmp *.gif *.webp);;"
-            "Documents (*.pdf *.docx *.xlsx);;"
-            "Text / code (*.txt *.md *.py *.js *.ts *.json *.csv *.log "
-            "*.html *.xml *.yaml *.yml);;"
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;"
-            "All files (*.*)",
-        )
-        if not paths:
-            return
-        for p in paths:
-            if p not in self.attachments:
-                self.attachments.append(p)
-        self._render_attachments()
-
     def _render_attachments(self):
         # Rebuild the chip strip. Unlike the old GUI we do not draw thumbnails
         # (Phase 4a keeps the input area simple); the name + remove button is
@@ -3228,7 +2834,6 @@ class AgentWindow(QMainWindow):
 
         if not self.attachments:
             self.attach_strip.setVisible(False)
-            self._refresh_send_btn()
             return
 
         for i, path in enumerate(self.attachments):
@@ -3275,7 +2880,6 @@ class AgentWindow(QMainWindow):
             self.attach_strip_row.insertWidget(self.attach_strip_row.count() - 1, chip)
 
         self.attach_strip.setVisible(True)
-        self._refresh_send_btn()
 
     def _remove_attachment(self, idx):
         # Only drops from the list — the file on disk is left alone.
@@ -3309,7 +2913,12 @@ class AgentWindow(QMainWindow):
             dot_state, color = "thinking", COLOR_WARN
         else:
             dot_state, color = "ready", COLOR_ACCENT
-        self.status_dot.setStyleSheet(f"color: {color}; font-size: 10px;")
+        if dot_state == "ready":
+            # No inline color: the theme QSS owns the idle dot color.
+            self.status_dot.setStyleSheet("font-size: 10px;")
+        else:
+            self.status_dot.setStyleSheet(
+                f"color: {color}; font-size: 10px;")
         self._set_status_pulse(dot_state)
         self._update_thinking_indicator(dot_state == "thinking")
 
@@ -3394,13 +3003,10 @@ class AgentWindow(QMainWindow):
             self._minimized = self.isMinimized()
             if self._minimized:
                 self._stop_status_pulse()
-                self._stop_mic_ring()
-                self._stop_sidebar_strip_pulse()
                 self._stop_pass_a_anims()
             else:
                 # Resume the dot pulse in whatever state we're in.
                 self._set_status_pulse(self._status_state)
-                self._start_sidebar_strip_pulse()
         super().changeEvent(event)
 
     def _stop_pass_a_anims(self):
@@ -3419,6 +3025,31 @@ class AgentWindow(QMainWindow):
         if isinstance(val, bool):
             return val
         return str(val).strip().lower() in ("true", "1", "yes", "on")
+
+    # ------------------------------------------------------------------
+    # Theme engine
+    # ------------------------------------------------------------------
+    def _cycle_theme(self):
+        try:
+            idx = THEME_NAMES.index(self._theme)
+        except ValueError:
+            idx = 0
+        self._apply_theme(THEME_NAMES[(idx + 1) % len(THEME_NAMES)])
+
+    def _apply_theme(self, name: str):
+        """Swap the app stylesheet instantly; no restart or window rebuild."""
+        if name not in THEME_NAMES:
+            return
+        try:
+            qss = theme_stylesheet(name)
+        except OSError as exc:
+            self.set_status(f"Theme error: {exc}", busy=False)
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(qss)
+        self._theme = name
+        self.theme_btn.setToolTip(f"Theme: {name} — click to switch")
 
     def send(self):
         if self._processing:
@@ -3451,7 +3082,6 @@ class AgentWindow(QMainWindow):
         """Kick off a background agent turn for `text`."""
         self._processing = True
         self.input_field.setEnabled(False)
-        self._refresh_send_btn()
         self.set_status("Reading attachments…" if attached_paths else "Thinking…",
                         busy=True)
         # Clear the previous turn's steps when a new turn starts (Phase 6b).
@@ -3466,7 +3096,6 @@ class AgentWindow(QMainWindow):
         self._processing = False
         self.input_field.setEnabled(True)
         self.input_field.setFocus()
-        self._refresh_send_btn()
         self.set_status("Ready", busy=False)
         # A scheduled task may have fired while this turn was running.
         self._drain_scheduled_queue()
@@ -3541,6 +3170,25 @@ class AgentWindow(QMainWindow):
             self.chat.add_message(AssistantMessage(HELP_TEXT))
             self.conversation_history.append(f"User: {text}")
             self.conversation_history.append(f"System: {HELP_TEXT}")
+            return True
+
+        # Interface commands never need the agent; keep them working even if
+        # the brain is unavailable.
+        ui_commands = {
+            "/settings": self.open_settings,
+            "/tasks": self.open_schedule_dialog,
+            "/index": self.on_index_documents,
+            "/index-docs": self.on_index_documents,
+            "/export": self.export_conversation,
+            "/copy": self.copy_all,
+            "/activity": self.toggle_log,
+            "/log": self.toggle_log,
+            "/clear": self.new_chat,
+            "/new": self.new_chat,
+        }
+        handler = ui_commands.get(cmd)
+        if handler is not None:
+            handler()
             return True
 
         try:
@@ -3817,7 +3465,6 @@ class AgentWindow(QMainWindow):
         """Run a blocking command off the GUI thread; post the result back."""
         self._processing = True
         self.input_field.setEnabled(False)
-        self._refresh_send_btn()
         self.chat.add_message(AssistantMessage(busy_msg))
         self.set_status("Working…", busy=True)
 
@@ -3926,6 +3573,22 @@ class AgentWindow(QMainWindow):
                 background: {COLOR_BG_ALT};
                 color: {COLOR_TEXT_HI};
                 selection-background-color: {COLOR_SELECTED};
+            }}
+            QCheckBox {{
+                color: {COLOR_TEXT_HI};
+                font-family: "{FONT_MONO}";
+                font-size: 12px;
+                spacing: 8px;
+                background: transparent;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border: 1px solid {COLOR_ACCENT};
+                background: {COLOR_BG};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {COLOR_ACCENT};
             }}
             """
         )
@@ -4054,6 +3717,26 @@ class AgentWindow(QMainWindow):
             entries[key] = ("combo", combo)
             return combo
 
+        def checkbox(lay, label, key):
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            lab = QLabel(label)
+            lab.setFixedWidth(210)
+            rl.addWidget(lab)
+            box = QCheckBox()
+            saved = cfg.get(key, cfgmod.DEFAULTS.get(key, False))
+            if isinstance(saved, str):
+                checked = saved.strip().lower() in ("true", "1", "yes", "on")
+            else:
+                checked = bool(saved)
+            box.setChecked(checked)
+            rl.addWidget(box)
+            rl.addStretch(1)
+            lay.addWidget(row)
+            entries[key] = ("check", box)
+            return box
+
         # --- API Keys ---
         page, lay = make_tab("API Keys")
         section(lay, "Groq"); field(lay, "API key", "GROQ_API_KEY", secret=True)
@@ -4155,6 +3838,9 @@ class AgentWindow(QMainWindow):
         field(lay, "Server URL", "OLLAMA_URL")
         field(lay, "Model name", "OLLAMA_MODEL")
         field(lay, "Timeout (seconds)", "OLLAMA_TIMEOUT")
+        section(lay, "Proactive thoughts")
+        checkbox(lay, "Spontaneous thoughts (2h)",
+                 "SPONTANEOUS_THOUGHTS_ENABLED")
         section(lay, "Other")
         dropdown(lay, "Check for updates", "CHECK_UPDATES", ["true", "false"])
         dropdown(lay, "Log level", "LOG_LEVEL", ["info", "debug", "off"])
@@ -4241,16 +3927,22 @@ class AgentWindow(QMainWindow):
     def _save_settings(self, entries):
         updates = {}
         for key, (kind, widget) in entries.items():
-            updates[key] = (widget.currentText() if kind == "combo"
-                            else widget.text().strip())
+            if kind == "combo":
+                updates[key] = widget.currentText()
+            elif kind == "check":
+                updates[key] = widget.isChecked()
+            else:
+                updates[key] = widget.text().strip()
         try:
             write_config_keys(updates)
         except Exception as e:
             self.chat.add_message(AssistantMessage(f"ERROR: save failed — {e}"))
             return
+        self._apply_spontaneous_setting()
         self._close_settings()
         self.chat.add_message(AssistantMessage(
-            "✅ Settings saved. Restart AgentBot for changes to take effect."))
+            "✅ Settings saved. Proactive thoughts apply immediately; "
+            "other changes apply on restart."))
 
     def _reset_settings_defaults(self):
         cfgmod = get_config_module()
@@ -4259,6 +3951,8 @@ class AgentWindow(QMainWindow):
         except Exception as e:
             self.chat.add_message(AssistantMessage(f"ERROR: reset failed — {e}"))
             return
+        self._apply_spontaneous_setting()
+        self._apply_theme(read_theme_name())
         self._close_settings()
         self.chat.add_message(AssistantMessage("Settings reset to defaults."))
 
@@ -4289,27 +3983,21 @@ class AgentWindow(QMainWindow):
             "Memory reset — saved history cleared, chat kept."))
 
     # ------------------------------------------------------------------
-    # Phase 5d — sidebar/header button handlers
-    # (faithful ports of agent_gui.py: _new_chat, _copy_all,
-    #  export_conversation, on_index_documents, toggle_log,
-    #  open_schedule_dialog)
+    # Chat / UI handlers (formerly driven by the sidebar)
     # ------------------------------------------------------------------
     def new_chat(self):
-        """Header \u21bb / sidebar New chat -> clear_chat (agent_gui.py:577)."""
-        reply = QMessageBox.question(
-            self, "Clear chat", "Clear conversation and start fresh?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+        """Clear the on-screen chat and the saved conversation."""
         self.conversation_history.clear()
         try:
             get_agent().save_conversation_history(self.conversation_history)
         except Exception:
             pass
         self.chat.clear()
-        self.chat.add_message(AssistantMessage("Chat cleared. Fresh start \u2728"))
+        self._last_step_log = None
+        self.panel.set_activity_idle()
+        if self._log_panel is not None:
+            self._refresh_log_panel()
+        self.input_field.setFocus()
 
     def _chat_as_text(self) -> str:
         """Format the recorded chat like agent_gui._copy_all does."""
@@ -4324,7 +4012,7 @@ class AgentWindow(QMainWindow):
         return "\n\n".join(lines)
 
     def copy_all(self):
-        """Sidebar Copy all -> clipboard + confirmation bubble (:2269)."""
+        """Copy the whole conversation to the clipboard."""
         if not self.chat.chat_log:
             self.chat.add_message(AssistantMessage("Nothing to copy"))
             return
@@ -4332,7 +4020,7 @@ class AgentWindow(QMainWindow):
         self.chat.add_message(AssistantMessage("\U0001f4cb Copied to clipboard"))
 
     def export_conversation(self):
-        """Sidebar Export chat -> save dialog + export_tools (:2301)."""
+        """Export the conversation through export_tools."""
         if not self.chat.chat_log:
             QMessageBox.information(self, "Export", "Nothing to export yet.")
             return
@@ -4364,7 +4052,7 @@ class AgentWindow(QMainWindow):
             QMessageBox.critical(self, "Export failed", str(e))
 
     def on_index_documents(self):
-        """Sidebar Index docs -> pick folder, index in the background (:2481)."""
+        """Pick a folder and index it for RAG in the background."""
         folder = QFileDialog.getExistingDirectory(self, "Pick a folder to index")
         if not folder:
             return
@@ -4385,10 +4073,9 @@ class AgentWindow(QMainWindow):
         return f"✅ Indexing done:\n{result}"
 
     def toggle_log(self):
-        """Sidebar Activity log -> show/hide a bottom activity-log panel (:2870).
+        """Show/hide the bottom activity-log panel.
 
-        The old GUI packed/unpacked a tk log box; here we show/hide a Qt panel
-        docked under the chat. The panel mirrors the step log of the last turn.
+        The first call creates it; subsequent calls toggle visibility.
         """
         # Use isHidden() (the widget's own flag) rather than isVisible(): the
         # latter is False whenever any ancestor is hidden, which would make the
@@ -4441,7 +4128,7 @@ class AgentWindow(QMainWindow):
             self._log_box.verticalScrollBar().maximum())
 
     def open_schedule_dialog(self):
-        """Sidebar Tasks -> read-only scheduled tasks view (:2885).
+        """Read-only scheduled tasks view.
 
         The old GUI auto-refreshed every 3s; this port rebuilds the listing on
         open and offers the same Add / Remove / Clear actions via dialogs.
@@ -4579,30 +4266,6 @@ class AgentWindow(QMainWindow):
         dlg.exec()
 
     # ------------------------------------------------------------------
-    def toggle_sidebar(self):
-        visible = self.sidebar.isVisible()
-        width = self.sidebar.rest_width
-        if visible:
-            start, end = width, 0
-        else:
-            self.sidebar.setVisible(True)
-            start, end = 0, width
-
-        # Drive min and max together: the sidebar is fixed-width at rest, so
-        # animating only one bound would leave the other pinning the width.
-        group = QParallelAnimationGroup(self)
-        for prop in (b"minimumWidth", b"maximumWidth"):
-            anim = QPropertyAnimation(self.sidebar, prop, self)
-            anim.setDuration(200)
-            anim.setStartValue(start)
-            anim.setEndValue(end)
-            anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-            group.addAnimation(anim)
-        if visible:
-            group.finished.connect(lambda: self.sidebar.setVisible(False))
-        group.start()
-        self._sidebar_anim = group
-
     def show_greeting(self):
         if self.conversation_history:
             self.chat.add_message(AssistantMessage(
@@ -4767,21 +4430,23 @@ class AgentWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Option A — proactive thoughts
     # ------------------------------------------------------------------
+    @staticmethod
+    def _read_spontaneous_flag() -> bool:
+        try:
+            val = read_config_file_raw().get(
+                "SPONTANEOUS_THOUGHTS_ENABLED", False)
+        except Exception:
+            val = False
+        if isinstance(val, bool):
+            return val
+        return str(val).strip().lower() in ("true", "1", "yes", "on")
+
     def _start_spontaneous_thoughts(self):
         """Start the 2-hour thought timer when the config flag is on."""
         if self._spontaneous_timer is not None:
             return
         try:
-            cfg = dict(get_config_module().DEFAULTS)
-            try:
-                cfg.update(read_config_file_raw())
-            except Exception:
-                pass
-
-            enabled = cfg.get("SPONTANEOUS_THOUGHTS_ENABLED", False)
-            if isinstance(enabled, str):
-                enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
-            if not enabled:
+            if not self._read_spontaneous_flag():
                 return
             if self._os_control is None:
                 print("[thoughts] OS control unavailable; disabled")
@@ -4795,6 +4460,20 @@ class AgentWindow(QMainWindow):
             print("[thoughts] enabled (every 2h)")
         except Exception as e:
             print(f"[thoughts] failed to start: {e}")
+
+    def _stop_spontaneous_thoughts(self):
+        timer = self._spontaneous_timer
+        self._spontaneous_timer = None
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+
+    def _apply_spontaneous_setting(self):
+        """React to the settings checkbox without a restart."""
+        if self._read_spontaneous_flag():
+            self._start_spontaneous_thoughts()
+        else:
+            self._stop_spontaneous_thoughts()
 
     def _spontaneous_tick(self):
         """GUI-thread timer slot: start one background capture+vision run."""
@@ -5147,8 +4826,7 @@ class AgentWindow(QMainWindow):
             return
         self._recording = True
         self._pause_wake_word()
-        self._set_mic_state("recording")
-        self.set_status("Recording… click the mic or release F9 to send", busy=True)
+        self.set_status("Recording… release F9 to transcribe", busy=True)
 
         def work():
             try:
@@ -5163,7 +4841,6 @@ class AgentWindow(QMainWindow):
         if not self._recording:
             return
         self._recording = False
-        self._set_mic_state("transcribing")
         self.set_status("Transcribing…", busy=True)
 
         def work():
@@ -5179,7 +4856,6 @@ class AgentWindow(QMainWindow):
         """GUI-thread slot for recording/transcription results."""
         if payload.startswith("error:"):
             self._recording = False
-            self._set_mic_state("idle")
             self.set_status(payload[len("error:"):], busy=False)
             self._resume_wake_word()
             return
@@ -5190,12 +4866,12 @@ class AgentWindow(QMainWindow):
             self._resume_wake_word()
 
     def _handle_transcript(self, text):
-        # Match the old GUI: type it into the input, then send immediately.
+        # Voice only fills the prompt; Enter remains the sole submit action.
         self._recording = False
-        self._set_mic_state("idle")
         if text and text.strip():
             self.input_field.setPlainText(text.strip())
-            self.send()
+            self.input_field.setFocus()
+            self.set_status("Transcript ready — press Enter to send", busy=False)
         else:
             self.set_status("No speech detected — try again", busy=False)
 
@@ -5265,11 +4941,11 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setFont(terminal_font())
-    qss_path = Path(__file__).resolve().with_name("agentbot.qss")
+    theme = read_theme_name()
     try:
-        app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+        app.setStyleSheet(theme_stylesheet(theme))
     except OSError as exc:
-        print(f"[gui] stylesheet not loaded: {exc}")
+        print(f"[gui] theme {theme!r} not loaded: {exc}")
     app.setQuitOnLastWindowClosed(False)  # app lives in the tray
     window = AgentWindow()
     window.show_greeting()
