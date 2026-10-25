@@ -3325,50 +3325,254 @@ def _open_in_new_tab(url, label=None):
     except Exception as e:
         return f"ERROR: could not open {label}: {e}"
 
+_START_MENU_INDEX = None
+_SHORTCUT_BLACKLIST = (
+    "uninstall", "unins", "readme", "help", "manual", "website",
+    "release notes", "documentation",
+)
+
+
+def _clean_app_query(name):
+    return str(name or "").strip().strip('"').strip("'").lower()
+
+
+def _app_match_score(query, candidate):
+    """Score a shortcut/registry name against the requested app name."""
+    q = _clean_app_query(query)
+    c = _clean_app_query(candidate)
+    for ext in (".lnk", ".exe", ".url"):
+        if c.endswith(ext):
+            c = c[:-len(ext)]
+    if not q or not c:
+        return -1
+    if c == q:
+        return 100
+    if c.startswith(q):
+        return 90 - min(20, len(c) - len(q))
+    q_tokens = set(re.findall(r"[a-z0-9]+", q))
+    c_tokens = set(re.findall(r"[a-z0-9]+", c))
+    if q_tokens and q_tokens.issubset(c_tokens):
+        return 80 - min(20, len(c_tokens) - len(q_tokens))
+    if q in c:
+        return 70 - min(20, len(c) - len(q))
+    return -1
+
+
+def _start_menu_index():
+    """All .lnk/.exe files under the per-user and machine Start Menus."""
+    global _START_MENU_INDEX
+    if _START_MENU_INDEX is not None:
+        return _START_MENU_INDEX
+    roots = [
+        os.path.join(os.environ.get("APPDATA", ""),
+                     "Microsoft", "Windows", "Start Menu", "Programs"),
+        os.path.join(os.environ.get("PROGRAMDATA", ""),
+                     "Microsoft", "Windows", "Start Menu", "Programs"),
+    ]
+    entries = []
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fname in filenames:
+                low = fname.lower()
+                if not low.endswith((".lnk", ".exe")):
+                    continue
+                stem = os.path.splitext(fname)[0].lower()
+                if any(bad in stem for bad in _SHORTCUT_BLACKLIST):
+                    continue
+                entries.append(os.path.join(dirpath, fname))
+    _START_MENU_INDEX = entries
+    return entries
+
+
+def _start_menu_candidates(query):
+    scored = []
+    for path in _start_menu_index():
+        score = _app_match_score(query, os.path.splitext(
+            os.path.basename(path))[0])
+        if score >= 0:
+            scored.append((score, len(path), path))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [path for _score, _length, path in scored]
+
+
+def _registry_app_path_candidates(query):
+    """Executables registered under App Paths in HKCU and HKLM."""
+    try:
+        import winreg
+    except Exception:
+        return []
+
+    found = {}
+    subkey = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                root = winreg.OpenKey(
+                    hive, subkey, 0, winreg.KEY_READ | view)
+            except OSError:
+                continue
+            try:
+                count = winreg.QueryInfoKey(root)[0]
+                for i in range(count):
+                    try:
+                        name = winreg.EnumKey(root, i)
+                        score = _app_match_score(query, name)
+                        if score < 0:
+                            continue
+                        with winreg.OpenKey(root, name) as entry:
+                            raw, _kind = winreg.QueryValueEx(entry, "")
+                    except OSError:
+                        continue
+                    raw = os.path.expandvars(str(raw)).strip()
+                    if raw.startswith('"'):
+                        exe = raw[1:].split('"', 1)[0]
+                    else:
+                        match = re.match(
+                            r"^(.*?\.exe)\b", raw, flags=re.IGNORECASE)
+                        exe = match.group(1) if match else raw
+                    if exe and os.path.exists(exe):
+                        found[os.path.normcase(os.path.abspath(exe))] = (
+                            score, exe)
+            finally:
+                winreg.CloseKey(root)
+    ordered = sorted(found.values(), key=lambda item: -item[0])
+    return [path for _score, path in ordered]
+
+
+def _roblox_launch_candidates(query):
+    """Roblox installs into %LOCALAPPDATA%\\Roblox\\Versions, not App Paths."""
+    root = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox")
+    if not root or not os.path.isdir(root):
+        return []
+    if "studio" in _clean_app_query(query):
+        wanted = {"robloxstudio.exe"}
+    else:
+        wanted = {"robloxplayerbeta.exe", "robloxplayerlauncher.exe"}
+    matches = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fname in filenames:
+            if fname.lower() in wanted:
+                matches.append(os.path.join(dirpath, fname))
+
+    def _mtime(path):
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    matches.sort(key=lambda p: (_mtime(p), "playerbeta" in p.lower()),
+                 reverse=True)
+    return matches
+
+
+def _shell_open(target):
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(target)
+        else:
+            subprocess.Popen(["xdg-open", target], shell=False)
+        return True
+    except Exception:
+        return False
+
+
+def _launch_app_path(path):
+    if not path:
+        return False
+    path = os.path.expandvars(os.path.expanduser(str(path))).strip().strip('"')
+    if not os.path.exists(path):
+        return False
+    if _shell_open(path):
+        return True
+    if path.lower().endswith(".exe"):
+        try:
+            subprocess.Popen([path], shell=False)
+            return True
+        except OSError:
+            pass
+    return False
+
+
 def open_app(app_name):
-    key = app_name.lower().strip()
+    key = _clean_app_query(app_name)
     if key in KNOWN_WEB_APPS:
         return open_website(KNOWN_WEB_APPS[key])
     try:
         if 'bluetooth' in key:
-            subprocess.Popen('start ms-settings:bluetooth', shell=True)
-            return "Opened Bluetooth settings."
+            if _shell_open("ms-settings:bluetooth"):
+                return "Opened Bluetooth settings."
         elif 'wifi' in key or 'wi-fi' in key:
-            subprocess.Popen('start ms-settings:network-wifi', shell=True)
-            return "Opened Wi-Fi settings."
+            if _shell_open("ms-settings:network-wifi"):
+                return "Opened Wi-Fi settings."
         elif 'setting' in key:
-            subprocess.Popen('start ms-settings:', shell=True)
-            return "Opened Settings."
+            if _shell_open("ms-settings:"):
+                return "Opened Settings."
 
-        telegram_path = os.path.join(os.environ.get('APPDATA', ''), 'Telegram Desktop', 'Telegram.exe')
+        # Roblox's player lives in a versioned LocalAppData folder and is not
+        # reliably registered anywhere Windows would find by name.
+        if "roblox" in key:
+            for path in _roblox_launch_candidates(key):
+                if _launch_app_path(path):
+                    print(f"[open_app] launched {path}")
+                    return f"Opened {app_name}."
+
+        telegram_path = os.path.join(
+            os.environ.get('APPDATA', ''), 'Telegram Desktop', 'Telegram.exe')
         chrome_candidates = [
             shutil.which('chrome'),
-            os.path.join(os.environ.get('PROGRAMFILES', ''), 'Google', 'Chrome', 'Application', 'chrome.exe'),
-            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            os.path.join(os.environ.get('PROGRAMFILES', ''),
+                         'Google', 'Chrome', 'Application', 'chrome.exe'),
+            os.path.join(os.environ.get('LOCALAPPDATA', ''),
+                         'Google', 'Chrome', 'Application', 'chrome.exe'),
         ]
-        chrome_path = next((p for p in chrome_candidates if p and os.path.exists(p)), None)
+        chrome_path = next(
+            (p for p in chrome_candidates if p and os.path.exists(p)), None)
+        explicit = {
+            'telegram': telegram_path,
+            'chrome': chrome_path,
+        }
+        for name, path in explicit.items():
+            if name in key and path and _launch_app_path(path):
+                return f"Opened {app_name}."
 
-        app_paths = {
-            'telegram': f'"{telegram_path}"' if os.path.exists(telegram_path) else None,
-            'chrome': f'"{chrome_path}"' if chrome_path else None,
+        builtin = {
             'notepad': 'notepad.exe',
             'calculator': 'calc.exe',
             'explorer': 'explorer.exe',
             'cmd': 'cmd.exe',
             'powershell': 'powershell.exe',
         }
-        for k, path in app_paths.items():
-            if k in key:
-                if path is None:
-                    return f"ERROR: '{app_name}' wasn't found."
-                subprocess.Popen(path, shell=True)
+        for name, exe in builtin.items():
+            if name in key:
+                path = shutil.which(exe)
+                if path and _launch_app_path(path):
+                    return f"Opened {app_name}."
+
+        # Native ShellExecute by name.
+        if _shell_open(app_name):
+            return f"Opened {app_name}."
+
+        # Start Menu shortcuts (per-user first, then all users).
+        for path in _start_menu_candidates(key):
+            if _launch_app_path(path):
+                print(f"[open_app] launched {path}")
                 return f"Opened {app_name}."
 
-        check = subprocess.run(f'where {app_name}', shell=True, capture_output=True, text=True)
-        if check.returncode == 0 and check.stdout.strip():
-            subprocess.Popen(f'start "" "{app_name}"', shell=True)
-            return f"Opened {app_name}."
-        return f"ERROR: '{app_name}' is not installed."
+        # Registry App Paths.
+        for path in _registry_app_path_candidates(key):
+            if _launch_app_path(path):
+                print(f"[open_app] launched {path}")
+                return f"Opened {app_name}."
+
+        # Finally, resolve bare commands on PATH.
+        for candidate in (app_name.strip(), f"{app_name.strip()}.exe"):
+            path = shutil.which(candidate)
+            if path and _launch_app_path(path):
+                return f"Opened {app_name}."
+
+        return f"ERROR: '{app_name}' was not found."
     except Exception as e:
         return f"ERROR opening {app_name}: {e}"
 
