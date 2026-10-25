@@ -59,6 +59,7 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
+    QTextBlockFormat,
     QTextCursor,
 )
 from PySide6.QtSvg import QSvgRenderer
@@ -82,6 +83,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -150,7 +152,7 @@ RIGHT_PANEL_W = 320
 MIN_RIGHT_PANEL_W = 240
 HIDE_PANEL_BELOW = 1100
 SHOW_PANEL_AT = 1180
-CARD_PAD = 14
+CARD_PAD = 10
 CARD_SPACING = 16
 
 # Phase 6b — panel refresh cadence (all timers live on the GUI thread; Phase
@@ -299,12 +301,12 @@ a {{ color: {COLOR_ACCENT}; }}
 """
 
 AGENT_BANNER = (
-    " ###  ####  ##### #   # #####\n"
-    "#   # #     #     ##  #   #  \n"
-    "#   # # ### ####  # # #   #  \n"
-    "##### #   # #     #  ##   #  \n"
-    "#   # #   # #     #   #   #  \n"
-    "#   #  #### ##### #   #   #  "
+    " █████╗  ██████╗ ███████╗███╗   ██╗████████╗\n"
+    "██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝\n"
+    "███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   \n"
+    "██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   \n"
+    "██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   \n"
+    "╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   "
 )
 
 
@@ -1370,18 +1372,61 @@ class BannerMessage(MessageBase):
 
     def __init__(self, art: str):
         super().__init__()
-        label = QLabel(art)
+        # A read-only text view (not a QLabel) lets us pin the line height to
+        # the glyph cell so the box-drawing blocks tile without seams.
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        view.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setContentsMargins(0, 0, 0, 0)
+        view.viewport().setContentsMargins(0, 0, 0, 0)
+        view.document().setDocumentMargin(8)
+        banner_font = QFont("Consolas")
+        banner_font.setStyleHint(QFont.StyleHint.Monospace)
+        banner_font.setFixedPitch(True)
+        banner_font.setPixelSize(18)
+        view.setFont(banner_font)
+        view.setStyleSheet("background: transparent; border: none; padding: 0px;")
+        view.setPlainText(art)
+        cursor = view.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        fmt = QTextBlockFormat()
+        fmt.setLineHeight(
+            18.0, QTextBlockFormat.LineHeightTypes.FixedHeight.value)
+        cursor.mergeBlockFormat(fmt)
+        # Merging leaves the cursor at the end, which can scroll the view and
+        # clip the first row even with scrollbars off.
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        view.setTextCursor(cursor)
+        view.verticalScrollBar().setValue(0)
+        view.setFixedSize(
+            int(view.document().idealWidth()) + 4,
+            int(view.document().size().height()) + 4)
+        self._col_layout.addSpacing(4)
+        self._col_layout.addWidget(view)
+        self._col_layout.addSpacing(6)
+
+
+class ReadyMessage(MessageBase):
+    """Bold theme-primary status line under the banner."""
+
+    def __init__(self, text: str):
+        super().__init__()
+        label = QLabel(text)
         label.setTextFormat(Qt.TextFormat.PlainText)
         label.setProperty("tone", "hi")
-        label.setStyleSheet(
-            f'font-family: "{FONT_MONO}"; font-size: 18px;')
-        label.setWordWrap(False)
+        label.setStyleSheet("font-size: 15px; font-weight: 700;")
+        label.setWordWrap(True)
         label.setMinimumWidth(0)
         label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._col_layout.addSpacing(4)
         self._col_layout.addWidget(label)
-        self._col_layout.addSpacing(6)
 
 
 class SystemMessage(MessageBase):
@@ -1716,8 +1761,9 @@ class InfoCard(QFrame):
         super().__init__()
         self.title = title
         self.setObjectName(object_name)
+        self.setProperty("panel", True)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(CARD_PAD, CARD_PAD, CARD_PAD, CARD_PAD)
         outer.setSpacing(8)
 
         # Header is a row (not a bare label) so a card can add a trailing
@@ -4209,6 +4255,7 @@ class AgentWindow(QMainWindow):
     # ------------------------------------------------------------------
     def show_greeting(self):
         self.chat.add_message(BannerMessage(AGENT_BANNER), fade=False)
+        self.chat.add_message(ReadyMessage("Agent Ready..."), fade=False)
         self.chat.add_message(SystemMessage(
             "System Online. Type /help for commands."), fade=False)
         if self.conversation_history:

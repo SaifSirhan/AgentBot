@@ -13,7 +13,12 @@ QFrame {
     padding: 0px;
 }
 
-/* Right-panel sections are pure text: whitespace groups them, not outlines. */
+/* Right-panel cards: pure black floating boxes with a 1px neon outline. */
+QFrame[panel="true"] {
+    background-color: #000000;
+    border: 1px solid #33ff00;
+    border-radius: 0px;
+}
 
 /* Code blocks: flat text inside a square outline. */
 QFrame#codeBlock {
