@@ -152,14 +152,9 @@ SHOW_PANEL_AT = 1180
 CARD_PAD = 14
 CARD_SPACING = 16
 
-# Phase 6b — panel card heights + refresh cadence (all timers live on the GUI
-# thread; Phase 5a showed a QTimer created off-thread never fires).
-# H_NOW_PLAYING was 96 when the card was a one-line placeholder; the 6b
-# follow-up adds a 60x60 thumbnail plus a transport-button row, which needs
-# ~150px to avoid clipping the art against the buttons.
-H_NOW_PLAYING = 150
-H_SYSTEM = 110
-H_WEATHER = 80
+# Phase 6b — panel refresh cadence (all timers live on the GUI thread; Phase
+# 5a showed a QTimer created off-thread never fires). Sections size to their
+# text now; only the Telegram log gets a bounded height.
 H_TELEGRAM = 210
 TELEGRAM_MAX_ENTRIES = 20
 ACTIVITY_MAX_LINES = 6
@@ -942,14 +937,9 @@ def _dim_label(text: str, size: int = 11, color: str = COLOR_TEXT_LOW,
 
 
 class MeterRow(QWidget):
-    """One labelled meter: name, a thin fill bar, and a right-aligned value.
+    """One labelled meter rendered as an ASCII bar, like a TUI."""
 
-    A QFrame fill inside a QFrame trough is used rather than QProgressBar —
-    QProgressBar's groove/chunk needs chunk-margin fiddling and its text
-    overlay fights the mint styling, whereas a fixed-width fill is exact.
-    """
-
-    TRACK_W = 96
+    CELLS = 10
 
     def __init__(self, name: str):
         super().__init__()
@@ -961,23 +951,21 @@ class MeterRow(QWidget):
         self._name.setFixedWidth(34)
         row.addWidget(self._name)
 
-        self._track = QFrame()
-        self._track.setObjectName("meterTrack")
-        self._track.setFixedSize(self.TRACK_W, 6)
-        self._fill = QFrame(self._track)
-        self._fill.setObjectName("meterFill")
-        self._fill.setGeometry(0, 0, 0, 6)
-        row.addWidget(self._track)
+        self._bar = _dim_label("", size=11, color=COLOR_TEXT_MID, mono=True)
+        row.addWidget(self._bar)
 
         self._value = _dim_label("", size=11, color=COLOR_TEXT_HI, mono=True)
-        self._value.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        row.addWidget(self._value, 1)
+        row.addWidget(self._value)
+        row.addStretch(1)
+
+    def _bar_text(self, frac: float) -> str:
+        frac = max(0.0, min(1.0, frac))
+        filled = int(round(self.CELLS * frac))
+        return "[" + "#" * filled + "-" * (self.CELLS - filled) + "]"
 
     def set_value(self, text: str, fraction: float):
         self._value.setText(text)
-        frac = max(0.0, min(1.0, fraction))
-        self._fill.setFixedWidth(int(self.TRACK_W * frac))
+        self._bar.setText(self._bar_text(fraction))
 
     def set_value_animated(self, fraction: float, formatter, enabled: bool,
                            threshold: float = 0.01):
@@ -1023,7 +1011,7 @@ class MeterRow(QWidget):
 
     def _paint_fraction(self, frac: float, formatter):
         self._value.setText(formatter(frac))
-        self._fill.setFixedWidth(int(self.TRACK_W * frac))
+        self._bar.setText(self._bar_text(frac))
 
     def stop_ticker(self):
         ticker = getattr(self, "_ticker", None)
@@ -1036,11 +1024,11 @@ class MeterRow(QWidget):
         self.stop_ticker()
         self._frac = None
         self._value.setText(text)
-        self._fill.setFixedWidth(0)
-        self._track.setVisible(False)
+        self._bar.setText("")
+        self._bar.setVisible(False)
 
     def set_bar_visible(self, visible: bool):
-        self._track.setVisible(visible)
+        self._bar.setVisible(visible)
 
 
 def _fmt_percent(frac: float) -> str:
@@ -1655,17 +1643,16 @@ class InfoCard(QFrame):
         super().__init__()
         self.title = title
         self.setObjectName(object_name)
-        self.setProperty("panel", True)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(CARD_PAD, CARD_PAD, CARD_PAD, CARD_PAD)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(8)
 
         # Header is a row (not a bare label) so a card can add a trailing
-        # control — the Telegram card's "clear" button uses this slot.
+        # status label without rebuilding the layout.
         head_row = QHBoxLayout()
         head_row.setContentsMargins(0, 0, 0, 0)
         head_row.setSpacing(6)
-        head = QLabel(title)
+        head = QLabel(title.lower())
         head.setProperty("role", "heading")
         head_row.addWidget(head)
         head_row.addStretch(1)
@@ -1679,7 +1666,8 @@ class InfoCard(QFrame):
         self.body_layout.addStretch(1)
 
         self.placeholder = QLabel(placeholder)
-        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.placeholder.setWordWrap(True)
         self.placeholder.setProperty("role", "secondary")
         self.placeholder.setProperty("tone", "dim")
@@ -1687,14 +1675,15 @@ class InfoCard(QFrame):
         outer.addWidget(self.body, 1)
 
     def set_placeholder(self, text: str):
-        """Replace the body with a single centred dim message.
+        """Replace the body with a single dim message.
 
         Used both for the idle state and the "unavailable" states, so callers
         never have to juggle the placeholder widget's visibility themselves.
         """
         if self.placeholder is None:
             self.placeholder = QLabel()
-            self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.placeholder.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.placeholder.setWordWrap(True)
             self.placeholder.setProperty("role", "secondary")
             self.placeholder.setProperty("tone", "dim")
@@ -1750,7 +1739,7 @@ class TelegramPanel(InfoCard):
 
     def __init__(self):
         super().__init__("TELEGRAM", placeholder="no documents yet")
-        self.setMinimumHeight(H_TELEGRAM)
+        self.setMaximumHeight(H_TELEGRAM)
         self.entries = []
 
         self.list_scroll = QScrollArea()
@@ -1836,8 +1825,6 @@ class RightPanel(QFrame):
                 card = InfoCard(title)
             self.cards[title] = card
             self.cards_layout.addWidget(card)
-            if title in (self._FIXED_HEIGHTS):
-                card.setFixedHeight(self._FIXED_HEIGHTS[title])
         self.cards_layout.addStretch(1)
 
         # ACTIVITY shows at most ACTIVITY_MAX_LINES single-line steps, so cap it
@@ -1853,12 +1840,6 @@ class RightPanel(QFrame):
         self._build_now_playing()
         self._build_system()
         self._build_weather()
-
-    _FIXED_HEIGHTS = {
-        "NOW PLAYING": H_NOW_PLAYING,
-        "SYSTEM": H_SYSTEM,
-        "WEATHER": H_WEATHER,
-    }
 
     # -- ACTIVITY -------------------------------------------------------
     def _build_activity(self):
@@ -1953,7 +1934,8 @@ class RightPanel(QFrame):
         self.media_placeholder = _dim_label(
             "" if self.media_available else "Requires winsdk \u2014 ask user",
             size=13, color=COLOR_TEXT_LOW)
-        self.media_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.media_placeholder.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.media_placeholder.setWordWrap(True)
         card.body_layout.insertWidget(0, self.media_placeholder)
 
@@ -1976,7 +1958,7 @@ class RightPanel(QFrame):
         tcol.setSpacing(2)
         self.media_title = _dim_label("", size=12, color=COLOR_TEXT_HI)
         self.media_title.setStyleSheet(
-            f'font-family: "{FONT_UI}"; font-size: 12px; font-weight: bold;')
+            f'font-family: "{FONT_MONO}"; font-size: 12px; font-weight: bold;')
         self.media_artist = _dim_label("", size=11, color=COLOR_TEXT_MID)
         self.media_album = _dim_label("", size=10, color=COLOR_TEXT_LOW)
         for w in (self.media_title, self.media_artist, self.media_album):
@@ -4804,6 +4786,8 @@ class AgentWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    # A terminal cursor is a steady block, not a blinking hairline.
+    app.setCursorFlashTime(0)
     app.setFont(terminal_font())
     theme = read_theme_name()
     try:

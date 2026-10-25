@@ -13,12 +13,7 @@ QFrame {
     padding: 0px;
 }
 
-/* Right-panel cards: flat black terminal boxes, square neon-green outline. */
-QFrame[panel="true"] {
-    background-color: #000000;
-    border: 1px solid #33ff00;
-    border-radius: 0px;
-}
+/* Right-panel sections are pure text: whitespace groups them, not outlines. */
 
 /* Code blocks: flat text inside a square outline. */
 QFrame#codeBlock {
@@ -44,15 +39,6 @@ QPlainTextEdit#chipBody {
     border-radius: 0px;
     padding: 6px;
     font-size: 11px;
-}
-
-/* Data bars. */
-QFrame#meterTrack {
-    background-color: #1f5f00;
-}
-
-QFrame#meterFill {
-    background-color: #33ff00;
 }
 
 /* Semantic label tones: the theme file owns every text color. */
