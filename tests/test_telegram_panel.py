@@ -37,7 +37,10 @@ class TelegramPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.entries, [])
         self.assertTrue(self.panel.placeholder.isVisible())
         self.assertTrue(self.panel.list_scroll.isHidden())
-        self.assertEqual(self.panel.clear_btn.text(), "clear")
+
+    def test_has_no_buttons(self):
+        from PySide6.QtWidgets import QPushButton
+        self.assertEqual(self.panel.findChildren(QPushButton), [])
 
     def test_summary_is_plain_text(self):
         self.panel.add_summary("Alice", "report.pdf", "<b>x</b> & y")
@@ -81,7 +84,7 @@ class TelegramPanelTests(unittest.TestCase):
     def test_clear_restores_empty_state(self):
         self.panel.add_summary("A", "a.txt", "one")
         self.panel.add_summary("B", "b.txt", "two")
-        self.panel.clear_btn.click()
+        self.panel.clear()
         self.assertEqual(self.panel.entries, [])
         self.assertTrue(self.panel.placeholder.isVisible())
         self.assertTrue(self.panel.list_scroll.isHidden())

@@ -160,7 +160,7 @@ CARD_SPACING = 16
 H_NOW_PLAYING = 150
 H_SYSTEM = 110
 H_WEATHER = 80
-H_TELEGRAM = 240
+H_TELEGRAM = 210
 TELEGRAM_MAX_ENTRIES = 20
 ACTIVITY_MAX_LINES = 6
 SYSTEM_REFRESH_MS = 2000
@@ -690,6 +690,8 @@ HELP_TEXT = (
     "/export            → export the conversation\n"
     "/copy              → copy the conversation\n"
     "/activity          → toggle the activity log\n"
+    "/theme [name]      → switch theme (brutalist | crt_green)\n"
+    "/tg-clear          → clear the Telegram panel\n"
     "/clear             → clear the chat and history\n\n"
     "/send  Contact|message\n"
     "       e.g.  /send JEE|helo\n\n"
@@ -1751,13 +1753,6 @@ class TelegramPanel(InfoCard):
         self.setMinimumHeight(H_TELEGRAM)
         self.entries = []
 
-        self.clear_btn = QPushButton("clear")
-        self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.clear_btn.setFixedHeight(16)
-        self.clear_btn.setStyleSheet("font-size: 10px;")
-        self.clear_btn.clicked.connect(self.clear)
-        self.header_layout.addWidget(self.clear_btn)
-
         self.list_scroll = QScrollArea()
         self.list_scroll.setWidgetResizable(True)
         self.list_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1822,6 +1817,8 @@ class RightPanel(QFrame):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         body = QWidget()
         body.setObjectName("panelContent")
@@ -2146,6 +2143,9 @@ class RightPanel(QFrame):
         # arrives instead of leaving it below the fold.
         self.scroll_area.ensureWidgetVisible(card)
 
+    def clear_telegram(self):
+        self.cards["TELEGRAM"].clear()
+
 
 
 # ----------------------------------------------------------------------
@@ -2192,11 +2192,6 @@ class AgentWindow(QMainWindow):
         self._animations_enabled = self._read_animations_flag()
         self._theme = read_theme_name()
         # Phase 6c animation state (all anims live on the main thread).
-        self._status_pulse = None
-        self._status_state = "ready"
-        self._thinking_dots = None
-        self._thinking_timer = None
-        self._thinking_index = 0
         self._minimized = False
         self._card_anims = []
         self._entry_anims = []
@@ -2360,13 +2355,12 @@ class AgentWindow(QMainWindow):
     # Phase 6c — motion startup
     # ------------------------------------------------------------------
     def start_motion(self):
-        """Begin the ambient motion (status pulse, card entrance).
+        """Begin the ambient motion (card entrance).
 
         Called once after the window is shown. When ANIMATIONS_ENABLED is
         false this is a no-op: every element already renders in its final
         state.
         """
-        self._set_status_pulse(self._status_state)
         # Card entrance: only when the panel is actually visible at launch.
         if self._right_panel_visible:
             QTimer.singleShot(0, self._animate_card_entrance)
@@ -2651,6 +2645,11 @@ class AgentWindow(QMainWindow):
         self.input_field.ensureCursorVisible()
         self.input_field.setFocus()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # A terminal always has the prompt focused and the cursor visible.
+        QTimer.singleShot(0, self.input_field.setFocus)
+
     def keyPressEvent(self, event):
         if (event.key() == Qt.Key.Key_Escape
                 and self._settings_overlay is not None):
@@ -2667,68 +2666,11 @@ class AgentWindow(QMainWindow):
         layout.setContentsMargins(
             QFontMetrics(self.font()).horizontalAdvance("  "), 0, 0, 0)
 
-        layout.addWidget(self._build_header())
-
-        border = QFrame()
-        border.setFixedHeight(1)
-        border.setStyleSheet(f"background: {COLOR_BORDER};")
-        layout.addWidget(border)
-
         self.chat = ChatView()
         layout.addWidget(self.chat, 1)
         layout.addWidget(self._build_input_area())
         self._main_col_layout = layout
         return col
-
-    def _build_header(self) -> QWidget:
-        header = QWidget()
-        header.setFixedHeight(HEADER_H)
-
-        row = QHBoxLayout(header)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-
-        title = QLabel("Agent")
-        title.setStyleSheet("font-size: 15px; font-weight: bold;")
-        title.setProperty("tone", "hi")
-        row.addWidget(title)
-        row.addSpacing(6)
-
-        self.status_dot = QLabel("\u25cf")
-        self.status_dot.setStyleSheet("font-size: 10px;")
-        row.addWidget(self.status_dot)
-
-        self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("font-size: 11px;")
-        self.status_label.setProperty("tone", "dim")
-        row.addWidget(self.status_label)
-
-        # Phase 6c I — three-dot thinking indicator, right of the status text.
-        self.thinking_dots = QWidget()
-        td = QHBoxLayout(self.thinking_dots)
-        td.setContentsMargins(4, 0, 0, 0)
-        td.setSpacing(3)
-        self._thinking_dot_labels = []
-        for _ in range(3):
-            d = QLabel("\u25cf")
-            d.setStyleSheet(
-                f"color: {COLOR_WARN}; font-size: 7px; background: transparent;")
-            td.addWidget(d)
-            self._thinking_dot_labels.append(d)
-        self.thinking_dots.setVisible(False)
-        row.addWidget(self.thinking_dots)
-        row.addStretch(1)
-
-        self.theme_btn = QPushButton("[Theme]")
-        self.theme_btn.setFlat(True)
-        self.theme_btn.setAutoDefault(False)
-        self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.theme_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.theme_btn.setToolTip(f"Theme: {self._theme} — click to switch")
-        self.theme_btn.clicked.connect(self._cycle_theme)
-        row.addWidget(self.theme_btn)
-
-        return header
 
     def _build_input_area(self) -> QWidget:
         outer = QWidget()
@@ -2766,7 +2708,7 @@ class AgentWindow(QMainWindow):
         # Let file drops bubble to AgentWindow instead of the editor.
         self.input_field.setAcceptDrops(False)
         self.input_field.viewport().setAcceptDrops(False)
-        self.input_field.setPlaceholderText("Type a command…")
+        self.input_field.setCursorWidth(8)
         self.input_field.setFrameShape(QFrame.Shape.NoFrame)
         # QPlainTextEdit has no QLineEdit-style setTextMargins(); zero the
         # document, viewport, and contents margins for the same result.
@@ -2901,99 +2843,10 @@ class AgentWindow(QMainWindow):
     # Send / receive
     # ------------------------------------------------------------------
     def set_status(self, text, busy=False):
-        self.status_label.setText(text)
-        # Phase 6c — the dot breathes; period and colour encode the state.
-        #   error text -> red, steady (alert)
-        #   busy       -> amber, fast pulse (active)
-        #   otherwise  -> mint, slow pulse (calm)
-        low = (text or "").lower()
-        if any(w in low for w in ("error", "failed", "couldn't", "no speech")):
-            dot_state, color = "error", COLOR_DANGER
-        elif busy:
-            dot_state, color = "thinking", COLOR_WARN
-        else:
-            dot_state, color = "ready", COLOR_ACCENT
-        if dot_state == "ready":
-            # No inline color: the theme QSS owns the idle dot color.
-            self.status_dot.setStyleSheet("font-size: 10px;")
-        else:
-            self.status_dot.setStyleSheet(
-                f"color: {color}; font-size: 10px;")
-        self._set_status_pulse(dot_state)
-        self._update_thinking_indicator(dot_state == "thinking")
-
-    # ------------------------------------------------------------------
-    # Phase 6c A — pulsing status dot
-    # ------------------------------------------------------------------
-    def _set_status_pulse(self, state: str):
-        """Start/stop the breathing pulse on the status dot.
-
-        state: 'ready' (2.5s), 'thinking' (1.2s), 'error' (no pulse).
-        """
-        self._status_state = state
-        if not self._animations_enabled or state == "error" or self._minimized:
-            self._stop_status_pulse()
-            return
-        period = PULSE_READY_MS if state == "ready" else PULSE_THINKING_MS
-        if (self._status_pulse is not None
-                and self._status_pulse.duration() == period):
-            return  # already pulsing at the right rate — leave it running
-        self._stop_status_pulse()
-        effect = QGraphicsOpacityEffect(self.status_dot)
-        self.status_dot.setGraphicsEffect(effect)
-        anim = QPropertyAnimation(effect, b"opacity", self.status_dot)
-        anim.setDuration(period)
-        anim.setStartValue(1.0)
-        anim.setKeyValueAt(0.5, 0.7)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-        anim.setLoopCount(-1)
-        anim.start()
-        self._status_pulse = anim
-
-    def _stop_status_pulse(self):
-        anim = getattr(self, "_status_pulse", None)
-        if anim is not None:
-            anim.stop()
-            self._status_pulse = None
-        self.status_dot.setGraphicsEffect(None)
-        self.status_dot.setStyleSheet(
-            self.status_dot.styleSheet())  # force repaint at full opacity
-
-    # ------------------------------------------------------------------
-    # Phase 6c I — three-dot thinking indicator
-    # ------------------------------------------------------------------
-    def _update_thinking_indicator(self, thinking: bool):
-        if not thinking or not self._animations_enabled:
-            self._stop_thinking_dots()
-            return
-        if self._thinking_timer is not None:
-            return  # already running
-        self.thinking_dots.setVisible(True)
-        self._thinking_index = 0
-        self._paint_thinking_dots()
-        self._thinking_timer = QTimer(self)
-        self._thinking_timer.setInterval(THINKING_DOT_MS)
-        self._thinking_timer.timeout.connect(self._advance_thinking_dots)
-        self._thinking_timer.start()
-
-    def _advance_thinking_dots(self):
-        self._thinking_index = (self._thinking_index + 1) % 3
-        self._paint_thinking_dots()
-
-    def _paint_thinking_dots(self):
-        for i, d in enumerate(self._thinking_dot_labels):
-            lit = (i == self._thinking_index)
-            d.setStyleSheet(
-                f"color: {COLOR_WARN}; font-size: 7px; background: transparent;"
-                if lit else
-                f"color: {COLOR_TEXT_LOW}; font-size: 7px; background: transparent;")
-
-    def _stop_thinking_dots(self):
-        if self._thinking_timer is not None:
-            self._thinking_timer.stop()
-            self._thinking_timer = None
-        self.thinking_dots.setVisible(False)
+        # The terminal canvas carries no status chrome; the window title is
+        # the only place a shell-like status belongs.
+        label = " ".join((text or "").split())
+        self.setWindowTitle(f"Agent — {label}" if label else "Agent")
 
     # ------------------------------------------------------------------
     # Phase 6c performance guard — pause motion while minimized
@@ -3002,11 +2855,7 @@ class AgentWindow(QMainWindow):
         if event.type() == QEvent.Type.WindowStateChange:
             self._minimized = self.isMinimized()
             if self._minimized:
-                self._stop_status_pulse()
                 self._stop_pass_a_anims()
-            else:
-                # Resume the dot pulse in whatever state we're in.
-                self._set_status_pulse(self._status_state)
         super().changeEvent(event)
 
     def _stop_pass_a_anims(self):
@@ -3049,7 +2898,17 @@ class AgentWindow(QMainWindow):
         if app is not None:
             app.setStyleSheet(qss)
         self._theme = name
-        self.theme_btn.setToolTip(f"Theme: {name} — click to switch")
+
+    def _cmd_theme(self, args: str):
+        name = args.strip().lower()
+        if name:
+            if name not in THEME_NAMES:
+                self.set_status(f"unknown theme: {name}", busy=False)
+                return
+            self._apply_theme(name)
+        else:
+            self._cycle_theme()
+        self.set_status(f"theme: {self._theme}", busy=False)
 
     def send(self):
         if self._processing:
@@ -3174,6 +3033,10 @@ class AgentWindow(QMainWindow):
 
         # Interface commands never need the agent; keep them working even if
         # the brain is unavailable.
+        if cmd == "/theme":
+            self._cmd_theme(args)
+            return True
+
         ui_commands = {
             "/settings": self.open_settings,
             "/tasks": self.open_schedule_dialog,
@@ -3183,6 +3046,7 @@ class AgentWindow(QMainWindow):
             "/copy": self.copy_all,
             "/activity": self.toggle_log,
             "/log": self.toggle_log,
+            "/tg-clear": self.panel.clear_telegram,
             "/clear": self.new_chat,
             "/new": self.new_chat,
         }
