@@ -1,13 +1,18 @@
 """
 rag_tool.py — Local document search for AgentBot.
 
-Uses ChromaDB for storage and sentence-transformers for embeddings.
-Adapted from general RAG patterns (not copied from Odysseus).
+ChromaDB stores embeddings for semantic search; a SQLite FTS5 table stores the
+same chunks for keyword search. Results from both are merged with Reciprocal
+Rank Fusion so exact names, IDs and filenames are not lost to vector search.
 """
 
 import os
 import json
 import glob
+import re
+import sqlite3
+import threading
+
 import chromadb
 from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
@@ -30,6 +35,136 @@ STATE_FILE = os.path.join(
 # telegram_export_parser.OUTPUT_DIR; consumers use it to scope searches to the
 # group chat rather than every indexed folder.
 GROUP_EXPORT_ROOT = r"C:\Users\USER\PrivateExport"
+
+# Reciprocal Rank Fusion constant. A chunk that appears in both the semantic
+# and keyword lists receives both 1/(k+rank) terms, which puts it far above
+# single-list hits.
+RRF_K = 60
+
+
+def _filename_for(source: str) -> str:
+    return source.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def rrf_scores(rankings, k=RRF_K):
+    """Return {chunk_id: score} for one or more ranked id lists.
+
+    Each list contributes 1/(k + rank) to every id it contains. Overlap
+    between lists is therefore additive: a chunk found by both Chroma and
+    FTS5 outranks a chunk found by only one of them.
+    """
+    scores = {}
+    for ranking in rankings:
+        for rank, chunk_id in enumerate(ranking, start=1):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
+    return scores
+
+
+class FTSIndex:
+    """SQLite FTS5 keyword index for RAG chunks.
+
+    The filename is indexed separately from the body so a query like
+    ``Q4_report_2026.pdf`` finds the file even when its text never mentions
+    the name. One connection is shared by GUI and agent threads, so every
+    operation takes a lock.
+    """
+
+    def __init__(self, path: str):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
+                id UNINDEXED,
+                source UNINDEXED,
+                filename,
+                text,
+                tokenize = 'unicode61'
+            )
+            """
+        )
+        self._conn.commit()
+
+    def close(self):
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def count(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM chunks").fetchone()
+        return int(row[0]) if row else 0
+
+    def replace_source(self, source: str, rows):
+        """Replace every chunk for ``source`` with ``(chunk_id, text)`` rows."""
+        filename = _filename_for(source)
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM chunks WHERE source = ?", (source,))
+            self._conn.executemany(
+                """
+                INSERT INTO chunks (id, source, filename, text)
+                VALUES (?, ?, ?, ?)
+                """,
+                [(chunk_id, source, filename, text)
+                 for chunk_id, text in rows],
+            )
+            self._conn.commit()
+
+    def bulk_insert(self, rows):
+        """Insert ``(chunk_id, source, text)`` rows without deduplicating."""
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT INTO chunks (id, source, filename, text)
+                VALUES (?, ?, ?, ?)
+                """,
+                [(chunk_id, source, _filename_for(source), text)
+                 for chunk_id, source, text in rows],
+            )
+            self._conn.commit()
+
+    def delete_source(self, source: str):
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM chunks WHERE source = ?", (source,))
+            self._conn.commit()
+
+    def search(self, query: str, limit: int = 10):
+        """Return ranked keyword hits as dicts with id/source/text.
+
+        Query text is tokenised to word characters and quoted, so FTS5
+        operators in user input are searched as plain words instead of
+        changing the query grammar.
+        """
+        terms = re.findall(r"\w+", query or "", flags=re.UNICODE)
+        if not terms:
+            return []
+        match = " OR ".join(f'"{term}"' for term in terms)
+        limit = max(1, int(limit))
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT id, source, text
+                    FROM chunks
+                    WHERE chunks MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    (match, limit),
+                ).fetchall()
+            except sqlite3.Error as e:
+                print(f"[rag] FTS query failed: {e}")
+                return []
+        return [
+            {"id": chunk_id, "source": source, "text": text}
+            for chunk_id, source, text in rows
+        ]
 
 
 def _load_state() -> dict:
@@ -62,14 +197,50 @@ def _file_signature(path: str):
         return None
     
 class RAGTool:
-    def __init__(self):
-        os.makedirs(DB_PATH, exist_ok=True)
-        self.client = chromadb.PersistentClient(path=DB_PATH)
+    def __init__(self, db_path: str = None, fts_path: str = None):
+        db_path = db_path or DB_PATH
+        os.makedirs(db_path, exist_ok=True)
+        self.client = chromadb.PersistentClient(path=db_path)
         self.collection = self.client.get_or_create_collection(
             name="documents",
             metadata={"hnsw:space": "cosine"}
         )
         self.model = SentenceTransformer(MODEL_NAME)
+        self.fts = FTSIndex(
+            fts_path or os.path.join(db_path, "rag_fts.sqlite3"))
+        self._backfill_fts()
+
+    def _backfill_fts(self):
+        """Migrate an existing Chroma-only index into FTS once."""
+        if self.fts is None or self.fts.count() != 0:
+            return
+        try:
+            total = self.collection.count()
+        except Exception:
+            return
+        if total == 0:
+            return
+        try:
+            data = self.collection.get(include=["documents", "metadatas"])
+        except Exception as e:
+            print(f"[rag] FTS backfill skipped: {e}")
+            return
+        ids = data.get("ids") or []
+        documents = data.get("documents") or []
+        metadatas = data.get("metadatas") or []
+        rows = []
+        for chunk_id, text, meta in zip(ids, documents, metadatas):
+            if not text:
+                continue
+            source = (meta or {}).get("source", "unknown")
+            rows.append((chunk_id, source, text))
+        if not rows:
+            return
+        try:
+            self.fts.bulk_insert(rows)
+            print(f"[rag] backfilled {len(rows)} chunks into FTS5")
+        except Exception as e:
+            print(f"[rag] FTS backfill failed: {e}")
 
     # ----------------------------------------------------------
     # INDEXING
@@ -145,6 +316,7 @@ class RAGTool:
             embeddings=embeddings,
             metadatas=[{"source": filepath} for _ in chunks]
         )
+        self.fts.replace_source(filepath, zip(ids, chunks))
         return f"Indexed {len(chunks)} chunks from {filepath}"
 
     def index_folder(self, folder: str, chunk_size: int = None,
@@ -225,9 +397,13 @@ class RAGTool:
                 continue
             try:
                 self.collection.delete(where={"source": path})
-                removed.append(path)
             except Exception:
                 pass
+            try:
+                self.fts.delete_source(path)
+            except Exception:
+                pass
+            removed.append(path)
             state.pop(path, None)
 
         _save_state(state)
@@ -258,25 +434,82 @@ class RAGTool:
     # SEARCH
     # ----------------------------------------------------------
     def search(self, query: str, top_k: int = 8) -> str:
-        """Find the most relevant chunks for a question."""
-        if self.collection.count() == 0:
-            return "No documents indexed yet."
+        """Find relevant chunks using semantic + keyword search, fused by RRF."""
+        top_k = max(1, int(top_k))
+        candidate_k = top_k * 2
+        semantic = self._semantic_results(query, candidate_k)
+        keyword = self._keyword_results(query, candidate_k)
 
-        query_embedding = self.model.encode([query], show_progress_bar=False).tolist()
-        results = self.collection.query(
-            query_embeddings=query_embedding,
-            n_results=top_k
-        )
-
-        if not results["documents"] or not results["documents"][0]:
+        if not semantic and not keyword:
+            text_count = 0
+            fts_count = 0
+            try:
+                text_count = self.collection.count()
+            except Exception:
+                pass
+            if self.fts is not None:
+                try:
+                    fts_count = self.fts.count()
+                except Exception:
+                    pass
+            if text_count == 0 and fts_count == 0:
+                return "No documents indexed yet."
             return "No relevant information found."
 
+        documents = {}
+        for hit in semantic + keyword:
+            documents.setdefault(hit["id"], hit)
+
+        scores = rrf_scores([
+            [hit["id"] for hit in semantic],
+            [hit["id"] for hit in keyword],
+        ])
+        ordered = sorted(
+            scores, key=lambda chunk_id: (-scores[chunk_id], chunk_id))
+
         output_parts = []
-        for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+        for chunk_id in ordered[:top_k]:
+            hit = documents[chunk_id]
             output_parts.append(
-                f"[From: {meta.get('source', 'unknown')}]\n{doc}"
-            )
+                f"[From: {hit.get('source', 'unknown')}]\n{hit['text']}")
         return "\n\n---\n\n".join(output_parts)
+
+    def _semantic_results(self, query: str, limit: int):
+        if not query or not query.strip():
+            return []
+        try:
+            if self.collection.count() == 0:
+                return []
+        except Exception:
+            return []
+        query_embedding = self.model.encode(
+            [query], show_progress_bar=False).tolist()
+        results = self.collection.query(
+            query_embeddings=query_embedding,
+            n_results=limit,
+        )
+        ids = (results.get("ids") or [[]])[0] or []
+        documents = (results.get("documents") or [[]])[0] or []
+        metadatas = (results.get("metadatas") or [[]])[0] or []
+        hits = []
+        for chunk_id, text, meta in zip(ids, documents, metadatas):
+            if not text:
+                continue
+            hits.append({
+                "id": chunk_id,
+                "source": (meta or {}).get("source", "unknown"),
+                "text": text,
+            })
+        return hits
+
+    def _keyword_results(self, query: str, limit: int):
+        if self.fts is None or not query or not query.strip():
+            return []
+        try:
+            return self.fts.search(query, limit=limit)
+        except Exception as e:
+            print(f"[rag] keyword search failed: {e}")
+            return []
 
     # ----------------------------------------------------------
     # HELPERS
