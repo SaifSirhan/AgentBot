@@ -33,6 +33,37 @@ except ImportError as e:
 
 
 # =============================================================
+# Error reporting (the GUI runs under pythonw, so prints vanish)
+# =============================================================
+_error_callback = None
+_last_error = ""
+_audio_error_reported = False
+
+
+def set_error_callback(callback):
+    """Register a callable that receives speech-failure messages."""
+    global _error_callback
+    _error_callback = callback
+
+
+def last_error():
+    return _last_error
+
+
+def _report_error(message):
+    global _last_error
+    _last_error = str(message or "")
+    print(f"[tts] {_last_error}")
+    callback = _error_callback
+    if callback is None:
+        return
+    try:
+        callback(_last_error)
+    except Exception:
+        pass
+
+
+# =============================================================
 # DEFAULTS (config.json overrides these)
 # =============================================================
 VOICE = "af_heart"   # af_heart, af_bella, am_michael, bf_emma, bm_george
@@ -155,6 +186,100 @@ def _load_tts_config():
     return voice, speed, lang, enabled
 
 
+def _load_backend_status():
+    """Return (usable, message) for TTS_BACKEND.
+
+    Only the local Kokoro engine is implemented; "none"/"off" is the explicit
+    opt-out. Anything else is a config error worth surfacing.
+    """
+    try:
+        import config
+        cfg = config.load_config()
+    except Exception:
+        return True, ""
+    backend = str(cfg.get("TTS_BACKEND", "kokoro") or "").strip().lower()
+    if not backend or backend == "kokoro":
+        return True, ""
+    if backend in ("none", "off", "disabled"):
+        return False, ""  # explicit opt-out: stay silent
+    return False, (
+        f"unknown TTS_BACKEND '{backend}' \u2014 expected 'kokoro' or 'none'")
+
+
+def _load_max_chars():
+    try:
+        import config
+        cfg = config.load_config()
+        return max(80, int(str(cfg.get("TTS_MAX_CHARS", "2000")).strip()))
+    except Exception:
+        return 2000
+
+
+# =============================================================
+# Kokoro weights: use the local HuggingFace cache when it is complete
+# =============================================================
+_KOKORO_REPO_DIR = "models--hexgrad--Kokoro-82M"
+
+
+def _kokoro_cache_ready():
+    """True when the HF cache holds the config, weights and voice files."""
+    import glob
+    roots = []
+    hub_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if hub_cache:
+        roots.append(hub_cache)
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        roots.append(os.path.join(hf_home, "hub"))
+    roots.append(os.path.join(
+        os.path.expanduser("~"), ".cache", "huggingface", "hub"))
+
+    for root in roots:
+        model_dir = os.path.join(root, _KOKORO_REPO_DIR)
+        if not os.path.isdir(model_dir):
+            continue
+        pattern = os.path.join(model_dir, "snapshots", "*", "config.json")
+        if not glob.glob(pattern):
+            continue
+        if not glob.glob(os.path.join(
+                model_dir, "snapshots", "*", "kokoro-v1_0.pth")):
+            continue
+        if not glob.glob(os.path.join(
+                model_dir, "snapshots", "*", "voices", "*.pt")):
+            continue
+        return True
+    return False
+
+
+def _force_cached_downloads():
+    """Pin kokoro's HF calls to the local cache (no network round-trips).
+
+    kokoro imports hf_hub_download into both model.py and pipeline.py, so
+    patch those module references rather than the global huggingface_hub
+    helper. Other app components keep their normal network behaviour.
+    """
+    import kokoro.model as kokoro_model
+    import kokoro.pipeline as kokoro_pipeline
+
+    for module in (kokoro_model, kokoro_pipeline):
+        original = getattr(module, "hf_hub_download", None)
+        if original is None or getattr(original, "_agentbot_cache_only", False):
+            continue
+
+        def cached(*args, __original=original, **kwargs):
+            # Cache first (no network, immune to hub hiccups), then fall back
+            # to a normal download when the file genuinely is not cached yet.
+            kwargs["local_files_only"] = True
+            try:
+                return __original(*args, **kwargs)
+            except Exception:
+                kwargs.pop("local_files_only", None)
+                return __original(*args, **kwargs)
+
+        cached._agentbot_cache_only = True
+        module.hf_hub_download = cached
+
+
 # =============================================================
 # Pipeline cache
 # =============================================================
@@ -163,12 +288,14 @@ _pipeline_lock = threading.Lock()
 
 
 def _get_pipeline(lang_code):
-    if lang_code in _pipelines:
-        return _pipelines[lang_code]
+    cached_pipeline = _pipelines.get(lang_code)
+    if cached_pipeline is not None:
+        return cached_pipeline
 
     with _pipeline_lock:
-        if lang_code in _pipelines:
-            return _pipelines[lang_code]
+        cached_pipeline = _pipelines.get(lang_code)
+        if cached_pipeline is not None:
+            return cached_pipeline
         try:
             from kokoro import KPipeline
             device = "cpu"
@@ -178,13 +305,32 @@ def _get_pipeline(lang_code):
                     device = "cuda"
             except Exception:
                 pass
-            print(f"[tts] loading pipeline (lang={lang_code}, device={device})")
-            _pipelines[lang_code] = KPipeline(lang_code=lang_code, device=device)
+            offline = _kokoro_cache_ready()
+            if offline:
+                _force_cached_downloads()
+                print(
+                    f"[tts] loading pipeline from local cache "
+                    f"(lang={lang_code}, device={device})")
+            else:
+                print(f"[tts] loading pipeline (lang={lang_code}, device={device})")
+            pipeline = KPipeline(lang_code=lang_code, device=device)
+            # Prime the configured voice while the cache-only patch is active.
+            try:
+                voice = _load_tts_config()[0]
+                load_voice = getattr(pipeline, "load_voice", None)
+                if voice and load_voice is not None:
+                    load_voice(voice)
+            except Exception as e:
+                print(f"[tts] voice preload failed: {e}")
+            _pipelines[lang_code] = pipeline
             print("[tts] pipeline loaded")
+            return pipeline
         except Exception as e:
-            print(f"[tts] could not create Kokoro pipeline: {e}")
-            _pipelines[lang_code] = None
-        return _pipelines[lang_code]
+            # Never cache a failure: one transient network or ONNX error must
+            # not mute speech for the rest of the session.
+            _pipelines.pop(lang_code, None)
+            _report_error(f"Kokoro pipeline failed to load: {e}")
+            return None
 
 
 # =============================================================
@@ -207,7 +353,7 @@ def _worker_loop():
         try:
             _speak_blocking(text)
         except Exception as e:
-            print(f"[tts] speak failed: {e}")
+            _report_error(f"speech failed: {e}")
             import traceback
             traceback.print_exc()
         _speech_queue.task_done()
@@ -215,6 +361,12 @@ def _worker_loop():
 
 def _speak_blocking(text):
     """Stream audio: play each chunk as it's generated."""
+    usable, backend_error = _load_backend_status()
+    if not usable:
+        if backend_error:
+            _report_error(backend_error)
+        return
+
     voice, speed, lang, enabled = _load_tts_config()
     if not enabled:
         print("[tts] disabled in settings")
@@ -225,14 +377,14 @@ def _speak_blocking(text):
         print("[tts] nothing to speak after cleanup")
         return
 
-    if len(cleaned) > 2000:
-        cleaned = cleaned[:2000] + "..."
+    max_chars = _load_max_chars()
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars] + "..."
 
     print(f"[tts] generating ({len(cleaned)} chars, voice={voice}, speed={speed})")
 
     pipeline = _get_pipeline(lang)
     if pipeline is None:
-        print("[tts] pipeline unavailable")
         return
 
     # Open the audio stream once, keep it for the whole reply
@@ -246,7 +398,7 @@ def _speak_blocking(text):
         )
         stream.start()
     except Exception as e:
-        print(f"[tts] could not open audio stream: {e}")
+        _report_error(f"could not open audio output: {e}")
         return
 
     chunk_count = 0
@@ -291,19 +443,33 @@ def _ensure_worker():
 # Public API
 # =============================================================
 def speak(text):
-    """Queue text for speech. Returns immediately."""
+    """Queue text for speech. Returns True when the text was queued."""
+    global _audio_error_reported, _last_error
+    _last_error = ""
     if not text or not text.strip():
-        return
+        return False
+
+    usable, backend_error = _load_backend_status()
+    if not usable:
+        if backend_error:
+            _report_error(backend_error)
+        return False
+
     if not AUDIO_OK:
-        print("[tts] audio backend unavailable")
-        return
+        if not _audio_error_reported:
+            _audio_error_reported = True
+            _report_error(
+                "audio output unavailable \u2014 install kokoro, soundfile "
+                "and sounddevice")
+        return False
 
     cleaned = _clean_for_speech(text)
     if not cleaned:
-        return
+        return False
 
     _ensure_worker()
     _speech_queue.put(cleaned)
+    return True
 
 
 def stop():
@@ -324,6 +490,11 @@ def warmup():
     """Preload the pipeline in the background so the first reply is instant."""
     def _load():
         try:
+            usable, backend_error = _load_backend_status()
+            if not usable:
+                if backend_error:
+                    _report_error(backend_error)
+                return
             voice, speed, lang, enabled = _load_tts_config()
             if not enabled:
                 print("[tts] disabled — skipping warmup")
@@ -331,7 +502,7 @@ def warmup():
             print("[tts] warming up...")
             _get_pipeline(lang)
         except Exception as e:
-            print(f"[tts] warmup failed: {e}")
+            _report_error(f"warmup failed: {e}")
 
     threading.Thread(target=_load, daemon=True, name="TTS-Warmup").start()
 

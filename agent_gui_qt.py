@@ -81,6 +81,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpacerItem,
     QSplitter,
     QTabWidget,
     QTextEdit,
@@ -690,6 +691,9 @@ def activity_summary(step_log):
 # ----------------------------------------------------------------------
 HELP_TEXT = (
     "Slash commands — bypass the AI and go straight to the tool:\n\n"
+    "Voice:\n\n"
+    "F9                 → hold to talk, release to transcribe\n"
+    "                     (or say \"Hey Jarvis\" for a hands-free take)\n\n"
     "Interface:\n\n"
     "/settings          → open the settings overlay\n"
     "/tasks             → scheduled tasks\n"
@@ -1306,10 +1310,20 @@ class MessageBase(ShrinkableWidget):
         row.addWidget(self._column, 0)
         row.addStretch(1)
 
+    def minimumSizeHint(self):
+        # QWidgetItem promotes minimumSizeHint into the layout's size hint.
+        # The wrapped-label minimum is computed before the column gets its real
+        # width, which would leave a blank tail in the scroll area.
+        return QSize(0, self.sizeHint().height())
+
     def resizeEvent(self, event):
         # The two stretches above starve the column, so drive its width here.
         self._column.setFixedWidth(self.width())
         super().resizeEvent(event)
+        # Word-wrapped labels change height with width; without this the parent
+        # layout keeps the pre-resize height and the scroll area grows a blank
+        # tail below the last message.
+        self.updateGeometry()
 
     def _prose(self, text: str, speaker: str | None = None) -> QLabel:
         lbl = QLabel()
@@ -1651,6 +1665,7 @@ class ChatView(QScrollArea):
     """
 
     BOTTOM_EPSILON = 5
+    MESSAGE_GAP = 12
 
     def __init__(self):
         super().__init__()
@@ -1665,7 +1680,11 @@ class ChatView(QScrollArea):
         self._body = QWidget()
         self._body.setObjectName("chatContent")
         self._layout = zero_layout(QVBoxLayout(self._body))
+        # The trailing stretch absorbs spare viewport height so no message is
+        # stretched. It never adds scroll range: when content is short the body
+        # equals the viewport, and when content overflows the stretch is 0px.
         self._layout.addStretch(1)
+        self._gap_items = {}
         self.chat_log = []  # (kind, text) record for Copy all / Export
 
         self.setWidget(self._body)
@@ -1700,8 +1719,17 @@ class ChatView(QScrollArea):
     # -- messages -------------------------------------------------------
     def add_message(self, widget: QWidget, fade: bool = True):
         was_pinned = self._pinned
-        # Insert before the trailing stretch so messages stay top-aligned.
-        self._layout.insertWidget(self._layout.count() - 1, widget)
+        # One consistent 12px block gap, never a trailing gap.
+        has_messages = self._layout.count() > 1
+        if has_messages:
+            gap = QSpacerItem(
+                0, self.MESSAGE_GAP,
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+            self._layout.insertSpacerItem(
+                self._layout.count() - 1, gap)
+            self._gap_items[id(widget)] = gap
+        self._layout.insertWidget(
+            self._layout.count() - 1, widget)
 
         # Record for Copy all / Export chat (Phase 5d), mirroring the old GUI's
         # bubble_log. kind is "user" or "agent".
@@ -1730,6 +1758,9 @@ class ChatView(QScrollArea):
         """Drop a transient widget (e.g. the [SYSTEM] Thinking… line)."""
         if widget is None:
             return
+        gap = self._gap_items.pop(id(widget), None)
+        if gap is not None:
+            self._layout.removeItem(gap)
         self._layout.removeWidget(widget)
         widget.setParent(None)
         widget.deleteLater()
@@ -1742,6 +1773,7 @@ class ChatView(QScrollArea):
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
+        self._gap_items.clear()
         self.chat_log.clear()
 
 
@@ -2262,6 +2294,7 @@ class AgentWindow(QMainWindow):
     _gui_visibility_request = Signal(bool, object)  # (show, completion event)
     _wake_word_detected = Signal(float)   # wake word score (from mic thread)
     _wake_word_error = Signal(str)        # listener startup/runtime error
+    _tts_error = Signal(str)              # speech engine error (TTS thread)
     _spontaneous_message = Signal(str)    # proactive observation (worker thread)
     _spontaneous_finished = Signal()      # worker done; clear the busy flag
 
@@ -2312,6 +2345,8 @@ class AgentWindow(QMainWindow):
         # Option 3 — wake-word listener (started in start_services).
         self._wake_word_service = None
         self._wake_word_error_shown = False
+        self._wake_triggered = False
+        self._tts_error_shown = False
         # Option A — proactive thoughts (opt-in QTimer, started on show).
         self._spontaneous_timer = None
         self._spontaneous_busy = False
@@ -2330,6 +2365,7 @@ class AgentWindow(QMainWindow):
         self._gui_visibility_request.connect(self._apply_gui_visibility)
         self._wake_word_detected.connect(self._on_wake_word)
         self._wake_word_error.connect(self._on_wake_word_error)
+        self._tts_error.connect(self._on_tts_error)
         self._spontaneous_message.connect(self._on_spontaneous_message)
         self._spontaneous_finished.connect(self._on_spontaneous_finished)
 
@@ -3112,9 +3148,21 @@ class AgentWindow(QMainWindow):
         if not auto_speak:
             return
         try:
-            get_voice_output().speak(message)
+            queued = get_voice_output().speak(message)
+            if not queued:
+                error = get_voice_output().last_error()
+                if error:
+                    self._on_tts_error(error)
         except Exception as e:
-            print(f"[tts] speak failed: {e}")
+            self._on_tts_error(f"speak failed: {e}")
+
+    def _on_tts_error(self, message):
+        """Show the first speech failure as a dim system line."""
+        print(f"[tts] {message}")
+        if self._tts_error_shown:
+            return
+        self._tts_error_shown = True
+        self.chat.add_message(SystemMessage(f"Voice unavailable: {message}"))
 
     # ------------------------------------------------------------------
     # Slash commands — faithful port of agent_gui._handle_slash_command
@@ -4384,11 +4432,29 @@ class AgentWindow(QMainWindow):
             self.chat.add_message(AssistantMessage(f"Wake word disabled: {e}"))
 
     def _on_wake_word(self, score):
-        """GUI-thread slot: reuse the F9 start-recording path."""
+        """GUI-thread slot: press F9, then auto-release after a listen window."""
         if self._processing or self._recording:
             self._resume_wake_word()
             return
+        try:
+            record_ms = int(str(
+                read_config_file_raw().get("WAKE_RECORD_MS", 6000)).strip())
+        except (TypeError, ValueError):
+            record_ms = 6000
+        record_ms = max(1000, min(30000, record_ms))
+        self.chat.add_message(SystemMessage(
+            f"Wake word detected ({float(score):.2f}) \u2014 "
+            f"listening {record_ms // 1000}s"))
+        self._wake_triggered = True
         self._hotkey_press()
+        # The wake path has no physical key release, so stop it ourselves.
+        QTimer.singleShot(record_ms, self._wake_word_auto_stop)
+
+    def _wake_word_auto_stop(self):
+        if not self._wake_triggered:
+            return
+        self._wake_triggered = False
+        self._hotkey_release()
 
     def _on_wake_word_error(self, message):
         print(f"[wake] {message}")
@@ -4555,7 +4621,9 @@ class AgentWindow(QMainWindow):
         # own daemon thread and returns immediately, so this never blocks the
         # window; failures are logged, not fatal.
         try:
-            get_voice_output().warmup()
+            voice = get_voice_output()
+            voice.set_error_callback(self._tts_error.emit)
+            voice.warmup()
             print("[tts] warmup requested")
         except Exception as e:
             print(f"[tts] warmup skipped: {e}")
@@ -4806,6 +4874,7 @@ class AgentWindow(QMainWindow):
         if pressed:
             self._start_recording()
         else:
+            self._wake_triggered = False
             self._stop_recording()
 
     def _start_recording(self):

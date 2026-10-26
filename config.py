@@ -47,12 +47,14 @@ DEFAULTS = {
     "OLLAMA_MODEL": "granite4.1:3b",
     "OLLAMA_URL": "http://localhost:11434/api/generate",
     
+    # TTS backend: "kokoro" (local). "none" disables speech output.
+    "TTS_BACKEND": "kokoro",
     "TTS_ENABLED": "true",
-"TTS_AUTO_SPEAK": "true",
-"TTS_VOICE": "af_heart",
-"TTS_SPEED": "1.0",
-"TTS_LANG": "a",
-"TTS_MAX_CHARS": "2000",
+    "TTS_AUTO_SPEAK": "true",
+    "TTS_VOICE": "af_heart",
+    "TTS_SPEED": "1.0",
+    "TTS_LANG": "a",
+    "TTS_MAX_CHARS": "2000",
 # Section 4 — restricted browser agent. Disabled until both the flag and at
 # least one HTTPS origin allowlist entry are set. Vision sends screenshots to
 # an external model, so it stays off until explicitly enabled.
@@ -67,11 +69,13 @@ DEFAULTS = {
 # Option 3 — wake word. Off by default; enable only after installing
 # openwakeword/pyaudio and providing a custom "agent" model (none is
 # pre-trained) or choosing a pretrained fallback such as hey_jarvis.
-"WAKE_WORD_ENABLED": True,
-"WAKE_WORD_MODEL": "hey_jarvis",
-"WAKE_WORD_THRESHOLD": 0.5,
-"WAKE_WORD_DEVICE": "",
-"WAKE_WORD_COOLDOWN": 1.5,
+    "WAKE_WORD_ENABLED": True,
+    "WAKE_WORD_MODEL": "hey_jarvis",
+    "WAKE_WORD_THRESHOLD": 0.5,
+    "WAKE_WORD_DEVICE": "",
+    "WAKE_WORD_COOLDOWN": 1.5,
+    # How long a wake-word trigger records before auto-releasing F9.
+    "WAKE_RECORD_MS": 6000,
 # Option A — proactive thoughts. Off by default: when enabled, a screenshot
 # is sent to the vision model every two hours.
 "SPONTANEOUS_THOUGHTS_ENABLED": False,

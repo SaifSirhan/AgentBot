@@ -31,6 +31,7 @@ CHANNELS = 1
 CHUNK_SAMPLES = 1_280
 DEFAULT_THRESHOLD = 0.5
 DEFAULT_COOLDOWN = 1.5
+MAX_READ_FAILURES = 5
 
 CUSTOM_MODEL_NAME = "agent"
 MODEL_DIRS = (
@@ -304,6 +305,7 @@ class WakeWordService:
             self._model = _build_model(
                 model_cls, self._model_path, self._framework)
             self._audio = pyaudio_module.PyAudio()
+            read_failures = 0
 
             while not self._stop.is_set():
                 if self._paused:
@@ -324,10 +326,21 @@ class WakeWordService:
                 try:
                     data = stream.read(
                         CHUNK_SAMPLES, exception_on_overflow=False)
-                except Exception:
+                except Exception as exc:
                     if self._stop.is_set() or self.is_paused():
                         continue
-                    raise
+                    # A USB mic can reset or hiccup; rebuild the stream a few
+                    # times instead of ending the listener for the session.
+                    read_failures += 1
+                    print(
+                        f"[wake] mic read failed "
+                        f"({read_failures}/{MAX_READ_FAILURES}): {exc}")
+                    self._close_stream()
+                    if read_failures >= MAX_READ_FAILURES:
+                        raise
+                    self._stop.wait(0.2 * read_failures)
+                    continue
+                read_failures = 0
 
                 frame = np.frombuffer(data, dtype=np.int16)
                 if frame.size == 0:

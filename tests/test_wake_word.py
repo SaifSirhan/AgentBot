@@ -37,6 +37,21 @@ class FakeStream:
         self.closed = True
 
 
+class FlakyStream(FakeStream):
+    """Fails the first read, then behaves like a healthy microphone."""
+
+    def __init__(self):
+        super().__init__()
+        self.reads = 0
+
+    def read(self, frames, exception_on_overflow=False):
+        self.reads += 1
+        if self.reads == 1:
+            raise OSError("device reset")
+        time.sleep(0.005)
+        return b"\x00\x00" * frames
+
+
 class FakeAudio:
     def __init__(self):
         self.streams = []
@@ -195,6 +210,34 @@ class WakeWordTests(unittest.TestCase):
             self.assertTrue(self.wait_for(lambda: bool(errors)))
             self.assertIn("callback boom", errors[0])
             self.assertFalse(service.is_paused())
+        finally:
+            service.stop()
+
+    def test_transient_mic_read_error_keeps_listening(self):
+        detected = threading.Event()
+        errors = []
+        flaky = FlakyStream()
+        first = {"done": False}
+        real_open = self.audio.open
+
+        def open_flaky_once(**kwargs):
+            if not first["done"]:
+                first["done"] = True
+                self.audio.streams.append(flaky)
+                self.audio.open_kwargs.append(kwargs)
+                return flaky
+            return real_open(**kwargs)
+
+        self.audio.open = open_flaky_once
+        service = self.make_service(lambda score: detected.set(), on_error=errors.append)
+        self.score["value"] = 0.9
+        service.start()
+        try:
+            self.assertTrue(
+                detected.wait(3.0),
+                "listener stopped after a transient mic read error")
+            self.assertTrue(flaky.closed)
+            self.assertEqual(errors, [])
         finally:
             service.stop()
 

@@ -88,7 +88,7 @@ w._on_browser_approval_request({
     "url": "https://example.com/", "timeout": 5, "future": live_future,
 })
 app.processEvents()
-assert w.chat._layout.count() == before + 1
+assert w.chat._layout.count() > before
 cards = [
     w.chat._layout.itemAt(i).widget()
     for i in range(w.chat._layout.count())
