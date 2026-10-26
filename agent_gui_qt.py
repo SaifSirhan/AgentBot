@@ -185,6 +185,9 @@ INPUT_MAX_LINES = 6   # auto-grow ceiling (~150px)
 
 SCHEDULED_QUEUE_CAP = 5   # pending scheduled triggers before oldest is dropped
 
+# Continuous listening: a silent room gives the mic back after this long.
+CONTINUOUS_IDLE_SECONDS = 60.0
+
 # ----------------------------------------------------------------------
 # SVG icon set (Phase 5d)
 # ----------------------------------------------------------------------
@@ -691,7 +694,8 @@ HELP_TEXT = (
     "Slash commands — bypass the AI and go straight to the tool:\n\n"
     "Voice:\n\n"
     "F9                 → hold to talk, release to transcribe\n"
-    "                     (or say \"Hey Jarvis\" for a hands-free take)\n\n"
+    "                     (or say \"Hey Jarvis\" for a hands-free take)\n"
+    "/continuous on|off → hands-free loop; 60s silence re-arms wake word\n\n"
     "Interface:\n\n"
     "/settings          → open the settings overlay\n"
     "/tasks             → scheduled tasks\n"
@@ -774,6 +778,7 @@ SLASH_COMMANDS = (
     "/index",
     "/index-docs",
     "/tg-clear",
+    "/continuous",
     "/rag",
     "/find",
     "/move",
@@ -2547,6 +2552,13 @@ class AgentWindow(QMainWindow):
         self._wake_word_service = None
         self._wake_word_error_shown = False
         self._wake_triggered = False
+        self._wake_record_ms = 3500
+        self._wake_ack_started = 0.0
+        # Continuous listening (opt-in config, toggled by /continuous).
+        self._continuous_enabled = self._read_continuous_flag()
+        self._continuous_paused = False
+        self._continuous_listening = False
+        self._continuous_timer = None
         self._tts_error_shown = False
         # Option A — proactive thoughts (opt-in QTimer, started on show).
         self._spontaneous_timer = None
@@ -3266,11 +3278,19 @@ class AgentWindow(QMainWindow):
         if not text and not attached:
             return
 
+        # A new command cuts the assistant off mid-sentence and stops the
+        # hands-free mic; the reply will re-arm it when the turn finishes.
+        self._interrupt_speech()
+        self._cancel_continuous_listening(resume_wake=False)
+
         # Slash commands bypass attachments (match agent_gui.send).
         if text.startswith("/") and not attached:
             self._clear_input()
             self._handle_slash_command(text)
             return
+
+        if self._continuous_enabled:
+            self._continuous_paused = False
 
         self._clear_input()
         self.attachments.clear()
@@ -3284,6 +3304,13 @@ class AgentWindow(QMainWindow):
             display = text
         self.chat.add_message(UserMessage(display))
         self._start_agent_turn(text, attached)
+
+    def _interrupt_speech(self):
+        """Cut off TTS immediately; a missing backend is not fatal."""
+        try:
+            get_voice_output().stop()
+        except Exception as e:
+            print(f"[tts] stop failed: {e}")
 
     def _start_agent_turn(self, text, attached_paths=None):
         """Kick off a background agent turn for `text`."""
@@ -3334,11 +3361,13 @@ class AgentWindow(QMainWindow):
         self.panel.set_activity(step_log)
         self._speak_reply(message)
         self._end_turn()
+        self._schedule_continuous_listen()
 
     def _on_turn_failed(self, error_text):
         self._clear_thinking_message()
         self.chat.add_message(AssistantMessage(error_text))
         self._end_turn()
+        self._schedule_continuous_listen()
 
     def _speak_reply(self, message):
         """Speak a reply if TTS_AUTO_SPEAK is on. Matches agent_gui.handle_result.
@@ -3413,6 +3442,10 @@ class AgentWindow(QMainWindow):
         # the brain is unavailable.
         if cmd == "/theme":
             self._cmd_theme(args)
+            return True
+
+        if cmd == "/continuous":
+            self._cmd_continuous(args)
             return True
 
         ui_commands = {
@@ -4641,23 +4674,58 @@ class AgentWindow(QMainWindow):
             self.chat.add_message(AssistantMessage(f"Wake word disabled: {e}"))
 
     def _on_wake_word(self, score):
-        """GUI-thread slot: press F9, then auto-release after a listen window."""
+        """GUI-thread slot: acknowledge, open the mic, auto-stop after a window."""
         if self._processing or self._recording:
             self._resume_wake_word()
             return
         try:
             record_ms = int(str(
-                read_config_file_raw().get("WAKE_RECORD_MS", 6000)).strip())
+                read_config_file_raw().get("WAKE_RECORD_MS", 3500)).strip())
         except (TypeError, ValueError):
-            record_ms = 6000
+            record_ms = 3500
         record_ms = max(1000, min(30000, record_ms))
+        self._wake_record_ms = record_ms
         self.chat.add_message(SystemMessage(
             f"Wake word detected ({float(score):.2f}) \u2014 "
-            f"listening {record_ms // 1000}s"))
+            f"listening {record_ms / 1000:g}s"))
         self._wake_triggered = True
+        self._continuous_paused = False
+        # "Yeah?" first, then the mic. Opening it immediately records the ack.
+        if self._speak_wake_ack():
+            self._wake_ack_started = time.monotonic()
+            QTimer.singleShot(100, self._open_mic_after_ack)
+        else:
+            self._open_mic_for_wake()
+
+    def _speak_wake_ack(self) -> bool:
+        """Queue a short spoken acknowledgement. False when TTS is silent."""
+        try:
+            voice = get_voice_output()
+            voice.stop()  # the acknowledgement starts immediately
+            return bool(voice.speak("Yeah?"))
+        except Exception as e:
+            print(f"[tts] wake acknowledgement skipped: {e}")
+            return False
+
+    def _open_mic_after_ack(self):
+        """Wait for the acknowledgement to finish, then start listening."""
+        if not self._wake_triggered:
+            return
+        try:
+            speaking = bool(get_voice_output().is_speaking())
+        except Exception:
+            speaking = False
+        if speaking and time.monotonic() - self._wake_ack_started < 3.0:
+            QTimer.singleShot(100, self._open_mic_after_ack)
+            return
+        self._open_mic_for_wake()
+
+    def _open_mic_for_wake(self):
+        if not self._wake_triggered:
+            return
         self._hotkey_press()
         # The wake path has no physical key release, so stop it ourselves.
-        QTimer.singleShot(record_ms, self._wake_word_auto_stop)
+        QTimer.singleShot(self._wake_record_ms, self._wake_word_auto_stop)
 
     def _wake_word_auto_stop(self):
         if not self._wake_triggered:
@@ -4688,6 +4756,92 @@ class AgentWindow(QMainWindow):
                 service.resume()
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Continuous listening (/continuous on|off)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _read_continuous_flag() -> bool:
+        try:
+            val = read_config_file_raw().get("CONTINUOUS_LISTENING", False)
+        except Exception:
+            val = False
+        if isinstance(val, bool):
+            return val
+        return str(val).strip().lower() in ("true", "1", "yes", "on")
+
+    def _cmd_continuous(self, args):
+        mode = (args or "").strip().lower()
+        if mode not in ("on", "off"):
+            self.chat.add_message(AssistantMessage(
+                "Usage: /continuous on|off\n"
+                "ON keeps the mic open after each reply; 60s of silence "
+                "returns to the wake word."))
+            return
+
+        self._continuous_enabled = mode == "on"
+        self._continuous_paused = False
+        try:
+            write_config_keys(
+                {"CONTINUOUS_LISTENING": self._continuous_enabled})
+        except Exception as e:
+            print(f"[config] continuous save failed: {e}")
+
+        if self._continuous_enabled:
+            self.chat.add_message(SystemMessage(
+                "Continuous listening ON \u2014 speak without the wake word. "
+                "60s of silence returns to the wake word."))
+            self._schedule_continuous_listen()
+        else:
+            self._cancel_continuous_listening()
+            self.chat.add_message(SystemMessage(
+                "Continuous listening OFF \u2014 wake word required."))
+
+    def _start_continuous_if_configured(self):
+        if not self._continuous_enabled:
+            return
+        self.chat.add_message(SystemMessage(
+            "Continuous listening ON \u2014 speak without the wake word. "
+            "60s of silence returns to the wake word."))
+        self._schedule_continuous_listen(1000)
+
+    def _schedule_continuous_listen(self, delay_ms=300):
+        """Re-arm hands-free listening once the turn and its speech are done."""
+        if not self._continuous_enabled or self._continuous_paused:
+            return
+        if self._processing or self._recording:
+            return
+        if self._continuous_timer is None:
+            self._continuous_timer = QTimer(self)
+            self._continuous_timer.setSingleShot(True)
+            self._continuous_timer.timeout.connect(self._try_continuous_listen)
+        self._continuous_timer.start(max(0, int(delay_ms)))
+
+    def _try_continuous_listen(self):
+        if not self._continuous_enabled or self._continuous_paused:
+            return
+        if self._processing or self._recording:
+            return
+        try:
+            if get_voice_output().is_speaking():
+                self._schedule_continuous_listen(300)
+                return
+        except Exception:
+            pass
+        self._start_recording(continuous=True)
+
+    def _cancel_continuous_listening(self, resume_wake=True):
+        if self._continuous_timer is not None:
+            self._continuous_timer.stop()
+        if self._continuous_listening:
+            self._continuous_listening = False
+            self._recording = False
+            try:
+                get_voice().cancel_recording()
+            except Exception:
+                pass
+        if resume_wake:
+            self._resume_wake_word()
 
     # ------------------------------------------------------------------
     # Option A — proactive thoughts
@@ -4845,6 +4999,9 @@ class AgentWindow(QMainWindow):
         # Option 3 — wake word listener. Opt-in via config; missing models or
         # dependencies surface in the transcript, never as a startup crash.
         self._start_wake_word_service()
+
+        # Hands-free loop when CONTINUOUS_LISTENING is on at launch.
+        self._start_continuous_if_configured()
 
         # Option A — proactive thoughts. Off by default (screenshots leave the
         # machine); a missing vision key simply produces no messages.
@@ -5122,16 +5279,26 @@ class AgentWindow(QMainWindow):
             self._wake_triggered = False
             self._stop_recording()
 
-    def _start_recording(self):
+    def _start_recording(self, continuous=False):
         if self._recording or self._processing:
             return
         self._recording = True
+        self._continuous_listening = bool(continuous)
         self._pause_wake_word()
-        self.set_status("Recording… release F9 to transcribe", busy=True)
+        self.set_status(
+            "Listening… (continuous)" if continuous
+            else "Recording… release F9 to transcribe",
+            busy=True)
 
         def work():
             try:
-                get_voice().start_recording()
+                if continuous:
+                    get_voice().start_recording(
+                        on_transcript=lambda text, reason: self._voice_event.emit(
+                            f"continuous:{reason}:{text}"),
+                        idle_timeout=CONTINUOUS_IDLE_SECONDS)
+                else:
+                    get_voice().start_recording()
                 self._voice_event.emit("recording_started")
             except Exception as e:
                 self._voice_event.emit(f"error:Mic error: {e}")
@@ -5142,6 +5309,7 @@ class AgentWindow(QMainWindow):
         if not self._recording:
             return
         self._recording = False
+        self._continuous_listening = False
         self.set_status("Transcribing…", busy=True)
 
         def work():
@@ -5157,24 +5325,56 @@ class AgentWindow(QMainWindow):
         """GUI-thread slot for recording/transcription results."""
         if payload.startswith("error:"):
             self._recording = False
+            self._continuous_listening = False
             self.set_status(payload[len("error:"):], busy=False)
             self._resume_wake_word()
             return
         if payload == "recording_started":
             return
+        if payload.startswith("continuous:"):
+            _, reason, text = payload.split(":", 2)
+            self._recording = False
+            self._continuous_listening = False
+            if reason == "error":
+                self._continuous_paused = True
+                self._resume_wake_word()
+                self.set_status(
+                    "Transcription failed \u2014 say the wake word",
+                    busy=False)
+                self.chat.add_message(SystemMessage(
+                    "Continuous listening paused \u2014 transcription "
+                    "failed; say the wake word to resume."))
+                return
+            if reason == "idle":
+                # Nobody spoke for 60s: hand the mic back to the wake word.
+                self._continuous_paused = True
+                self._resume_wake_word()
+                self.set_status(
+                    "Continuous listening paused \u2014 say the wake word",
+                    busy=False)
+                self.chat.add_message(SystemMessage(
+                    "Continuous listening paused after 60s of silence \u2014 "
+                    "say the wake word to resume."))
+                return
+            self._handle_transcript(text)
+            return
         if payload.startswith("transcript:"):
             self._handle_transcript(payload[len("transcript:"):])
-            self._resume_wake_word()
+            if not self._continuous_enabled:
+                self._resume_wake_word()
 
     def _handle_transcript(self, text):
-        # Voice only fills the prompt; Enter remains the sole submit action.
+        # A finished transcript is a command: send it, don't stage it.
         self._recording = False
-        if text and text.strip():
-            self.input_field.setPlainText(text.strip())
-            self.input_field.setFocus()
-            self.set_status("Transcript ready — press Enter to send", busy=False)
-        else:
+        text = (text or "").strip()
+        if not text:
             self.set_status("No speech detected — try again", busy=False)
+            if self._continuous_enabled and not self._continuous_paused:
+                self._schedule_continuous_listen()
+            return
+        self.input_field.setPlainText(text)
+        self.input_field.setFocus()
+        self.send()
 
     # -- scheduler notifications ----------------------------------------
     def _on_scheduled_trigger(self, request_text):

@@ -74,8 +74,12 @@ DEFAULTS = {
     "WAKE_WORD_THRESHOLD": 0.5,
     "WAKE_WORD_DEVICE": "",
     "WAKE_WORD_COOLDOWN": 1.5,
-    # How long a wake-word trigger records before auto-releasing F9.
-    "WAKE_RECORD_MS": 6000,
+    # How long a wake-word trigger listens before auto-releasing F9.
+    "WAKE_RECORD_MS": 3500,
+    # Hands-free loop: after each reply the mic reopens without the wake
+    # word. 60s of silence pauses it and re-arms the wake word. /continuous
+    # toggles it at runtime.
+    "CONTINUOUS_LISTENING": False,
 # Option A — proactive thoughts. Off by default: when enabled, a screenshot
 # is sent to the vision model every two hours.
 "SPONTANEOUS_THOUGHTS_ENABLED": False,

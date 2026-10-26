@@ -339,6 +339,7 @@ def _get_pipeline(lang_code):
 _speech_queue = queue.Queue()
 _worker_started = False
 _worker_lock = threading.Lock()
+_worker_busy = threading.Event()
 
 
 def _worker_loop():
@@ -350,13 +351,17 @@ def _worker_loop():
             continue
         if text is None:
             break
+        _worker_busy.set()
         try:
             _speak_blocking(text)
         except Exception as e:
             _report_error(f"speech failed: {e}")
             import traceback
             traceback.print_exc()
-        _speech_queue.task_done()
+        finally:
+            _speech_queue.task_done()
+            if _speech_queue.empty():
+                _worker_busy.clear()
 
 
 def _speak_blocking(text):
@@ -484,6 +489,11 @@ def stop():
         sd.stop()
     except Exception:
         pass
+
+
+def is_speaking():
+    """True while speech is queued or playing."""
+    return _worker_busy.is_set() or not _speech_queue.empty()
 
 
 def warmup():

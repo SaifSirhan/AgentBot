@@ -54,6 +54,7 @@ shutil.rmtree(tmp, True)
 calls = []
 w._hotkey_press = lambda event=None: calls.append("press")
 w._hotkey_release = lambda event=None: calls.append("release")
+w._speak_wake_ack = lambda: False  # no real TTS in the smoke
 w._processing = False
 w._recording = False
 with mock.patch.object(
