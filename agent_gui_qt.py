@@ -759,6 +759,50 @@ HELP_TEXT = (
 )
 
 
+# Canonical commands for inline completion. Aliases are included so Tab can
+# cycle through every form the dispatcher accepts.
+SLASH_COMMANDS = (
+    "/help",
+    "/settings",
+    "/tasks",
+    "/theme",
+    "/clear",
+    "/new",
+    "/copy",
+    "/export",
+    "/activity",
+    "/index",
+    "/index-docs",
+    "/tg-clear",
+    "/rag",
+    "/find",
+    "/move",
+    "/mkdir",
+    "/symbols",
+    "/map",
+    "/recipe",
+    "/scan",
+    "/quarantine",
+    "/quarantine-list",
+    "/gif-stats",
+    "/label-gifs",
+    "/eval",
+    "/ig",
+    "/reindex",
+    "/import-chat",
+    "/browse",
+    "/reload-skills",
+    "/send",
+    "/edit",
+    "/del",
+    "/dellast",
+    "/log",
+    "/delete",
+    "/dl",
+    "/?",
+)
+
+
 # ----------------------------------------------------------------------
 # Worker — runs the blocking agent call off the GUI thread
 # ----------------------------------------------------------------------
@@ -1459,6 +1503,25 @@ class SystemMessage(MessageBase):
         self._col_layout.addWidget(label)
 
 
+class HelpMessage(MessageBase):
+    """Plain-text terminal manual: newlines are content, not Markdown."""
+
+    def __init__(self, text: str):
+        super().__init__()
+        self.raw_text = text
+        label = QLabel(text)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setWordWrap(True)
+        label.setMinimumWidth(0)
+        label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setStyleSheet(
+            f'font-family: "{FONT_MONO}"; font-size: 13px;')
+        self._col_layout.addWidget(label)
+
+
 class UntrustedTextMessage(MessageBase):
     """Plain-text block for untrusted external content (Telegram summaries).
 
@@ -1650,6 +1713,145 @@ class BrowserApprovalBridge(QObject):
 # ----------------------------------------------------------------------
 # Chat view with scroll-lock
 # ----------------------------------------------------------------------
+class TerminalInput(QPlainTextEdit):
+    """Prompt editor with inline ghost completion.
+
+    Prefix matches paint the missing suffix after the caret, so Right accepts
+    by appending it. Subsequence ("fuzzy") matches cannot be appended without
+    corrupting the typed query, so they paint the full command as a dim hint
+    and Right replaces the prompt with it. Tab cycles either kind.
+    """
+
+    GHOST_OPACITY = 0.6
+    MAX_FUZZY_MATCHES = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._ghost = ""
+        self._matches = []
+        self._match_index = 0
+        self._replace = False
+        self.textChanged.connect(lambda: self._refresh_ghost(reset=True))
+        self.cursorPositionChanged.connect(
+            lambda: self._refresh_ghost(reset=False))
+        # selectAll() changes the selection without moving the cursor.
+        self.selectionChanged.connect(
+            lambda: self._refresh_ghost(reset=False))
+
+    @staticmethod
+    def _is_subsequence(needle, haystack):
+        chars = iter(haystack)
+        return all(ch in chars for ch in needle)
+
+    def _completions(self, text):
+        query = text.lower()
+        prefix = [
+            command for command in SLASH_COMMANDS
+            if command.lower().startswith(query) and len(command) > len(text)
+        ]
+        fuzzy = [
+            command for command in SLASH_COMMANDS
+            if command not in prefix
+            and command.lower() != query
+            and self._is_subsequence(query, command.lower())
+        ][:self.MAX_FUZZY_MATCHES]
+        return prefix + fuzzy
+
+    def _apply_selection(self, text):
+        command = self._matches[self._match_index]
+        if command.lower().startswith(text.lower()):
+            self._ghost = command[len(text):]
+            self._replace = False
+        else:
+            self._ghost = f"  \u2192 {command}"
+            self._replace = True
+        self.viewport().update()
+
+    def _refresh_ghost(self, reset=False):
+        text = self.toPlainText()
+        cursor = self.textCursor()
+        if reset:
+            self._match_index = 0
+        if (cursor.hasSelection() or "\n" in text or " " in text
+                or not text.startswith("/")
+                or cursor.position() != len(text)):
+            self._set_completion("", [])
+            return
+        matches = self._completions(text)
+        if not matches:
+            self._set_completion("", [])
+            return
+        if matches != self._matches:
+            self._matches = matches
+            self._match_index = min(self._match_index, len(matches) - 1)
+        self._apply_selection(text)
+
+    def _set_completion(self, ghost, matches):
+        changed = ghost != self._ghost
+        self._ghost = ghost
+        self._matches = matches
+        self._replace = False
+        if changed:
+            self.viewport().update()
+
+    def _cycle_completion(self):
+        if not self._ghost or not self._matches:
+            return
+        self._match_index = (self._match_index + 1) % len(self._matches)
+        self._apply_selection(self.toPlainText())
+
+    def _accept_completion(self):
+        if not self._ghost:
+            return
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.setTextCursor(cursor)
+        if self._replace:
+            self.setPlainText(self._matches[self._match_index])
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            self.setTextCursor(cursor)
+        else:
+            self.insertPlainText(self._ghost)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Right and self._ghost:
+            self._accept_completion()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Tab:
+            # Tab is completion-only in this prompt; never insert a literal tab.
+            if self._ghost:
+                self._cycle_completion()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._ghost:
+            return
+        metrics = QFontMetrics(self.font())
+        caret = self.cursorRect()
+        x = caret.left() + max(
+            self.cursorWidth(), metrics.horizontalAdvance(" "))
+        baseline = caret.top() + metrics.ascent()
+        painter = QPainter(self.viewport())
+        painter.setFont(self.font())
+        painter.setPen(QColor(COLOR_TEXT_LOW))
+        painter.setOpacity(self.GHOST_OPACITY)
+        painter.drawText(x, baseline, self._ghost)
+        painter.end()
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self._refresh_ghost()
+
+    def focusOutEvent(self, event):
+        self._set_completion("", [])
+        super().focusOutEvent(event)
+
+
 class ChatView(QScrollArea):
     """
     Scrollable chat column.
@@ -2841,7 +3043,7 @@ class AgentWindow(QMainWindow):
         self.prompt_prefix.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
-        self.input_field = QPlainTextEdit()
+        self.input_field = TerminalInput()
         self.input_field.setObjectName("commandInput")
         # Let file drops bubble to AgentWindow instead of the editor.
         self.input_field.setAcceptDrops(False)
@@ -3202,7 +3404,7 @@ class AgentWindow(QMainWindow):
         args = parts[1].strip() if len(parts) > 1 else ""
 
         if cmd in ("/help", "/?"):
-            self.chat.add_message(AssistantMessage(HELP_TEXT))
+            self.chat.add_message(HelpMessage(HELP_TEXT))
             self.conversation_history.append(f"User: {text}")
             self.conversation_history.append(f"System: {HELP_TEXT}")
             return True
