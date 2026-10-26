@@ -254,6 +254,8 @@ def _visibility_handlers() -> Tuple[Optional[Callable], Optional[Callable]]:
 SCREENSHOT_DIR = (Path(os.environ.get("LOCALAPPDATA") or Path.home())
                   / "AgentMemory" / "screenshots")
 SCREENSHOT_SETTLE_SECONDS = 0.35
+CLICK_SETTLE_SECONDS = 0.5
+FOCUS_SETTLE_SECONDS = 0.2
 MAX_TYPE_CHARS = 5_000
 TYPE_CHUNK = 40
 
@@ -290,6 +292,126 @@ def _parse_xy(input_str: str) -> Tuple[int, int]:
         return int(parts[0]), int(parts[1])
     except ValueError as exc:
         raise ValueError('x and y must be integers (format "x,y")') from exc
+
+
+def _parse_click_input(input_str: str) -> Tuple[int, int, str]:
+    """Parse "x,y" or "x,y | Window title" into coordinates + target title."""
+    parts = (input_str or "").split("|", 1)
+    x, y = _parse_xy(parts[0])
+    title = parts[1].strip() if len(parts) > 1 else ""
+    return x, y, title
+
+
+# ----------------------------------------------------------------------
+# Target-window focus (pygetwindow first, Win32 fallback)
+# ----------------------------------------------------------------------
+_user32_ready = False
+
+
+def _user32():
+    global _user32_ready
+    user32 = ctypes.windll.user32
+    if not _user32_ready:
+        user32.WindowFromPoint.restype = ctypes.c_void_p
+        user32.WindowFromPoint.argtypes = [_POINT]
+        user32.GetAncestor.restype = ctypes.c_void_p
+        user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+        user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        user32.IsIconic.argtypes = [ctypes.c_void_p]
+        user32.GetWindowThreadProcessId.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        _user32_ready = True
+    return user32
+
+
+def _window_process_id(hwnd: int) -> int:
+    try:
+        pid = ctypes.c_ulong()
+        _user32().GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
+    except Exception:
+        return 0
+
+
+def _load_pygetwindow():
+    try:
+        import pygetwindow as gw
+        return gw
+    except Exception:
+        return None
+
+
+def _window_at_point(x: int, y: int) -> Tuple[int, str]:
+    """Top-level window under a screen point, excluding this process."""
+    if os.name != "nt":
+        return 0, ""
+    try:
+        user32 = _user32()
+        hwnd = user32.WindowFromPoint(_POINT(int(x), int(y)))
+        if not hwnd:
+            return 0, ""
+        root = user32.GetAncestor(hwnd, 2) or hwnd  # GA_ROOT
+        if _window_process_id(root) == os.getpid():
+            return 0, ""
+        length = int(user32.GetWindowTextLengthW(root))
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(root, buf, length + 1)
+        return int(root), buf.value
+    except Exception:
+        return 0, ""
+
+
+def _activate_hwnd(hwnd: int) -> bool:
+    if not hwnd or os.name != "nt":
+        return False
+    try:
+        user32 = _user32()
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(FOCUS_SETTLE_SECONDS)
+        return True
+    except Exception:
+        return False
+
+
+def _activate_target_for_click(
+    title: str, x: int, y: int
+) -> Tuple[int, str]:
+    """Bring the app that should receive the click to the foreground.
+
+    A title from the tool call wins (e.g. "YouTube Music"); otherwise the
+    window under the screenshot point is used after AgentBot has hidden.
+    Returns (hwnd, human-readable label).
+    """
+    if title:
+        gw = _load_pygetwindow()
+        if gw is not None:
+            try:
+                matches = gw.getWindowsWithTitle(title)
+            except Exception:
+                matches = []
+            for win in matches:
+                hwnd = int(getattr(win, "_hWnd", 0) or 0)
+                if hwnd and _window_process_id(hwnd) == os.getpid():
+                    continue
+                try:
+                    if win.isMinimized:
+                        win.restore()
+                    win.activate()
+                    time.sleep(FOCUS_SETTLE_SECONDS)
+                except Exception:
+                    pass
+                if hwnd:
+                    _activate_hwnd(hwnd)
+                return hwnd, str(getattr(win, "title", "") or title)
+
+    hwnd, label = _window_at_point(x, y)
+    if hwnd:
+        _activate_hwnd(hwnd)
+        return hwnd, label
+    return 0, ""
 
 
 def _validate_xy(x: int, y: int, monitor: dict) -> None:
@@ -363,20 +485,41 @@ def screenshot_background() -> str:
 
 
 def click_coordinates(input_str: str) -> str:
-    """Left-click at screenshot pixel coordinates. Format: "x,y"."""
+    """Hide AgentBot, focus the target app, click, then restore AgentBot.
+
+    Format: "x,y" or "x,y | Window title" (title optional).
+    """
+    hide_attempted = False
+    target_hwnd = 0
+    target_label = ""
     try:
         _guard()
-        x, y = _parse_xy(input_str)
+        x, y, target_title = _parse_click_input(input_str)
         monitor = _primary_monitor()
         _validate_xy(x, y, monitor)
         absolute_x = monitor["left"] + x
         absolute_y = monitor["top"] + y
 
+        hide, _ = _visibility_handlers()
+        if hide is not None:
+            hide_attempted = True
+            try:
+                hide()
+            except Exception:
+                pass
+            time.sleep(CLICK_SETTLE_SECONDS)
+
+        _guard()
+        target_hwnd, target_label = _activate_target_for_click(
+            target_title, absolute_x, absolute_y)
+
+        _guard()
         pyautogui.moveTo(absolute_x, absolute_y, duration=0.1)
         _guard()
         pyautogui.click()
+        target_note = f" Target: {target_label}." if target_label else ""
         return (f"Clicked ({x}, {y}) — absolute screen "
-                f"({absolute_x}, {absolute_y}).")
+                f"({absolute_x}, {absolute_y}).{target_note}")
     except AutomationAborted as exc:
         return f"ABORTED: {exc}"
     except pyautogui.FailSafeException:
@@ -387,14 +530,36 @@ def click_coordinates(input_str: str) -> str:
         return f"ERROR: {exc}"
     except Exception as exc:
         return f"ERROR: click failed: {exc}"
+    finally:
+        if hide_attempted:
+            _, show = _visibility_handlers()
+            if show is not None:
+                try:
+                    show()
+                except Exception:
+                    pass
+            # Showing AgentBot can activate it even behind the target; put the
+            # clicked app back in front so the next type_text lands there.
+            if target_hwnd:
+                _activate_hwnd(target_hwnd)
 
 
 def type_text(text: str) -> str:
-    """Type text into the focused window (ASCII fast path, clipboard Unicode)."""
+    """Type text into the focused window (ASCII fast path, clipboard Unicode).
+
+    A trailing ``{enter}`` is removed and Enter is pressed after typing.
+    """
     try:
         _guard()
         text = "" if text is None else str(text)
+        press_enter = text.lower().endswith("{enter}")
+        if press_enter:
+            text = text[:-len("{enter}")]
         if not text:
+            if press_enter:
+                _guard()
+                pyautogui.press("enter")
+                return "Pressed Enter."
             return "ERROR: type_text needs text."
         if len(text) > MAX_TYPE_CHARS:
             return (f"ERROR: text is too long ({len(text)} chars; "
@@ -404,7 +569,11 @@ def type_text(text: str) -> str:
             for start in range(0, len(text), TYPE_CHUNK):
                 _guard()
                 pyautogui.write(text[start:start + TYPE_CHUNK], interval=0.01)
-            return f"Typed {len(text)} characters."
+            if press_enter:
+                _guard()
+                pyautogui.press("enter")
+            suffix = " and pressed Enter" if press_enter else ""
+            return f"Typed {len(text)} characters{suffix}."
 
         # Clipboard paste handles Unicode and newlines; restore the clipboard.
         previous = None
@@ -417,13 +586,17 @@ def type_text(text: str) -> str:
             _guard()
             pyautogui.hotkey("ctrl", "v")
             time.sleep(0.15)
+            if press_enter:
+                _guard()
+                pyautogui.press("enter")
         finally:
             if previous is not None:
                 try:
                     pyperclip.copy(previous)
                 except Exception:
                     pass
-        return f"Pasted {len(text)} characters into the focused window."
+        suffix = " and pressed Enter" if press_enter else ""
+        return f"Pasted {len(text)} characters{suffix} into the focused window."
 
     except AutomationAborted as exc:
         return f"ABORTED: {exc}"

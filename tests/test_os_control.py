@@ -73,6 +73,18 @@ class OSControlTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+        self.focus_calls = []
+        self.real_activate_target = oc._activate_target_for_click
+
+        def fake_focus(title, x, y):
+            self.focus_calls.append((title, x, y))
+            return 0, ""
+
+        patcher = mock.patch.object(
+            oc, "_activate_target_for_click", side_effect=fake_focus)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
         oc.set_gui_visibility_handlers(None, None)
         oc.reset_kill_switch()
         with oc._kill_lock:
@@ -102,16 +114,86 @@ class OSControlTests(unittest.TestCase):
         self.assertIn(info["awareness"], (-1, 0, 1, 2))
 
     def test_click_uses_monitor_offset(self):
+        calls = self.mock_gui()
         self.fake_mss.sct.monitors[1] = {
             "left": 100, "top": 50, "width": 100, "height": 50}
-        with mock.patch.object(oc.pyautogui, "moveTo") as move, \
+        with mock.patch.object(oc.time, "sleep") as sleep, \
+             mock.patch.object(oc.pyautogui, "moveTo") as move, \
              mock.patch.object(oc.pyautogui, "click") as click:
             out = oc.click_coordinates("10, 20")
 
         move.assert_called_once_with(110, 70, duration=0.1)
         click.assert_called_once()
+        sleep.assert_called_once_with(oc.CLICK_SETTLE_SECONDS)
+        self.assertEqual(calls, ["hide", "show"])
+        self.assertEqual(self.focus_calls, [("", 110, 70)])
         self.assertIn("Clicked (10, 20)", out)
         self.assertIn("(110, 70)", out)
+
+    def test_click_focuses_named_window_and_restores_it(self):
+        calls = self.mock_gui()
+        with mock.patch.object(
+                oc, "_activate_target_for_click",
+                return_value=(123, "YouTube Music")) as focus, \
+             mock.patch.object(oc, "_activate_hwnd") as activate, \
+             mock.patch.object(oc.time, "sleep"), \
+             mock.patch.object(oc.pyautogui, "moveTo"), \
+             mock.patch.object(oc.pyautogui, "click"):
+            out = oc.click_coordinates("10,20 | YouTube Music")
+
+        focus.assert_called_once_with("YouTube Music", 10, 20)
+        self.assertEqual(calls, ["hide", "show"])
+        activate.assert_called_once_with(123)
+        self.assertIn("Target: YouTube Music", out)
+
+    def test_click_restores_gui_when_click_fails(self):
+        calls = self.mock_gui()
+        with mock.patch.object(oc.time, "sleep"), \
+             mock.patch.object(oc.pyautogui, "moveTo"), \
+             mock.patch.object(oc.pyautogui, "click",
+                               side_effect=RuntimeError("boom")):
+            out = oc.click_coordinates("1,1")
+
+        self.assertTrue(out.startswith("ERROR:"), out)
+        self.assertEqual(calls, ["hide", "show"])
+
+    def test_target_focus_prefers_named_window(self):
+        class FakeWindow:
+            _hWnd = 55
+            isMinimized = False
+            title = "YouTube Music - Mozilla Firefox"
+            activated = False
+
+            def activate(self):
+                self.activated = True
+
+        win = FakeWindow()
+
+        class FakeGW:
+            @staticmethod
+            def getWindowsWithTitle(_title):
+                return [win]
+
+        with mock.patch.object(oc, "_load_pygetwindow", return_value=FakeGW), \
+             mock.patch.object(oc, "_window_process_id", return_value=999), \
+             mock.patch.object(oc, "_activate_hwnd") as activate, \
+             mock.patch.object(oc.time, "sleep"):
+            hwnd, label = self.real_activate_target("YouTube Music", 0, 0)
+
+        self.assertTrue(win.activated)
+        self.assertEqual(hwnd, 55)
+        self.assertIn("YouTube Music", label)
+        activate.assert_called_once_with(55)
+
+    def test_target_focus_falls_back_to_window_under_point(self):
+        with mock.patch.object(
+                oc, "_window_at_point", return_value=(321, "External App")) as at, \
+             mock.patch.object(oc, "_activate_hwnd", return_value=True) as activate:
+            hwnd, label = self.real_activate_target("", 10, 20)
+
+        at.assert_called_once_with(10, 20)
+        activate.assert_called_once_with(321)
+        self.assertEqual((hwnd, label), (321, "External App"))
 
     def test_click_rejects_bad_coordinates(self):
         with mock.patch.object(oc.pyautogui, "moveTo") as move:
@@ -233,6 +315,20 @@ class OSControlTests(unittest.TestCase):
     def test_type_rejects_empty_and_oversized(self):
         self.assertTrue(oc.type_text("").startswith("ERROR:"))
         self.assertTrue(oc.type_text("x" * (oc.MAX_TYPE_CHARS + 1)).startswith("ERROR:"))
+
+    def test_type_enter_suffix_presses_enter(self):
+        with mock.patch.object(oc.pyautogui, "write") as write, \
+             mock.patch.object(oc.pyautogui, "press") as press:
+            out = oc.type_text("hello{enter}")
+        write.assert_called_once_with("hello", interval=0.01)
+        press.assert_called_once_with("enter")
+        self.assertIn("pressed Enter", out)
+
+    def test_type_enter_only(self):
+        with mock.patch.object(oc.pyautogui, "press") as press:
+            out = oc.type_text("{enter}")
+        press.assert_called_once_with("enter")
+        self.assertEqual(out, "Pressed Enter.")
 
     # ------------------------------------------------------------------
     # Kill switch

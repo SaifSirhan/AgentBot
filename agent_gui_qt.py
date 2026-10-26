@@ -20,8 +20,8 @@ Palette values are inlined from gui_widgets.py (the mint accent has been
 shifted greener for this port). That module imports tkinter, so it must NOT
 be imported here — the Qt port stays free of tkinter. agent_gui.py is NOT
 imported either; the logic shared with it (the hallucination guard, the slash
-command dispatch) is replicated below as pure Python. tray.py and scheduler.py
-are plain-Python and safe to import.
+command dispatch) is replicated below as pure Python. scheduler.py is
+plain-Python and safe to import; the tray is native QSystemTrayIcon.
 """
 from __future__ import annotations
 import concurrent.futures
@@ -49,6 +49,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QFont,
     QFontDatabase,
@@ -76,6 +77,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -83,6 +85,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpacerItem,
     QSplitter,
+    QSystemTrayIcon,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -93,11 +96,6 @@ try:
     import keyboard
 except ImportError:
     keyboard = None
-
-try:
-    import tray
-except Exception:
-    tray = None
 
 try:
     import scheduler
@@ -2309,6 +2307,7 @@ class AgentWindow(QMainWindow):
         self._processing = False
         self._settings_overlay = None
         self._tray_icon = None
+        self._tray_menu = None
         self._hotkey_installed = False
         self._recording = False
         self._scheduled_queue = []
@@ -2995,7 +2994,15 @@ class AgentWindow(QMainWindow):
             self._minimized = self.isMinimized()
             if self._minimized:
                 self._stop_pass_a_anims()
+                # Minimise to the tray, not the taskbar.
+                QTimer.singleShot(0, self._hide_minimized_to_tray)
         super().changeEvent(event)
+
+    def _hide_minimized_to_tray(self):
+        tray_icon = self._tray_icon
+        if (self.isMinimized() and self.isVisible()
+                and tray_icon is not None and tray_icon.isVisible()):
+            self.hide_to_tray()
 
     def _stop_pass_a_anims(self):
         """Stop looping card/entry anims (called when minimized)."""
@@ -4580,8 +4587,9 @@ class AgentWindow(QMainWindow):
         the window is shown.
 
         The scheduler and watcher callbacks fire on their own daemon threads,
-        so they route through a Qt signal rather than touching widgets. The
-        tray callbacks likewise arrive off the GUI thread.
+        so they route through a Qt signal rather than touching widgets. Tray
+        actions are native Qt signals and therefore already run on the GUI
+        thread.
         """
         if scheduler is not None:
             try:
@@ -4613,9 +4621,8 @@ class AgentWindow(QMainWindow):
         except Exception as e:
             print(f"[motion] failed to start: {e}")
 
-        # Delay the tray like the old GUI (root.after(800, _start_tray)):
-        # pystray needs the Qt event loop to be up and running first.
-        QTimer.singleShot(800, self._start_tray)
+        # Native Qt tray: no pystray thread and no cross-thread timer hop.
+        self._start_tray()
 
         # Warm up TTS so the first spoken reply is instant. warmup() starts its
         # own daemon thread and returns immediately, so this never blocks the
@@ -4732,40 +4739,73 @@ class AgentWindow(QMainWindow):
         self._telegram_results = None
 
     # -- tray -----------------------------------------------------------
+    def _make_tray_icon(self) -> QIcon:
+        pix = QPixmap(64, 64)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(COLOR_ACCENT))
+        painter.drawEllipse(4, 4, 56, 56)
+        font = QFont("Consolas")
+        font.setPixelSize(34)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor(COLOR_BG)))
+        painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "A")
+        painter.end()
+        return QIcon(pix)
+
     def _start_tray(self):
-        if tray is None:
-            print("[tray] module unavailable; skipped")
+        """Create the native QSystemTrayIcon once, at startup."""
+        if self._tray_icon is not None:
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            print("[tray] system tray unavailable; close will minimise")
             return
         try:
-            self._tray_icon = tray.start_tray(
-                on_show=self._tray_show,
-                on_quit=self._tray_quit,
-            )
-            print(f"[tray] icon = {self._tray_icon}")
+            icon = QSystemTrayIcon(self._make_tray_icon(), self)
+            icon.setToolTip("AgentBot")
+
+            menu = QMenu(self)
+            show_action = QAction("Show", menu)
+            show_action.triggered.connect(self.show_window)
+            quit_action = QAction("Quit", menu)
+            quit_action.triggered.connect(self.quit_app)
+            menu.addAction(show_action)
+            menu.addSeparator()
+            menu.addAction(quit_action)
+
+            icon.setContextMenu(menu)
+            icon.activated.connect(self._on_tray_activated)
+            icon.show()
+            self._tray_icon = icon
+            self._tray_menu = menu
+            print("[tray] QSystemTrayIcon shown")
         except Exception as e:
             print(f"[tray] failed: {e}")
             self._tray_icon = None
+            self._tray_menu = None
 
-    def _tray_show(self):
-        # Runs on the pystray thread — hop back to the GUI thread.
-        if threading.current_thread() is threading.main_thread():
+    def _on_tray_activated(self, reason):
+        if reason in (
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+            QSystemTrayIcon.ActivationReason.Trigger,
+        ):
             self.show_window()
-        else:
-            QTimer.singleShot(0, self.show_window)
-
-    def _tray_quit(self):
-        if threading.current_thread() is threading.main_thread():
-            self.quit_app()
-        else:
-            QTimer.singleShot(0, self.quit_app)
 
     def hide_to_tray(self):
-        """Close button: save history and withdraw (match the old GUI)."""
+        """Close/minimise button: withdraw to the tray (or taskbar fallback)."""
         try:
             get_agent().save_conversation_history(self.conversation_history)
         except Exception:
             pass
-        self.hide()
+        tray_icon = self._tray_icon
+        if tray_icon is not None and tray_icon.isVisible():
+            self.hide()
+        else:
+            # Never strand the window when no tray icon could be created.
+            self.showMinimized()
 
     def show_window(self):
         self.showNormal()
@@ -4815,9 +4855,12 @@ class AgentWindow(QMainWindow):
                 _voice_output_module.stop()
             except Exception:
                 pass
-        if self._tray_icon is not None:
+        tray_icon = self._tray_icon
+        self._tray_icon = None
+        self._tray_menu = None
+        if tray_icon is not None:
             try:
-                self._tray_icon.stop()
+                tray_icon.hide()
             except Exception:
                 pass
         # Option 2 — stop the OS kill-switch watcher and detach the GUI bridge.

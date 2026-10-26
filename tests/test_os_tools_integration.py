@@ -74,6 +74,14 @@ class OSToolRegistryTests(unittest.TestCase):
                      "input": "1,1" if name != "screenshot_background" else ""})
                 self.assertIn("disabled in group chats", out, name)
 
+    def test_prompt_requires_full_os_sequence(self):
+        text = agent.TOOL_DESCRIPTIONS
+        self.assertIn("run the full sequence", text)
+        self.assertIn("step-by-step asks", text)
+        self.assertIn("destructive actions", text)
+        self.assertIn('"x,y | App title"', text)
+        self.assertIn('"{enter}" to submit', text)
+
     def test_prompt_budget(self):
         prompt = agent._build_plan_prompt("hello", "")
         self.assertLess(

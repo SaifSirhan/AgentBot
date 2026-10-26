@@ -4750,12 +4750,14 @@ BROWSER CONTROL
     says completed.
 
 OS CONTROL
-  screenshot_background() — hide the GUI, capture the primary monitor to a
-    PNG, restore the GUI, and return the path, image size and DPI. Inspect it
-    with describe_image, then get_pixel_color.
-  click_coordinates(input) — left-click "x,y" in screenshot pixels.
-  type_text(input) — type into the focused window (max 5,000 chars); click first.
-  get_pixel_color(input) — hex colour at "x,y" in screenshot pixels.
+  App control: run the full sequence (screenshot, click, type, Enter) without
+  step-by-step asks. Confirm only before destructive actions or a missing
+  required value.
+  screenshot_background() — hide GUI, capture screen, restore.
+  click_coordinates(input) — hide GUI, focus the target, click "x,y" in
+    screenshot pixels, restore GUI. Format: "x,y" or "x,y | App title".
+  type_text(input) — types in the focused window; append "{enter}" to submit.
+  get_pixel_color(input) — hex colour at "x,y".
 
 =====================================================================
 10. EXAMPLES
