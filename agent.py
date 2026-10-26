@@ -1927,8 +1927,26 @@ def clipboard_write(text):
 # VOLUME
 # ---------------------------
 def _get_volume_interface():
+    """Return IAudioEndpointVolume for the default speakers.
+
+    pycaw 2024+ removed AudioDevice.Activate; the supported accessor is the
+    EndpointVolume property. Older releases expose Activate (either on the
+    AudioDevice wrapper or on the raw IMMDevice inside it), so keep those
+    paths for compatibility.
+    """
     devices = AudioUtilities.GetSpeakers()
-    interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    endpoint = getattr(devices, "EndpointVolume", None)
+    if endpoint is not None:
+        return endpoint
+    activate = getattr(devices, "Activate", None)
+    if activate is None:
+        inner = getattr(devices, "_dev", None)
+        activate = getattr(inner, "Activate", None)
+    if activate is None:
+        raise RuntimeError(
+            "pycaw AudioDevice exposes neither EndpointVolume nor Activate "
+            f"({type(devices).__name__}); the installed pycaw is incompatible.")
+    interface = activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
     return cast(interface, POINTER(IAudioEndpointVolume))
 
 
