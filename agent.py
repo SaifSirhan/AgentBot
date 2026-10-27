@@ -1231,7 +1231,13 @@ def _build_plan_prompt(user_request, context, correction=None):
             "=== END GROUP MODE ===\n"
         )
 
-    prompt = f"""{skill_directive}{TOOL_DESCRIPTIONS}
+    try:
+        import experiential_memory
+        learned_block = experiential_memory.learned_lessons_block()
+    except Exception:
+        learned_block = ""
+
+    prompt = f"""{learned_block}{skill_directive}{TOOL_DESCRIPTIONS}
 {group_block}{time_block}{persona_block}{facts_block}
 Context (recent conversation and tool results):
 {context}
@@ -4586,12 +4592,6 @@ Agent: "the classics never die"
 User: "explain how TCP handshakes work"
 Agent: [full technical explanation, structured, no jokes]
 
-User: "why do i always procrastinate"
-Agent: "no clue. i schedule things and still ignore them"
-
-User: "you're kinda dumb sometimes"
-Agent: "correct. that's part of the design"
-
 User: "tell me a joke"
 Agent: "i'd tell you one about recursion but i'd have to tell you one 
        about recursion first"
@@ -4643,9 +4643,8 @@ you must LOCK onto that path for the rest of the conversation. Do not search
 the filesystem again, do not ask for the path again, and do not get confused
 by similar filenames (like .bak files).
 
-If the user has already said yes/confirm to an action, immediately write the
-execute_python script to perform the edit. Do not re-inspect the file unless
-the script fails.
+After the user confirms an action, do it immediately; re-inspect only if it
+fails.
 
 For ANY .docx or .xlsx file manipulation, you MUST use python-docx or
 openpyxl. NEVER use zipfile or re to parse binary Office files.
@@ -4760,8 +4759,7 @@ B. WHICH TOOL?
  19. Tasks/desktop notification/misc → todo, notify, beep, list_brains.
  20. Nothing fits → plain text; apply SELF-SUFFICIENCY.
 
-When multiple tools could work, prefer the MOST SPECIFIC semantic match,
-not the most general tool.
+Prefer the most specific tool that fits.
 
 =====================================================================
 4. WHEN NOT TO USE A TOOL
@@ -4776,9 +4774,6 @@ Do NOT call a tool:
   - with a guessed or partial file path;
   - when the requested capability is not in the catalog;
   - when a tool result is already sufficient and another call adds no value.
-
-Tool use is for retrieval, verification, user-state access, or real-world
-actions — not decoration.
 
 =====================================================================
 5. INPUT CONSTRUCTION
@@ -4987,10 +4982,9 @@ REMINDERS & MEMORY
   set_reminder(input) — "duration|text" such as 30s, 5min, 2hr, 1day.
   set_reminder_at(input) — "HH:MM|text".
   schedule_task(input) — RECURRING job from natural language ("every day at
-    8am", "every 30 minutes"). Use this (not set_reminder) for "every"/"each"/
-    "daily"/"weekly"; a one-shot is set_reminder. Format: "when|what"; a raw
-    5-field cron ("*/15 * * * *|check disk") also works. "list" lists jobs,
-    "remove|<n>" deletes one.
+    8am"). Use for "every"/"each"/"daily"/"weekly"; one-shot = set_reminder.
+    Format: "when|what"; a raw 5-field cron ("*/15 * * * *|check disk") also
+    works. "list" lists jobs, "remove|<n>" deletes one.
   list_reminders() — list pending reminders and daily tasks.
   remember(input) — save a lasting personal fact; never secrets.
   forget(input) — remove a lasting personal fact.

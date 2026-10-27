@@ -163,6 +163,8 @@ ACTIVITY_MAX_LINES = 6
 SYSTEM_REFRESH_MS = 2000
 WEATHER_REFRESH_MS = 10 * 60 * 1000
 MEDIA_REFRESH_MS = 1000
+LESSONS_INTERVAL_MS = 24 * 60 * 60 * 1000
+LESSONS_STARTUP_DELAY_MS = 10 * 60 * 1000
 
 # Phase 6c — motion timings (ms).
 PULSE_READY_MS = 2500     # calm breathing while Ready
@@ -2568,6 +2570,7 @@ class AgentWindow(QMainWindow):
         self._weather_timer = None
         self._media_timer = None
         self._media_poller = None
+        self._lessons_timer = None
         self._gpu_unavailable = True
         self._command_done.connect(self._on_command_done)
         self._scheduled_triggered.connect(self._on_scheduled_trigger)
@@ -2687,6 +2690,34 @@ class AgentWindow(QMainWindow):
         self._media_timer.timeout.connect(self._refresh_media)
         self._media_timer.start()
         self._refresh_media()
+
+        self.start_lessons_timer()
+
+    def start_lessons_timer(self):
+        """Run ExpeL at most once per 24h (timers must live on the GUI thread)."""
+        self._lessons_timer = QTimer(self)
+        self._lessons_timer.setInterval(LESSONS_INTERVAL_MS)
+        self._lessons_timer.timeout.connect(self._run_experiential_learning)
+        self._lessons_timer.start()
+        QTimer.singleShot(
+            LESSONS_STARTUP_DELAY_MS, self._run_experiential_learning)
+
+    def _run_experiential_learning(self):
+        """Distill traces on a worker thread; never blocks the UI."""
+        try:
+            import experiential_memory
+            if not experiential_memory.should_extract():
+                return
+        except Exception:
+            return
+
+        def work():
+            try:
+                print(f"[lessons] {experiential_memory.extract_lessons()}")
+            except Exception as exc:
+                print(f"[lessons] failed: {exc}")
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _refresh_media(self):
         # Skip polling (and its thread) while the panel is hidden or minimized.
