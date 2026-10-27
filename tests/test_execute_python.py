@@ -13,6 +13,9 @@ import agent
 
 
 class ExecutePythonTests(unittest.TestCase):
+    def setUp(self):
+        agent.reset_python_failures()
+
     def test_stdout_is_returned(self):
         self.assertEqual(agent.execute_python("print(2 + 2)"), "4")
 
@@ -54,6 +57,45 @@ class ExecutePythonTests(unittest.TestCase):
         with mock.patch.object(agent.subprocess, "run", side_effect=expired):
             out = agent.execute_python("print('slow')")
         self.assertIn("longer than 60 seconds", out)
+
+    def test_third_failure_blocks_further_execution(self):
+        for _ in range(agent.PY_FAILURE_LIMIT):
+            self.assertTrue(agent.execute_python("1 / 0").startswith("ERROR:"))
+        self.assertEqual(agent.python_failure_count(), agent.PY_FAILURE_LIMIT)
+
+        with mock.patch.object(agent.subprocess, "run") as run:
+            out = agent.execute_python("print(2 + 2)")
+
+        run.assert_not_called()
+        self.assertEqual(out, agent.PY_DISABLED_MESSAGE)
+
+    def test_success_does_not_count_as_a_failure(self):
+        self.assertEqual(agent.execute_python("print(2 + 2)"), "4")
+        self.assertEqual(agent.python_failure_count(), 0)
+
+    def test_reset_reenables_execution(self):
+        for _ in range(agent.PY_FAILURE_LIMIT):
+            agent.execute_python("1 / 0")
+        self.assertEqual(agent.execute_python("print(1)"), agent.PY_DISABLED_MESSAGE)
+
+        agent.reset_python_failures()
+
+        self.assertEqual(agent.execute_python("print(1)"), "1")
+
+    def test_new_turn_resets_the_failure_counter(self):
+        for _ in range(agent.PY_FAILURE_LIMIT):
+            agent.execute_python("1 / 0")
+        self.assertEqual(agent.python_failure_count(), agent.PY_FAILURE_LIMIT)
+
+        def fake_planner(next_input, context):
+            return {"tool": "chat", "input": "ok"}, None
+
+        with mock.patch.object(agent, "get_valid_action", side_effect=fake_planner), \
+                mock.patch.object(agent, "execute_tool", return_value="ok"), \
+                mock.patch("rag_tool.search_documents", return_value=""):
+            agent._run_agent_turn_impl("hello", [])
+
+        self.assertEqual(agent.python_failure_count(), 0)
 
 
 if __name__ == "__main__":

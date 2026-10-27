@@ -1320,9 +1320,36 @@ def run_command(command):
 
 MAX_PYTHON_OUTPUT = 12000
 
+# Hard stop for runaway retry loops: after this many failed execute_python
+# calls in one turn the tool refuses to run again until the next user turn.
+PY_FAILURE_LIMIT = 3
+PY_DISABLED_MESSAGE = (
+    "ERROR: Python execution disabled for this turn due to repeated failures. "
+    "Ask the user for help."
+)
+_PY_FAILURES = {"count": 0}
+
+
+def reset_python_failures():
+    """Clear the per-turn execute_python failure counter."""
+    _PY_FAILURES["count"] = 0
+
+
+def python_failure_count():
+    return _PY_FAILURES["count"]
+
 
 def execute_python(code):
     """Run a Python script in a fresh interpreter and return its output."""
+    if _PY_FAILURES["count"] >= PY_FAILURE_LIMIT:
+        return PY_DISABLED_MESSAGE
+    result = _execute_python_once(code)
+    if result.startswith("ERROR:"):
+        _PY_FAILURES["count"] += 1
+    return result
+
+
+def _execute_python_once(code):
     if not (code or "").strip():
         return "ERROR: execute_python needs code."
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
@@ -5670,6 +5697,7 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
     # Request setup and bounded tool-call loop.
     step_log = _StepLog(on_step)
     last_signature = None
+    reset_python_failures()
     try:
         import context_compactor
         conversation_history = context_compactor.compact_history(conversation_history)
