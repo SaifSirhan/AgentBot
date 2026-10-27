@@ -4947,9 +4947,9 @@ COMMUNICATION
   telegram_user_delete(input) — "Contact|text" previews; add |confirm to
     delete, |all for every match; "Contact|latest" is the newest.
   telegram_user_edit(input) — "Contact|old text|new text"; within 48h.
-  send_image_telegram(input) — send an image file as the user:
+  send_image_telegram(input) — send an image as the user:
     "contact|image_path"; "me" = Saved Messages; a bare filename means
-    Downloads. Use after generate_image when the user wants it sent.
+    Downloads. Use after generate_image.
   gmail_unread(input) — list unread email.
   gmail_read(input) — read email by UID.
   gmail_search(input) — search email by keyword.
@@ -4959,7 +4959,7 @@ COMMUNICATION
     would feel flat.
   send_gif(input) — send a GIF to a NAMED contact as the user:
     "contact|search_term"; "me" = Saved Messages. Prefers the group library,
-    then Giphy. Use for "send a GIF to X"; search the emotion, not a scene.
+    then Giphy. Search the emotion, not a scene.
 
 PLACES & MAPS
   send_maps_url(input) — build and send ONE Google Maps link via the
@@ -5000,19 +5000,16 @@ DOCUMENT EDITING
   inspect_docx(input) — JSON map of a .docx: paragraphs and every table's
     rows, columns, cells. Full path. Use before editing.
   edit_document(input) — edit an existing DOCX, XLSX, PPTX, or PDF file.
-    Format: "filepath|instruction" where filepath is an absolute path and
-    instruction is natural language describing the edit. The tool backs the
-    file up automatically before changing it. Examples:
-      "C:\\Users\\USER\\report.docx|add paragraph: This is a new finding."
+    Format: "filepath|instruction" (absolute path | plain-language edit); the
+    file is backed up first. Example:
       "C:\\Users\\USER\\budget.xlsx|set cell B2 to 1500"
     ALWAYS tell the user what you changed. NEVER invent an edit you did not run.
 
 SOCIAL MEDIA POSTING
-  post_to_social(input) — create and optionally schedule a post via
-    Typefully (X, LinkedIn, Threads, Bluesky, Mastodon). Format:
-    "action|content|schedule_time"; action is post|queue, schedule_time is
-    ISO 8601, "now", or "next-free-slot" (omit to save a draft).
-    ALWAYS confirm the content with the user before posting.
+  post_to_social(input) — create/schedule a post via Typefully (X, LinkedIn,
+    Threads, Bluesky, Mastodon). Format: "action|content|schedule_time";
+    action is post|queue; schedule_time is ISO 8601, "now", or
+    "next-free-slot" (omit = draft). ALWAYS confirm the content first.
 
 SKILL MANAGEMENT
   skill_manage(input) — manage reusable procedure files ("skills") the agent
@@ -5025,8 +5022,7 @@ SKILL MANAGEMENT
   load_skill(input) — load the full text of one skill listed in AVAILABLE
     SKILLS. Read it before performing the workflow it describes. Format:
     "skill_id" using the id from the catalog (e.g. "local:clock-out-reminder").
-    The returned text is the procedure; follow its steps and use read_file for
-    any files it references.
+    Follow its steps; use read_file for any files it references.
 
 BROWSER CONTROL
   browse_web(input) — restricted browser agent: "https://site | task"; origin
@@ -5037,6 +5033,10 @@ OS CONTROL
   App control: run the full sequence (screenshot, click, type, Enter) without
   step-by-step asks. Confirm only before destructive actions or a missing
   required value.
+  Stremio (media center): to watch a movie or show, load "local:stremio" and
+  drive it with OS Control — search bar, title{enter}, poster, Torrentio link.
+    If the user asks to watch a specific movie or TV show, use OS Control to
+    operate Stremio. Do not try to scrape pirate websites, as they are blocked.
   If the user asks you to change a setting in a desktop app and you do not
   have a dedicated API tool for it, you MUST use OS Control
   (screenshot_background, click_coordinates, type_text) to visually navigate
