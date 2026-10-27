@@ -298,12 +298,10 @@ class MacroToolTests(unittest.TestCase):
     def test_prompt_contains_the_self_learning_rule(self):
         flat = " ".join(self.agent.TOOL_DESCRIPTIONS.split())
         self.assertIn(
-            "If the user asks you to do a repetitive task (like opening a "
-            "specific folder in an IDE, or opening Stremio), first try "
-            "play_macro. If the macro doesn't exist or fails, use OS Control "
-            "with Vision to accomplish the task. Once you succeed, use "
-            "save_macro to record the coordinates so you never have to guess "
-            "again.",
+            "For repetitive tasks (like opening a specific folder or app), "
+            "first try play_macro. If it doesn't exist or fails, use OS "
+            "Control with Vision to do it. Once you succeed, use save_macro "
+            "to record the coordinates so you don't have to guess next time.",
             flat,
         )
 
