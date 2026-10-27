@@ -5161,13 +5161,19 @@ class AgentWindow(QMainWindow):
             pass
         tray_icon = self._tray_icon
         if tray_icon is not None and tray_icon.isVisible():
+            # Windows keeps a ghost taskbar button when a window is hidden
+            # while still in the normal state; minimize first, then withdraw.
+            self.setWindowState(Qt.WindowState.WindowMinimized)
             self.hide()
         else:
             # Never strand the window when no tray icon could be created.
             self.showMinimized()
 
     def show_window(self):
+        # showNormal clears the minimized state so the taskbar button returns;
+        # show() covers a window that was hidden while minimized.
         self.showNormal()
+        self.show()
         self.raise_()
         self.activateWindow()
 

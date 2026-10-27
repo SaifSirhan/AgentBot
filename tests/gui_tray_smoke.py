@@ -57,11 +57,13 @@ assert labels == ["Show", "Quit"], labels
 w.close()
 pump()
 assert not w.isVisible(), "close did not hide to the tray"
+assert w.isMinimized(), "close hid the window without minimizing first"
 
 # --- double-click / Show restore --------------------------------------
 w._on_tray_activated(QSystemTrayIcon.ActivationReason.DoubleClick)
 pump()
 assert w.isVisible(), "double-click did not restore the window"
+assert not w.isMinimized(), "restore left the window minimized"
 
 w.hide()
 pump()
