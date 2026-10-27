@@ -79,18 +79,34 @@ class OSToolRegistryTests(unittest.TestCase):
                      "input": "1,1" if name != "screenshot_background" else ""})
                 self.assertIn("disabled in group chats", out, name)
 
-    def test_prompt_requires_full_os_sequence(self):
+    def test_prompt_requires_autonomous_execution(self):
         text = agent.TOOL_DESCRIPTIONS
         flat = " ".join(text.split())
-        self.assertIn("run the full sequence", text)
-        self.assertIn("step-by-step asks", text)
-        self.assertIn("destructive actions", text)
+        self.assertIn(
+            "You are an autonomous agent. When the user asks you to perform a "
+            "multi-step task (like controlling an app), you MUST execute the "
+            "full sequence of steps (screenshot, click, type, screenshot, "
+            "click) without stopping to ask for permission. Only ask for "
+            "permission before deleting files or sending money.",
+            flat,
+        )
+        self.assertIn("Stop, take a fresh screenshot, and look again.", flat)
         self.assertIn('"x,y | App title"', text)
         self.assertIn('"{enter}" to submit', text)
         self.assertIn(
             "You have a vision model. Use analyze_screenshot to read the screen.",
             flat)
         self.assertIn("Never ask the user for coordinates.", flat)
+
+    def test_screenshots_can_repeat_but_clicks_cannot(self):
+        shot = ("screenshot_background", "Stremio")
+        self.assertFalse(
+            agent._is_repeat_action("screenshot_background", "Stremio", shot))
+        click = ("click_coordinates", "10,20")
+        self.assertTrue(
+            agent._is_repeat_action("click_coordinates", "10,20", click))
+        self.assertFalse(
+            agent._is_repeat_action("click_coordinates", "30,40", click))
 
     def test_stream_media_is_constrained_to_urls_and_music(self):
         text = " ".join(agent.TOOL_DESCRIPTIONS.split())
@@ -171,6 +187,7 @@ class ScreenshotVisionTests(unittest.TestCase):
         self.assertEqual(fake.calls, ["Stremio"])
         prompt = vision.call_args.args[0]
         self.assertIn("Where is the search bar?", prompt)
+        self.assertIn(agent.VISION_COORDINATE_RULE, prompt)
         self.assertIn("800x600", prompt)
 
     def test_vision_failure_is_reported_without_coordinates(self):
@@ -194,6 +211,27 @@ class ScreenshotVisionTests(unittest.TestCase):
 
         self.assertEqual(out, "ABORTED: kill switch is latched")
         vision.assert_not_called()
+
+
+class DescribeImageBudgetTests(unittest.TestCase):
+    def test_vision_request_uses_8192_tokens(self):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+            fh.write(b"fake-png")
+            path = fh.name
+        self.addCleanup(os.remove, path)
+
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "choices": [{"message": {"content": "found it"}}]}
+        with mock.patch.object(agent, "DEEPSEEK_API_KEY", "test"), \
+             mock.patch.object(agent.requests, "post",
+                               return_value=response) as post:
+            out = agent.describe_image(f"{path}|Where is the button?")
+
+        self.assertEqual(out, "found it")
+        self.assertEqual(
+            post.call_args.kwargs["json"]["max_tokens"], 8192)
 
 
 if __name__ == "__main__":

@@ -175,7 +175,7 @@ KEEP_ALIVE = "30m"
 # ---------- Common ----------
 OLLAMA_TIMEOUT = 120
 MAX_PAGE_CHARS = 6000
-MAX_STEPS_PER_TURN = 9
+MAX_STEPS_PER_TURN = 13
 MODEL = BRAIN_PRIORITY[0] if BRAIN_PRIORITY else "ollama"
 
 # ---------- Cooldown state per brain ----------
@@ -1046,6 +1046,11 @@ SCREENSHOT_VISION_PROMPT = (
     "playing."
 )
 
+VISION_COORDINATE_RULE = (
+    "Keep your answer under 20 words. ONLY output the coordinates of the "
+    "requested button. Do not describe the rest of the screen."
+)
+
 
 def _default_mood():
     return {"frustration": 0, "success_streak": 0}
@@ -1120,6 +1125,48 @@ def day_part(hour=None):
 # ---------------------------
 # PUBLIC WRAPPERS
 # ---------------------------
+_SKILL_NEGATIVE = re.compile(
+    r"\b(song|music|album|trailer|clip|video|podcast|youtube|anime|game|"
+    r"chess|piano|guitar|spotify|news|tutorial|recommend|suggest|best|"
+    r"similar|trivia)\b"
+)
+_SKILL_MEDIA = re.compile(
+    r"\b(movie|film|tv\s*show|tv\s*series|episode|season)\b"
+)
+
+
+def _skill_directive(user_request):
+    """Return a decisive 'use this skill now' command for a matching request."""
+    text = (user_request or "").lower()
+    if not text.strip():
+        return ""
+    if re.search(r"\bstremio\b", text) or (
+            not _SKILL_NEGATIVE.search(text) and (
+                re.search(r"\b(watch|stream|play)\b", text)
+                or _SKILL_MEDIA.search(text))):
+        return ('Use the Stremio skill now. Do not think about it, just '
+                'execute the steps. Call load_skill("local:stremio") first.')
+
+    try:
+        skills = get_skill_manager().list_skills()
+    except Exception:
+        return ""
+    for skill in skills:
+        label = skill.name.replace("-", " ").replace("_", " ")
+        if not re.search(rf"\b{re.escape(label)}\b", text):
+            continue
+        if not label.lower().endswith("skill"):
+            label += " skill"
+        return (f"Use the {label} now. Do not think about it, just execute "
+                f'the steps. Call load_skill("{skill.skill_id}") first.')
+    return ""
+
+
+def starts_new_task(user_request):
+    """True when a request starts a skill task and should not inherit old details."""
+    return bool(_skill_directive(user_request))
+
+
 def _build_plan_prompt(user_request, context, correction=None):
     """Build the exact prompt run_agent_turn's step 1 sends to the LLM.
 
@@ -1134,10 +1181,14 @@ def _build_plan_prompt(user_request, context, correction=None):
 
     # Skills are personal procedures; group chats never see the catalog and
     # execute_tool blocks load_skill there too.
+    skill_directive = ""
     if not GROUP_MODE:
         skill_catalog = get_skill_catalog()
         if skill_catalog:
             facts_block += "\n" + skill_catalog + "\n"
+        directive = _skill_directive(user_request)
+        if directive:
+            skill_directive = directive + "\n\n"
 
     now_str = datetime.datetime.now().strftime("%A, %B %d, %Y — %I:%M %p")
     time_block = f"\nCURRENT DATE AND TIME: {now_str} (use this; never guess)\n"
@@ -1180,7 +1231,7 @@ def _build_plan_prompt(user_request, context, correction=None):
             "=== END GROUP MODE ===\n"
         )
 
-    prompt = f"""{TOOL_DESCRIPTIONS}
+    prompt = f"""{skill_directive}{TOOL_DESCRIPTIONS}
 {group_block}{time_block}{persona_block}{facts_block}
 Context (recent conversation and tool results):
 {context}
@@ -4556,6 +4607,8 @@ constant jokes.
 1. EXECUTION RULES — HIGHEST PRIORITY
 =====================================================================
 
+You are an autonomous agent. When the user asks you to perform a multi-step task (like controlling an app), you MUST execute the full sequence of steps (screenshot, click, type, screenshot, click) without stopping to ask for permission. Only ask for permission before deleting files or sending money.
+
 NEVER CLAIM AN ACTION YOU DID NOT TAKE.
 
 There is no tool for:
@@ -4583,11 +4636,7 @@ Clarify only when necessary. Ask one concise question only when ambiguity would
 materially change the answer or action. Otherwise use the most reasonable
 interpretation and state the assumption briefly.
 
-You are an autonomous agent. If a user asks you to edit, rename, or
-restructure a file, DO NOT ask for permission at every step. Take the
-initiative: inspect the file, write the script, execute it, and report the
-result. Only ask for confirmation before destructive, irreversible actions
-(like deleting a file).
+For file edits, inspect, write, execute, and report without asking at every step.
 
 Once a user confirms a file path (e.g., C:\Users\USER\Downloads\Log Intern.docx),
 you must LOCK onto that path for the rest of the conversation. Do not search
@@ -5040,23 +5089,20 @@ BROWSER CONTROL
     only if the report says completed.
 
 OS CONTROL
-  App control: run the full sequence (screenshot, click, type, Enter) without
-  step-by-step asks. Confirm only before destructive actions or a missing
-  required value.
-  Stremio (media center): skill id "local:stremio" holds the click sequence.
-    For a full movie or TV show, use OS Control on Stremio and click the first
-    stream; never scrape pirate sites or use stream_media.
+  Stremio: use skill "local:stremio" for movies and TV shows; never scrape
+    pirate sites.
   If a desktop app lacks a dedicated API, use OS Control
   (screenshot_background, click_coordinates, type_text) to navigate its UI.
   Never refuse a UI task just because you lack a direct Python API.
   You have a vision model. Use analyze_screenshot to read the screen.
   screenshot_background(input) — hide GUI, focus the app (optional title),
     capture, and return a vision description with coordinates. Input: app
-    title, e.g. "Stremio".
+    title.
   analyze_screenshot(input) — capture and answer a vision question:
     "question" or "App title|question". To click, screenshot, read X/Y from
     the vision result, then click_coordinates. Never ask the user for
-    coordinates.
+    coordinates. If a button is missing after two attempts: Stop, take a
+    fresh screenshot, and look again.
   click_coordinates(input) — hide GUI, focus the target, click "x,y" in
     screenshot pixels, restore GUI. Format: "x,y" or "x,y | App title".
   type_text(input) — types in the focused window; append "{enter}" to submit.
@@ -5231,8 +5277,9 @@ def describe_image(input_str):
             # count against this budget — at 1024 a detailed question (not a
             # vague one) can burn the whole thing thinking and come back as
             # HTTP 200 with empty content. Measured 1200-3100 reasoning tokens
-            # on a single image; see describe_images() for the same fix.
-            "max_tokens": 4096,
+            # on a single image; screenshots can run longer, so match
+            # describe_images() at 8192.
+            "max_tokens": 8192,
         }
         r = requests.post(
             "https://api.deepseek.com/v1/chat/completions",
@@ -5516,6 +5563,8 @@ def analyze_screenshot(input_str=""):
     if "|" in question:
         title, question = question.split("|", 1)
         title, question = title.strip(), question.strip()
+    if question:
+        question = f"{question}\n{VISION_COORDINATE_RULE}"
     return _capture_and_describe(title, question or None)
 
 
@@ -5561,6 +5610,14 @@ def browse_web(input_str):
         return _browser_agent.format_report(result)
     except Exception as exc:
         return f"ERROR: {exc}"
+
+
+REPEATABLE_OS_TOOLS = frozenset({"screenshot_background", "analyze_screenshot"})
+
+
+def _is_repeat_action(tool, inp, last_signature):
+    """True when the same action repeats, except fresh screenshot captures."""
+    return (tool, inp) == last_signature and tool not in REPEATABLE_OS_TOOLS
 
 
 def _execute_tool_impl(action):
@@ -5931,7 +5988,7 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
             break
 
         signature = (tool, inp)
-        if signature == last_signature:
+        if _is_repeat_action(tool, inp, last_signature):
             print("\nDetected repeated action - stopping.")
             step_log.append("System: Repeated action - stopped.")
             break

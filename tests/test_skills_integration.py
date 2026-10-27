@@ -162,7 +162,45 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertLess(len(prompt) / 4, MAX_PROMPT_TOKENS)
 
     # ------------------------------------------------------------------
-    # skill_manage -> dirty -> catalog
+    # Skill directive injection
+    # ------------------------------------------------------------------
+    def test_stremio_request_injects_exact_directive(self):
+        with self.patched(group_mode=False):
+            prompt = agent._build_plan_prompt("watch Cherry", "")
+        self.assertTrue(prompt.startswith(
+            "Use the Stremio skill now. Do not think about it, just execute "
+            "the steps. Call load_skill(\"local:stremio\") first."))
+
+    def test_music_request_does_not_inject_stremio(self):
+        self.assertEqual(agent._skill_directive("play a song"), "")
+
+    def test_play_title_starts_a_stremio_task(self):
+        self.assertTrue(agent.starts_new_task("play Jujutsu Kaisen"))
+        self.assertTrue(agent.starts_new_task("watch Jujutsu Kaisen"))
+        self.assertFalse(agent.starts_new_task("now click the poster"))
+        self.assertFalse(agent.starts_new_task("play a song"))
+
+    def test_named_skill_injects_directive(self):
+        with self.patched(group_mode=False):
+            directive = agent._skill_directive("use demo skill")
+        self.assertIn("Use the demo skill now.", directive)
+
+    def test_group_mode_does_not_inject_skill_directive(self):
+        with self.patched(group_mode=True):
+            prompt = agent._build_plan_prompt("watch Cherry", "")
+        self.assertNotIn("Use the Stremio skill now.", prompt)
+
+    def test_real_stremio_prompt_stays_under_token_budget(self):
+        with mock.patch.multiple(
+            agent, _skill_manager=None, _skills_dirty=True, GROUP_MODE=False
+        ), mock.patch.object(agent, "day_part", return_value="late"), \
+                mock.patch.object(agent, "get_mood_directive",
+                                  return_value=agent.FRUSTRATION_DIRECTIVE):
+            prompt = agent._build_plan_prompt("watch Cherry", "")
+        self.assertLess(len(prompt) / 4, MAX_PROMPT_TOKENS)
+
+    # ------------------------------------------------------------------
+    # Skill manage -> dirty -> catalog
     # ------------------------------------------------------------------
     def test_skill_manage_create_and_delete_refresh_the_catalog(self):
         content = (
@@ -193,25 +231,26 @@ class SkillIntegrationTests(unittest.TestCase):
 
 
 class StremioSkillContentTests(unittest.TestCase):
-    """The Stremio skill must keep one OS Control route and the player note."""
+    """The Stremio skill must stay a strict four-step checklist."""
 
-    def test_skill_has_one_os_control_route(self):
+    def test_skill_has_strict_checklist(self):
         path = (Path(__file__).resolve().parent.parent
                 / "skills" / "stremio" / "SKILL.md")
         text = " ".join(path.read_text(encoding="utf-8").split())
-        self.assertIn(
-            "If the user asks to watch a movie or TV show, you MUST use OS "
-            "Control on the Desktop Stremio app. Focus the Stremio window, "
-            "take a screenshot, click the search bar, type the title, click "
-            "the poster, and click the first stream.",
-            text,
-        )
-        self.assertIn(
-            "Before clicking a stream, remind the user to ensure Stremio is "
-            "set to play in an external player (mpv) in its settings so the "
-            "video plays instantly without buffering in the Stremio window.",
-            text,
-        )
+        for step in (
+            "1. **Focus Stremio. Take a screenshot.**",
+            "2. **Click the search bar. Type the requested show/movie name. "
+            "Press Enter. Wait 3 seconds.**",
+            "3. **Take a screenshot. Click the poster that exactly matches "
+            "the title. Wait 3 seconds.**",
+            "4. **Take a screenshot. Find the Torrentio link that says "
+            "'1080p'. Click it.**",
+            "DO NOT click any other link.",
+            "DO NOT ask for permission.",
+            "STOP after clicking the 1080p link.",
+        ):
+            self.assertIn(step, text)
+        self.assertIn("external player (mpv)", text)
         for forbidden in ("web.stremio.com", "browse_web", "Playwright",
                           "Chromium"):
             self.assertNotIn(forbidden, text)

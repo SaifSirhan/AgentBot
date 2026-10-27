@@ -3312,8 +3312,28 @@ class AgentWindow(QMainWindow):
         except Exception as e:
             print(f"[tts] stop failed: {e}")
 
+    def _reset_task_context(self):
+        """Drop previous task details so a new task cannot inherit them."""
+        if not self.conversation_history:
+            return
+        self.conversation_history.clear()
+        try:
+            get_agent().save_conversation_history(self.conversation_history)
+        except Exception:
+            pass
+
+    def _reset_task_context_if_new(self, text):
+        try:
+            import agent as _agent
+            if not _agent.starts_new_task(text):
+                return
+        except Exception:
+            return
+        self._reset_task_context()
+
     def _start_agent_turn(self, text, attached_paths=None):
         """Kick off a background agent turn for `text`."""
+        self._reset_task_context_if_new(text)
         self._processing = True
         self.input_field.setEnabled(False)
         self.set_status("Reading attachments…" if attached_paths else "Thinking…",
@@ -3465,6 +3485,10 @@ class AgentWindow(QMainWindow):
         if handler is not None:
             handler()
             return True
+
+        # A new tool command starts a new task: do not inherit the previous
+        # task's titles, screenshots, or tool results.
+        self._reset_task_context()
 
         try:
             agent = get_agent()

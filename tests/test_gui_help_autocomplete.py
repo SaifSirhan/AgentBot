@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -212,6 +213,52 @@ class TerminalInputTests(unittest.TestCase):
         self.assertEqual(self.input._completions("/SET")[0], "/settings")
         self.type("/SET")
         self.assertEqual(self.input._ghost, "tings")
+
+
+class TaskContextTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.window = g.AgentWindow()
+        for _ in range(10):
+            self.app.processEvents()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_new_skill_task_clears_history(self):
+        fake = mock.Mock()
+        self.window.conversation_history = ["User: watch Ghosts", "System: old"]
+        with mock.patch.object(g, "get_agent", return_value=fake):
+            self.window._reset_task_context_if_new("watch Jujutsu Kaisen")
+        self.assertEqual(self.window.conversation_history, [])
+        fake.save_conversation_history.assert_called_once_with([])
+
+    def test_continuation_keeps_history(self):
+        history = ["User: watch Ghosts", "System: old"]
+        self.window.conversation_history = list(history)
+        with mock.patch.object(g, "get_agent", return_value=mock.Mock()):
+            self.window._reset_task_context_if_new("now click the poster")
+        self.assertEqual(self.window.conversation_history, history)
+
+    def test_task_command_clears_history(self):
+        fake = mock.Mock()
+        self.window.conversation_history = ["User: watch Ghosts", "System: old"]
+        with mock.patch.object(g, "get_agent", return_value=fake), \
+             mock.patch.object(self.window, "_run_background_command"):
+            self.assertTrue(self.window._handle_slash_command(
+                "/browse https://example.com | task"))
+        self.assertEqual(self.window.conversation_history, [])
+
+    def test_help_keeps_history(self):
+        self.window.conversation_history = ["User: watch Ghosts", "System: old"]
+        with mock.patch.object(g, "get_agent", return_value=mock.Mock()):
+            self.window._handle_slash_command("/help")
+        self.assertIn("User: watch Ghosts", self.window.conversation_history)
 
 
 if __name__ == "__main__":
