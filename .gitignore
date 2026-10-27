@@ -44,6 +44,7 @@ Thumbs.db
 
 # ---- Local mockup artifacts ----
 _gui_mockup*.png
+scratch/
 
 # ---- Local / non-source / sensitive artifacts (kept out of the repo) ----
 # APIs.txt likely holds API keys; check-fk.php / sha512_sum are stray scratch
