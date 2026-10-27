@@ -1,6 +1,6 @@
 ---
 name: office-master
-description: Restructure Word documents and build formatted Excel workbooks from Python. Use for complex .docx re-layout, section merging, or bulk document generation (docxtpl templates with Jinja2 tags, row loops, rich text, subdocs) and for Excel reports/exports that need grouped data or cell formatting (pandas groupby plus xlsxwriter formats, freeze panes, autofilter, charts). Triggers include "restructure this Word doc", "generate N documents from a template", "group this CSV by region into a formatted xlsx", or "build an Excel report".
+description: Restructure Word documents and build formatted Excel workbooks with python-docx, openpyxl, docxtpl and xlsxwriter. Use for .docx re-layout, section merging, or bulk document generation (docxtpl templates with Jinja2 tags, row loops, rich text, subdocs) and for Excel reports/exports that need grouped data or cell formatting (pandas groupby plus xlsxwriter formats, freeze panes, autofilter, charts). Triggers include "restructure this Word doc", "generate N documents from a template", "group this CSV by region into a formatted xlsx", or "build an Excel report".
 ---
 
 # Office Master
