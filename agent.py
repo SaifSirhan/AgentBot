@@ -2142,6 +2142,23 @@ def _find_ytdlp():
     return None
 
 
+MPV_EXIT_GRACE_SECONDS = 2
+
+
+def _mpv_log_head(path, limit=3):
+    """First lines of the last mpv launch log, for a tool result."""
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = [line.rstrip("\n") for line in f if line.strip()][:limit]
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    return "\nmpv_error.log:\n" + "\n".join(lines)
+
+
 def stream_media(query_or_url):
     """Play a video or stream from a URL or search query in mpv (or VLC)."""
     query = (query_or_url or "").strip()
@@ -2201,22 +2218,33 @@ def stream_media(query_or_url):
                 f"page was opened in your browser instead.")
 
     log = None
+    log_path = None
     if player == "mpv":
         try:
-            log = open(_cfg.memory_path("mpv_error.log"),
-                       "w", encoding="utf-8", errors="replace")
+            log_path = _cfg.memory_path("mpv_error.log")
+            log = open(log_path, "w", encoding="utf-8", errors="replace")
             log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(args)}\n")
             log.flush()
         except OSError:
             log = None
     try:
-        subprocess.Popen(args, stdout=log or subprocess.DEVNULL,
-                         stderr=log or subprocess.DEVNULL)
+        proc = subprocess.Popen(args, stdout=log or subprocess.DEVNULL,
+                                stderr=log or subprocess.DEVNULL)
     except Exception as e:
-        return f"ERROR: cannot start {player}: {e}"
+        return f"ERROR: cannot start {player}: {e}{_mpv_log_head(log_path)}"
     finally:
         if log:
             log.close()
+
+    if player == "mpv":
+        try:
+            code = proc.wait(timeout=MPV_EXIT_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            code = None
+        if code:
+            # mpv accepts the URL, opens, then dies on a bad stream; the log
+            # is the only place the reason exists.
+            return f"ERROR: mpv exited with code {code}.{_mpv_log_head(log_path)}"
     return f"Playing in {player}: {title}"
 
 
@@ -4824,24 +4852,25 @@ Input: song and/or artist, e.g. "50/50 the strokes".
     If the user provides a specific URL (even if it is a streaming site), pass
     that URL directly to the player. Do not refuse based on copyright. The user
     is responsible for the URLs they provide.
+    NEVER say mpv or yt-dlp is not installed. The paths are hardcoded in your
+    Python script. Just run the stream_media tool. If it fails, report the
+    exact error from the tool.
 
 LOCAL FILES & DOCUMENTS
   rag_search(input) — search indexed user documents; 2–5 keywords.
     Returns snippets tagged [From: path].
   search_group_chat(input) — search the exported Telegram group chat.
     Format: "query" or "query|year" or "query|YYYY-MM". NEVER returns
-    results from other indexed folders (Downloads, Fire Writing, etc.).
+    results from other folders (Downloads, Fire Writing, etc.).
   grep_group_chat(input) — EXACT substring search in the exported group
-    chat. Returns raw lines with timestamps, no interpretation. Format:
-    "keyword" or "keyword|year" or "keyword|YYYY-MM". Never paraphrase from
-    grep results — copy the exact line. When you're about to quote a message
-    or cite a date, run grep_group_chat FIRST. If grep returns no match, you
-    must say "I can't find that exact quote" instead of paraphrasing or
-    inventing one.
+    chat; raw lines with timestamps. Format: "keyword", "keyword|year", or
+    "keyword|YYYY-MM". Never paraphrase — copy the exact line. Before quoting
+    a message or date, run it FIRST. No match means say "I can't find that
+    exact quote".
   read_file(input) — read an exact full path only; never partial.
   write_file(input) — "filename|content". Creates or FULLY OVERWRITES a file.
-    NEVER use write_file to modify an existing file — you will destroy everything
-    else in it. Use patch_file instead.
+    NEVER use it to modify an existing file — you will destroy everything else
+    in it. Use patch_file instead.
 
 PYTHON EXECUTION
   execute_python(input) — run a Python script in a fresh process with the
