@@ -1294,6 +1294,28 @@ def _extract_json_actions(text):
     return actions
 
 
+# DeepSeek leaks its raw DSML tool-call markup instead of JSON when the prompt
+# is near capacity. Accept one or two bars per side and optional whitespace;
+# observed leak uses two: <｜｜DSML｜｜ parameter name="input" ...>.
+_DSML_TAG = r"<[｜|]{1,2}\s*DSML\s*[｜|]{1,2}"
+_DSML_INVOKE_RE = re.compile(
+    _DSML_TAG + r'\s*invoke\s+name="(.*?)"', re.DOTALL)
+_DSML_INPUT_RE = re.compile(
+    _DSML_TAG + r'\s*parameter\s+name="input"\s*'
+    r'(?:string="(?:true|false)"\s*)?>(.*?)</'
+    r'[｜|]{1,2}\s*DSML\s*[｜|]{1,2}\s*parameter>',
+    re.DOTALL)
+
+
+def _extract_dsml_action(text):
+    """Recover a {tool, input} call from leaked DeepSeek DSML markup."""
+    invoke = _DSML_INVOKE_RE.search(text)
+    param = _DSML_INPUT_RE.search(text)
+    if not invoke or not param:
+        return None
+    return {"tool": invoke.group(1).strip(), "input": param.group(1).strip()}
+
+
 def parse_action(plan_text):
     raw = (plan_text or "").strip()
 
@@ -1337,6 +1359,15 @@ def parse_action(plan_text):
                 first['_queued_actions'] = queued
 
         return first, None
+
+    # No JSON → DeepSeek may have leaked raw DSML tool-call markup
+    dsml = _extract_dsml_action(raw)
+    if dsml:
+        tool = dsml.get('tool')
+        if tool not in VALID_TOOLS:
+            return None, (f"'{tool}' is not a valid tool name. "
+                          f"Valid: {', '.join(sorted(VALID_TOOLS))}")
+        return dsml, None
 
     # No JSON → plain chat reply
     return {"tool": "chat", "input": raw}, None
