@@ -228,6 +228,58 @@ class OSControlTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), b"PNG:(100, 50)")
         self.assertEqual(self.fake_mss.sct.grabs[0]["width"], 100)
 
+    def test_screenshot_focuses_named_window_before_capture(self):
+        calls = self.mock_gui()
+        with mock.patch.object(
+                oc, "_focus_window_by_title",
+                return_value=(77, "Stremio")) as focus, \
+             mock.patch.object(oc.time, "sleep"):
+            out = oc.screenshot_background("Stremio")
+
+        focus.assert_called_once_with("Stremio")
+        self.assertIn("Focus: focused Stremio", out)
+        self.assertEqual(calls, ["hide", "show"])
+
+    def test_screenshot_reports_missing_window(self):
+        with mock.patch.object(
+                oc, "_focus_window_by_title", return_value=(0, "")), \
+             mock.patch.object(oc.time, "sleep"):
+            out = oc.screenshot_background("Nope")
+
+        self.assertIn("Focus: not found (Nope)", out)
+
+    def test_focus_window_restores_minimized_window(self):
+        class FakeWindow:
+            _hWnd = 55
+            isMinimized = True
+            title = "Stremio"
+            restored = False
+            activated = False
+
+            def restore(self):
+                self.restored = True
+
+            def activate(self):
+                self.activated = True
+
+        win = FakeWindow()
+
+        class FakeGW:
+            @staticmethod
+            def getWindowsWithTitle(_title):
+                return [win]
+
+        with mock.patch.object(oc, "_load_pygetwindow", return_value=FakeGW), \
+             mock.patch.object(oc, "_window_process_id", return_value=999), \
+             mock.patch.object(oc, "_activate_hwnd") as activate, \
+             mock.patch.object(oc.time, "sleep"):
+            hwnd, label = oc._focus_window_by_title("Stremio")
+
+        self.assertTrue(win.restored)
+        self.assertTrue(win.activated)
+        self.assertEqual((hwnd, label), (55, "Stremio"))
+        activate.assert_called_once_with(55)
+
     def test_screenshot_abort_still_restores_gui(self):
         calls = []
 

@@ -1,7 +1,7 @@
 """OS-level automation tools with explicit safety guards.
 
-Capabilities: capture the primary monitor, click absolute screenshot pixels,
-type text, and read a pixel colour.
+Capabilities: focus a window and capture the primary monitor, click absolute
+screenshot pixels, type text, and read a pixel colour.
 
 Guards:
 * Ctrl+Alt+Shift+Esc latches a kill switch. Every tool refuses to act while
@@ -377,6 +377,35 @@ def _activate_hwnd(hwnd: int) -> bool:
         return False
 
 
+def _focus_window_by_title(title: str) -> Tuple[int, str]:
+    """Restore and activate the first matching non-AgentBot window.
+
+    Returns (hwnd, human-readable label), or (0, "") when nothing matches.
+    """
+    gw = _load_pygetwindow()
+    if gw is None:
+        return 0, ""
+    try:
+        matches = gw.getWindowsWithTitle(title)
+    except Exception:
+        matches = []
+    for win in matches:
+        hwnd = int(getattr(win, "_hWnd", 0) or 0)
+        if hwnd and _window_process_id(hwnd) == os.getpid():
+            continue
+        try:
+            if win.isMinimized:
+                win.restore()
+            win.activate()
+            time.sleep(FOCUS_SETTLE_SECONDS)
+        except Exception:
+            pass
+        if hwnd:
+            _activate_hwnd(hwnd)
+        return hwnd, str(getattr(win, "title", "") or title)
+    return 0, ""
+
+
 def _activate_target_for_click(
     title: str, x: int, y: int
 ) -> Tuple[int, str]:
@@ -387,26 +416,9 @@ def _activate_target_for_click(
     Returns (hwnd, human-readable label).
     """
     if title:
-        gw = _load_pygetwindow()
-        if gw is not None:
-            try:
-                matches = gw.getWindowsWithTitle(title)
-            except Exception:
-                matches = []
-            for win in matches:
-                hwnd = int(getattr(win, "_hWnd", 0) or 0)
-                if hwnd and _window_process_id(hwnd) == os.getpid():
-                    continue
-                try:
-                    if win.isMinimized:
-                        win.restore()
-                    win.activate()
-                    time.sleep(FOCUS_SETTLE_SECONDS)
-                except Exception:
-                    pass
-                if hwnd:
-                    _activate_hwnd(hwnd)
-                return hwnd, str(getattr(win, "title", "") or title)
+        hwnd, label = _focus_window_by_title(title)
+        if hwnd or label:
+            return hwnd, label
 
     hwnd, label = _window_at_point(x, y)
     if hwnd:
@@ -432,8 +444,8 @@ def _dpi_label() -> str:
 # ----------------------------------------------------------------------
 # Tools
 # ----------------------------------------------------------------------
-def screenshot_background() -> str:
-    """Hide the GUI, capture the primary monitor, restore the GUI."""
+def screenshot_background(title: str = "") -> str:
+    """Hide the GUI, focus an optional target window, capture the monitor."""
     hide_attempted = False
     try:
         _guard()
@@ -448,6 +460,15 @@ def screenshot_background() -> str:
                 time.sleep(SCREENSHOT_SETTLE_SECONDS)
             except Exception as exc:
                 hide_note = f"hide failed ({exc})"
+
+        focus_note = "none"
+        if title:
+            hwnd, label = _focus_window_by_title(title)
+            if hwnd or label:
+                focus_note = f"focused {label}"
+                time.sleep(FOCUS_SETTLE_SECONDS)
+            else:
+                focus_note = f"not found ({title})"
 
         _guard()
         SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -466,6 +487,7 @@ def screenshot_background() -> str:
             f"(primary monitor at {monitor['left']},{monitor['top']})\n"
             f"DPI: {_dpi_label()}\n"
             f"GUI: {hide_note}\n"
+            f"Focus: {focus_note}\n"
             "Coordinates for click_coordinates/get_pixel_color are pixels "
             "from this image's top-left."
         )

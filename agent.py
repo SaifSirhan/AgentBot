@@ -175,7 +175,7 @@ KEEP_ALIVE = "30m"
 # ---------- Common ----------
 OLLAMA_TIMEOUT = 120
 MAX_PAGE_CHARS = 6000
-MAX_STEPS_PER_TURN = 5
+MAX_STEPS_PER_TURN = 9
 MODEL = BRAIN_PRIORITY[0] if BRAIN_PRIORITY else "ollama"
 
 # ---------- Cooldown state per brain ----------
@@ -1036,6 +1036,16 @@ SPONTANEOUS_PROMPT = (
     "sensitive content. Do not describe the screen."
 )
 
+SCREENSHOT_VISION_PROMPT = (
+    "This is a full-screen desktop screenshot ({width}x{height} px, origin "
+    "top-left). A blind planner will click these exact pixel coordinates. "
+    "List every visible interactive element as 'label — x,y' using the "
+    "element's centre: the search bar/box (include the x,y of the text "
+    "\"Search\"), navigation buttons, and result posters or stream links. "
+    "Only report what is actually visible; say when a video is already "
+    "playing."
+)
+
 
 def _default_mood():
     return {"frustration": 0, "success_streak": 0}
@@ -1162,7 +1172,7 @@ def _build_plan_prompt(user_request, context, correction=None):
             "- load_skill (skills are disabled in groups)\n"
             "- browse_web (browser control is disabled in groups)\n"
             "- execute_python, inspect_docx (local code and file access)\n"
-            "- screenshot_background, click_coordinates, type_text, get_pixel_color (OS control)\n"
+            "- screenshot_background, analyze_screenshot, click_coordinates, type_text, get_pixel_color (OS control)\n"
             "- All system tools (volume, media, lock, shutdown)\n\n"
             "If a user asks for any blocked capability, reply briefly: you "
             "can't do that in a group, DM the bot directly. Do NOT attempt "
@@ -4981,7 +4991,7 @@ IMAGE
   generate_image(input) — AI image from a prompt: "prompt|filename"
     (filename optional). Saves to Downloads. Free, no API key.
   describe_image(input) — describe an image with vision: "path|question"
-    (question optional). Handles photos, screenshots, diagrams, charts.
+    (question optional).
 
 SECURITY
   scan_file(input) — SHA256, entropy, suspicious strings, verdict (CLEAN /
@@ -5034,16 +5044,19 @@ OS CONTROL
   step-by-step asks. Confirm only before destructive actions or a missing
   required value.
   Stremio (media center): skill id "local:stremio" holds the click sequence.
-    If the user asks to watch a specific movie or TV show, use OS Control to
-    operate Stremio. Do not try to scrape pirate websites, as they are blocked.
-    If the user asks to watch a full movie or TV show, you MUST use OS Control
-    to open Stremio, search for the title, and click the first stream. Do not
-    use stream_media for this.
-  If the user asks you to change a setting in a desktop app and you do not
-  have a dedicated API tool for it, you MUST use OS Control
-  (screenshot_background, click_coordinates, type_text) to visually navigate
-  the UI. Do not refuse a UI task just because you lack a direct Python API.
-  screenshot_background() — hide GUI, capture screen, restore.
+    For a full movie or TV show, use OS Control on Stremio and click the first
+    stream; never scrape pirate sites or use stream_media.
+  If a desktop app lacks a dedicated API, use OS Control
+  (screenshot_background, click_coordinates, type_text) to navigate its UI.
+  Never refuse a UI task just because you lack a direct Python API.
+  You have a vision model. Use analyze_screenshot to read the screen.
+  screenshot_background(input) — hide GUI, focus the app (optional title),
+    capture, and return a vision description with coordinates. Input: app
+    title, e.g. "Stremio".
+  analyze_screenshot(input) — capture and answer a vision question:
+    "question" or "App title|question". To click, screenshot, read X/Y from
+    the vision result, then click_coordinates. Never ask the user for
+    coordinates.
   click_coordinates(input) — hide GUI, focus the target, click "x,y" in
     screenshot pixels, restore GUI. Format: "x,y" or "x,y | App title".
   type_text(input) — types in the focused window; append "{enter}" to submit.
@@ -5096,7 +5109,8 @@ VALID_TOOLS = {
     "schedule_task",    "clipboard_read", "clipboard_write", "set_volume", "media_control",
     "system_status", "lock_pc", "sleep_pc", "shutdown_pc", "restart_pc",
     "save_screenshot", "todo", "list_windows", "focus_window", "notify",
-    "screenshot_background", "click_coordinates", "type_text", "get_pixel_color",
+    "screenshot_background", "analyze_screenshot", "click_coordinates",
+    "type_text", "get_pixel_color",
     "beep", "done", "set_reminder_at", "list_reminders", "list_brains",
     "close_window", "watch_folder", "stop_watching",
     "gmail_unread", "gmail_read", "gmail_search",
@@ -5454,11 +5468,55 @@ def _os_control_module():
     return _os_control
 
 
-def screenshot_background():
+def _capture_and_describe(title="", question=None):
+    """Capture the screen and return its vision description with coordinates."""
     try:
-        return _os_control_module().screenshot_background()
+        result = _os_control_module().screenshot_background(title)
     except Exception as exc:
         return f"ERROR: OS control unavailable: {exc}"
+    if not result.startswith("Screenshot saved:"):
+        return result
+
+    path = result.splitlines()[0].split("Screenshot saved:", 1)[1].strip()
+    match = re.search(r"Image: (\d+)x(\d+)", result)
+    width, height = match.groups() if match else ("?", "?")
+    if question:
+        prompt = (f"{question}\n"
+                  f"(Screenshot: {width}x{height} px, origin top-left.)")
+    else:
+        prompt = SCREENSHOT_VISION_PROMPT.format(width=width, height=height)
+
+    description = describe_image(f"{path}|{prompt}")
+    if not description or description.startswith("ERROR:"):
+        detail = (description or "empty vision response")
+        if detail.startswith("ERROR:"):
+            detail = detail[len("ERROR:"):].strip()
+        return (
+            f"{result}\n"
+            f"VISION ERROR: {detail}\n"
+            f"The screenshot is at {path}; do not invent coordinates.")
+    return f"{result}\nVISION:\n{description}"
+
+
+def screenshot_background(input_str=""):
+    """Hide GUI, focus an optional app, capture, and describe with vision.
+
+    Input: optional window title to focus before capture, e.g. "Stremio".
+    """
+    title = (input_str or "").split("|", 1)[0].strip().strip('"').strip("'")
+    return _capture_and_describe(title)
+
+
+def analyze_screenshot(input_str=""):
+    """Capture the screen and answer a vision question about it.
+
+    Format: "question" or "App title|question".
+    """
+    title, question = "", (input_str or "").strip()
+    if "|" in question:
+        title, question = question.split("|", 1)
+        title, question = title.strip(), question.strip()
+    return _capture_and_describe(title, question or None)
 
 
 def click_coordinates(input_str):
@@ -5569,7 +5627,8 @@ def _execute_tool_impl(action):
     elif tool == 'crawl_site':             return crawl_site(inp)
     elif tool == 'map_site':               return map_site(inp)
     elif tool == 'web_fetch':              return web_fetch(inp)
-    elif tool == 'screenshot_background':  return screenshot_background()
+    elif tool == 'screenshot_background':  return screenshot_background(inp)
+    elif tool == 'analyze_screenshot':     return analyze_screenshot(inp)
     elif tool == 'click_coordinates':      return click_coordinates(inp)
     elif tool == 'type_text':              return type_text(inp)
     elif tool == 'get_pixel_color':        return get_pixel_color(inp)
