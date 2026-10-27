@@ -4465,6 +4465,15 @@ initiative: inspect the file, write the script, execute it, and report the
 result. Only ask for confirmation before destructive, irreversible actions
 (like deleting a file).
 
+Once a user confirms a file path (e.g., C:\Users\USER\Downloads\Log Intern.docx),
+you must LOCK onto that path for the rest of the conversation. Do not search
+the filesystem again, do not ask for the path again, and do not get confused
+by similar filenames (like .bak files).
+
+If the user has already said yes/confirm to an action, immediately write the
+execute_python script to perform the edit. Do not re-inspect the file unless
+the script fails.
+
 Destructive or irreversible actions require explicit confirmation. shutdown_pc,
 restart_pc, and telegram_user_delete after preview require "confirm". Never
 infer consent from tone or context.
@@ -4720,8 +4729,8 @@ hardware_scan() — report the user's GPU, VRAM, RAM, CPU cores.
 recommend_models() — recommend Ollama models that fit the user's hardware.
 
 MUSIC & MEDIA
-  play_on_youtube(input) — play a song on YouTube Music via URL autoplay.
-Input: song and/or artist, e.g. "50/50 the strokes". Opens in Opera, autoplays.
+  play_on_youtube(input) — play a song on YouTube Music in Opera.
+Input: song and/or artist, e.g. "50/50 the strokes".
   stream_media(input) — play a URL or search (movies, anime, music) in mpv/VLC (no site ads).
 
 LOCAL FILES & DOCUMENTS
@@ -4814,9 +4823,8 @@ COMMUNICATION
     for other people.
   telegram_user_send(input) — send as the user: "ContactName|message";
     "me" means Saved Messages.
-  telegram_user_delete(input) — "Contact|text" to preview; append |confirm
-    to delete; append |all for every matching message; newest uses
-    "Contact|latest".
+  telegram_user_delete(input) — "Contact|text" previews; add |confirm to
+    delete, |all for every match; "Contact|latest" is the newest.
   telegram_user_edit(input) — "Contact|old text|new text"; within 48h.
   send_image_telegram(input) — send an image file as the user:
     "contact|image_path"; "me" = Saved Messages; a bare filename means
@@ -4862,14 +4870,14 @@ SECURITY
   list_quarantine() — list files currently in quarantine.
 
 OFFICE (NATIVE COM)
-  read_word_doc(input) — read all text from a Word file through Word's COM
-    API. Input: full path. Read-only, no conversion needed.
-  set_word_language(input) — set Word's default language for new documents.
-    Input: locale code such as "en-US" or "fr-FR".
+  read_word_doc(input) — all text from a Word file via COM. Input: full path.
+    Read-only.
+  set_word_language(input) — Word's default language for new documents.
+    Input: locale, e.g. "en-US".
 
 DOCUMENT EDITING
-  inspect_docx(input) — JSON map of a .docx: paragraph text/styles and every
-    table's rows, columns, and cells. Input: full path. Use before editing.
+  inspect_docx(input) — JSON map of a .docx: paragraphs and every table's
+    rows, columns, cells. Full path. Use before editing.
   edit_document(input) — edit an existing DOCX, XLSX, PPTX, or PDF file.
     Format: "filepath|instruction" where filepath is an absolute path and
     instruction is natural language describing the edit. The tool backs the
@@ -4936,10 +4944,6 @@ Tool required:
   "read C:\\Users\\USER\\notes.md" → {"tool":"read_file","input":"C:\\Users\\USER\\notes.md"}
   "send jeffrey a list of these 3 cafes" →
     {"tool":"send_maps_list","input":"Jeffrey|Dalrock Diner Shah Alam|Lakewood Cafe Shah Alam|Starbucks Shah Alam"}
-- "find files with SPM, CTU or LCC in Telegram Desktop"
-    → {"tool":"find_files","input":"telegram desktop|SPM,CTU,LCC"}
-- "move them all to a folder called delete"
-    → {"tool":"move_files","input":"telegram desktop|SPM,CTU,LCC|delete"}
 Compound, independent (one per line):
   {"tool":"weather","input":"Shah Alam"}
   {"tool":"telegram_user_send","input":"John|it's raining, bring an umbrella"}
@@ -5648,10 +5652,23 @@ def run_agent_turn(user_input, conversation_history, on_step=None):
     return step_log
 
 
+def _history_window(conversation_history):
+    try:
+        import context_compactor
+        return context_compactor.history_window(conversation_history)
+    except Exception:
+        return list(conversation_history or [])[-10:]
+
+
 def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
     # Request setup and bounded tool-call loop.
     step_log = _StepLog(on_step)
     last_signature = None
+    try:
+        import context_compactor
+        conversation_history = context_compactor.compact_history(conversation_history)
+    except Exception as e:
+        print(f"[compactor] skipped: {e}")
     # Force-inject RAG context for content-ish questions
     try:
         from rag_tool import search_documents
@@ -5685,7 +5702,7 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
     _ran_out_of_steps = False
     for step in range(MAX_STEPS_PER_TURN):
         step_start = time.time()
-        context = "\n".join(conversation_history[-10:] + step_log)
+        context = "\n".join(_history_window(conversation_history) + step_log)
 
         if step == 0:
             if is_pushback:
@@ -5823,7 +5840,7 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
     )
 
     if not has_reply:
-        synthesis_context = "\n".join(conversation_history[-10:] + step_log)
+        synthesis_context = "\n".join(_history_window(conversation_history) + step_log)
         fallback_prompt = f"""User asked: "{user_input}"
 
 You got stuck before replying. Using ONLY the real info gathered below — do not invent anything — give the best honest answer you can, in plain text.
