@@ -2071,16 +2071,35 @@ PLAYER_INSTALL_PATHS = {
 }
 
 
+def _find_mpv():
+    """Locate mpv.exe on PATH, then in the WinGet shim and Program Files."""
+    found = shutil.which("mpv")
+    if found:
+        return found
+    local = os.environ.get("LOCALAPPDATA")
+    candidates = [
+        os.path.join(local, "Microsoft", "WinGet", "Links", "mpv.exe") if local else "",
+        r"C:\Program Files\MPV Player\mpv.exe",
+        r"C:\Program Files\mpv\mpv.exe",
+        r"C:\Program Files (x86)\mpv\mpv.exe",
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
 def _find_media_player():
     """Return (name, executable) for mpv or VLC, else (None, None)."""
-    for name, binary in (("mpv", "mpv"), ("VLC", "vlc")):
-        found = shutil.which(binary)
-        if found:
-            return name, found
-    for name, paths in PLAYER_INSTALL_PATHS.items():
-        for path in paths:
-            if os.path.isfile(path):
-                return name, path
+    mpv = _find_mpv()
+    if mpv:
+        return "mpv", mpv
+    vlc = shutil.which("vlc")
+    if vlc:
+        return "VLC", vlc
+    for path in PLAYER_INSTALL_PATHS["VLC"]:
+        if os.path.isfile(path):
+            return "VLC", path
     return None, None
 
 

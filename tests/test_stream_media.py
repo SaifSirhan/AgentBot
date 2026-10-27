@@ -202,5 +202,47 @@ class StreamMediaTests(unittest.TestCase):
         self.assertEqual(reply, "ERROR: cannot start mpv: denied")
 
 
+class PlayerLookupTests(unittest.TestCase):
+    def test_path_wins(self):
+        with mock.patch.object(agent.shutil, "which", return_value=r"C:\tools\mpv.exe"):
+            self.assertEqual(agent._find_mpv(), r"C:\tools\mpv.exe")
+
+    def test_winget_link_is_used_when_not_on_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            links = Path(tmp, "Microsoft", "WinGet", "Links")
+            links.mkdir(parents=True)
+            (links / "mpv.exe").write_bytes(b"")
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}), \
+                    mock.patch.object(agent.shutil, "which", return_value=None):
+                self.assertEqual(agent._find_mpv(), str(links / "mpv.exe"))
+
+    def test_program_files_install_is_used(self):
+        installed = r"C:\Program Files\MPV Player\mpv.exe"
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": ""}), \
+                mock.patch.object(agent.shutil, "which", return_value=None), \
+                mock.patch.object(agent.os.path, "isfile",
+                                  side_effect=lambda p: p == installed):
+            self.assertEqual(agent._find_mpv(), installed)
+
+    def test_missing_mpv_returns_none(self):
+        with mock.patch.object(agent.shutil, "which", return_value=None), \
+                mock.patch.object(agent.os.path, "isfile", return_value=False):
+            self.assertIsNone(agent._find_mpv())
+
+    def test_player_falls_back_from_mpv_to_vlc_to_none(self):
+        with mock.patch.object(agent, "_find_mpv", return_value=r"C:\mpv.exe"):
+            self.assertEqual(agent._find_media_player(), ("mpv", r"C:\mpv.exe"))
+
+        with mock.patch.object(agent, "_find_mpv", return_value=None), \
+                mock.patch.object(agent.shutil, "which",
+                                  side_effect=lambda b: r"C:\vlc.exe" if b == "vlc" else None):
+            self.assertEqual(agent._find_media_player(), ("VLC", r"C:\vlc.exe"))
+
+        with mock.patch.object(agent, "_find_mpv", return_value=None), \
+                mock.patch.object(agent.shutil, "which", return_value=None), \
+                mock.patch.object(agent.os.path, "isfile", return_value=False):
+            self.assertEqual(agent._find_media_player(), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()
