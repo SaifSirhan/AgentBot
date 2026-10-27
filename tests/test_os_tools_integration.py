@@ -98,6 +98,19 @@ class OSToolRegistryTests(unittest.TestCase):
             flat)
         self.assertIn("Never ask the user for coordinates.", flat)
 
+    def test_pre_action_rubric_precedes_autonomy_rules(self):
+        flat = " ".join(agent.TOOL_DESCRIPTIONS.split())
+        rubric = (
+            "Before executing a click or file modification, ask yourself: "
+            "1. Is this the exact app window I want? 2. Is the target "
+            "clearly visible? 3. Did the previous click actually do "
+            "something? If the answer to any is NO, take a fresh screenshot "
+            "before acting.")
+        self.assertIn(rubric, flat)
+        self.assertLess(flat.index("PRE-ACTION RUBRIC"), flat.index(rubric))
+        self.assertLess(
+            flat.index(rubric), flat.index("You are an autonomous agent."))
+
     def test_screenshots_can_repeat_but_clicks_cannot(self):
         shot = ("screenshot_background", "Stremio")
         self.assertFalse(
