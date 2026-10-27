@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+import config as _cfg
+
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 CHUNK_SAMPLES = 1_280
@@ -35,7 +37,7 @@ MAX_READ_FAILURES = 5
 
 CUSTOM_MODEL_NAME = "agent"
 MODEL_DIRS = (
-    Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "AgentMemory" / "wakeword",
+    Path(_cfg.memory_path("wakeword")),
     Path(__file__).resolve().parent / "models",
 )
 

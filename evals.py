@@ -12,12 +12,17 @@ import hashlib, json, os, re, time, uuid
 from datetime import datetime
 from pathlib import Path
 
-EVALS_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "AgentMemory" / "evals"
+import config as _cfg
+
+EVALS_DIR = Path(_cfg.memory_path("evals"))
 TRACES_DIR = EVALS_DIR / "traces"
 SUITES_DIR = EVALS_DIR / "suites"
 RUNS_DIR = EVALS_DIR / "runs"
 for _d in (TRACES_DIR, SUITES_DIR, RUNS_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+    try:
+        _d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
 
 
 # ---------- redaction ----------

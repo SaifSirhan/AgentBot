@@ -40,17 +40,19 @@ import telegram_user
 # ---------------------------
 # PERSISTENT CONVERSATION
 # ---------------------------
-CONVERSATION_FILE = os.path.join(
-    os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'conversation.json'
-)
 MAX_HISTORY_ENTRIES = 40
 
 
+def _conversation_file():
+    return _cfg.memory_path('conversation.json')
+
+
 def load_conversation_history():
-    if not os.path.exists(CONVERSATION_FILE):
+    path = _conversation_file()
+    if not os.path.exists(path):
         return []
     try:
-        with open(CONVERSATION_FILE, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             return data.get('history', [])[-MAX_HISTORY_ENTRIES:]
     except (json.JSONDecodeError, OSError):
@@ -59,8 +61,9 @@ def load_conversation_history():
 
 def save_conversation_history(history):
     try:
-        os.makedirs(os.path.dirname(CONVERSATION_FILE), exist_ok=True)
-        with open(CONVERSATION_FILE, 'w', encoding='utf-8') as f:
+        path = _conversation_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
             json.dump({'history': history[-MAX_HISTORY_ENTRIES:]}, f, indent=2)
     except Exception as e:
         print(f"[conversation save error] {e}")
@@ -218,14 +221,17 @@ KNOWN_WEB_APPS = {
     "stackoverflow": "https://stackoverflow.com",
 }
 
-TODO_FILE = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'todos.json')
+TODO_FILE = _cfg.memory_path('todos.json')
 
 
 # ---------------------------
 # SKILLS (Hermes-style auto-generated procedures)
 # ---------------------------
-SKILLS_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "AgentMemory" / "skills"
-SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+SKILLS_DIR = Path(_cfg.memory_dir()) / "skills"
+try:
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+except OSError as _skills_dir_error:
+    print(f"[skills] cannot create {SKILLS_DIR}: {_skills_dir_error}")
 
 # Repo-owned roots for versioned skills and plugin packs. The legacy
 # SKILLS_DIR above is still scanned as a lower-priority extra root.
@@ -1005,9 +1011,7 @@ def get_last_brain():
 # ---------------------------
 # MOOD + TIME-OF-DAY PERSONA
 # ---------------------------
-MOOD_FILE = os.environ.get("AGENTBOT_MOOD_FILE") or os.path.join(
-    os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'mood.json'
-)
+MOOD_FILE = os.environ.get("AGENTBOT_MOOD_FILE") or _cfg.memory_path("mood.json")
 MOOD_LOCK = _threading.RLock()
 MOOD_MAX = 10
 FRUSTRATION_THRESHOLD = 3
@@ -4050,9 +4054,7 @@ def read_screen():
 # ---------------------------
 # AGENT IDENTITY
 # ---------------------------
-AGENT_NAME_FILE = os.path.join(
-    os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'agent_name.json'
-)
+AGENT_NAME_FILE = _cfg.memory_path('agent_name.json')
 
 
 def get_agent_name():

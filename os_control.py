@@ -27,6 +27,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+import config as _cfg
+
 # ----------------------------------------------------------------------
 # DPI awareness (must happen before PyAutoGUI touches the screen)
 # ----------------------------------------------------------------------
@@ -251,8 +253,7 @@ def _visibility_handlers() -> Tuple[Optional[Callable], Optional[Callable]]:
 # ----------------------------------------------------------------------
 # Screen helpers
 # ----------------------------------------------------------------------
-SCREENSHOT_DIR = (Path(os.environ.get("LOCALAPPDATA") or Path.home())
-                  / "AgentMemory" / "screenshots")
+SCREENSHOT_DIR = (Path(_cfg.memory_path("screenshots")))
 SCREENSHOT_SETTLE_SECONDS = 0.35
 CLICK_SETTLE_SECONDS = 0.5
 FOCUS_SETTLE_SECONDS = 0.2

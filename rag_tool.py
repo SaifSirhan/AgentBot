@@ -17,19 +17,15 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 
+import config as _cfg
+
 # Where the vector database lives
-DB_PATH = os.path.join(
-    os.environ.get("APPDATA", "."),
-    "AgentBot",
-    "rag_db"
-)
+DB_PATH = _cfg.memory_path("rag_db")
 
 # Which embedding model to use. Small and fast.
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-STATE_FILE = os.path.join(
-    os.environ.get("APPDATA", "."), "AgentBot", "rag_state.json"
-)
+STATE_FILE = _cfg.memory_path("rag_state.json")
 
 # Root of the flattened Telegram export. Kept in sync with
 # telegram_export_parser.OUTPUT_DIR; consumers use it to scope searches to the

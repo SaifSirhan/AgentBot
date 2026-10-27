@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from zipfile import BadZipFile, ZipFile
 
+import config as _cfg
+
 import requests
 
 try:
@@ -104,8 +106,7 @@ def _build_logger() -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.propagate = False
     try:
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        log_dir = os.path.join(base, "AgentMemory")
+        log_dir = _cfg.memory_dir()
         os.makedirs(log_dir, exist_ok=True)
         handler: logging.Handler = logging.FileHandler(
             os.path.join(log_dir, "telegram_docs.log"), encoding="utf-8"

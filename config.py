@@ -17,6 +17,10 @@ DEFAULTS = {
         "C:\\Users\\USER\\Downloads\\sistem-dc-v2"
         
     ],
+    # Where conversation/facts/mood/RAG/state live. Empty = %LOCALAPPDATA%\AgentMemory.
+    # Point it at a dedicated drive (e.g. D:\AgentBrain); the environment
+    # variable of the same name overrides the file.
+    "AGENT_MEMORY_DIR": "",
     "GROQ_API_KEY": "",
     "GEMINI_API_KEY": "",
     "OPENROUTER_API_KEY": "",
@@ -129,5 +133,30 @@ def save_config(cfg):
 
 def get(key, default=""):
     return load_config().get(key, default)
+
+
+DEFAULT_MEMORY_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+    "AgentMemory",
+)
+
+
+def memory_dir():
+    """Return the active AgentMemory directory, creating it when possible."""
+    configured = (load_config().get("AGENT_MEMORY_DIR") or "").strip()
+    if configured:
+        path = os.path.abspath(os.path.expandvars(os.path.expanduser(configured)))
+    else:
+        path = DEFAULT_MEMORY_DIR
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+def memory_path(*parts):
+    """Return a path inside the active AgentMemory directory."""
+    return os.path.join(memory_dir(), *parts)
     
     

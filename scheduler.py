@@ -16,9 +16,11 @@ import time
 from datetime import datetime, timedelta
 import schedule
 
-TASKS_FILE = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'scheduled_tasks.json')
-REMINDERS_FILE = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'reminders.json')
-CRON_FILE = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'cron_jobs.json')
+import config as _cfg
+
+TASKS_FILE = _cfg.memory_path('scheduled_tasks.json')
+REMINDERS_FILE = _cfg.memory_path('reminders.json')
+CRON_FILE = _cfg.memory_path('cron_jobs.json')
 
 
 # ---------------------------

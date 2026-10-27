@@ -22,9 +22,11 @@ import re
 import difflib
 import datetime
 
-MEMORY_FILE = os.path.join(
-    os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'facts.json'
-)
+import config as _cfg
+
+
+def _memory_file():
+    return _cfg.memory_path("facts.json")
 
 VALID_CATEGORIES = {
     "identity", "preferences", "work", "relationships",
@@ -68,10 +70,11 @@ def _is_duplicate(new_fact: str, existing_texts: list, threshold: float = 0.85) 
 
 def _load():
     """Return list of dicts. Migrates old list-of-strings format."""
-    if not os.path.exists(MEMORY_FILE):
+    path = _memory_file()
+    if not os.path.exists(path):
         return []
     try:
-        with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return []
@@ -96,8 +99,9 @@ def _load():
 
 
 def _save(facts):
-    os.makedirs(os.path.dirname(MEMORY_FILE), exist_ok=True)
-    with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
+    path = _memory_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
         json.dump({'facts': facts}, f, indent=2)
 
 
@@ -204,6 +208,6 @@ def list_facts():
 
 
 if __name__ == "__main__":
-    print(f"Memory file: {MEMORY_FILE}")
+    print(f"Memory file: {_memory_file()}")
     for i, f in enumerate(_load()):
         print(f"  [{i}] ({f['category']}) {f['fact']}")

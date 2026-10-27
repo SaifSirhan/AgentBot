@@ -27,7 +27,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 
 # Where the saved login token goes
-TOKEN_FILE = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'AgentMemory', 'gmail_token.json')
+import config as _cfg
+TOKEN_FILE = _cfg.memory_path('gmail_token.json')
 
 # Scopes - read-only is safest. Change to 'gmail.modify' if you want to
 # mark read / move to trash in the future.
