@@ -193,21 +193,28 @@ class SkillIntegrationTests(unittest.TestCase):
 
 
 class StremioSkillContentTests(unittest.TestCase):
-    """The Stremio skill must keep the user-mandated external-player note."""
+    """The Stremio skill must keep one OS Control route and the player note."""
 
-    def test_external_player_note_and_browser_guard(self):
+    def test_skill_has_one_os_control_route(self):
         path = (Path(__file__).resolve().parent.parent
                 / "skills" / "stremio" / "SKILL.md")
         text = " ".join(path.read_text(encoding="utf-8").split())
+        self.assertIn(
+            "If the user asks to watch a movie or TV show, you MUST use OS "
+            "Control on the Desktop Stremio app. Focus the Stremio window, "
+            "take a screenshot, click the search bar, type the title, click "
+            "the poster, and click the first stream.",
+            text,
+        )
         self.assertIn(
             "Before clicking a stream, remind the user to ensure Stremio is "
             "set to play in an external player (mpv) in its settings so the "
             "video plays instantly without buffering in the Stremio window.",
             text,
         )
-        self.assertIn("https://web.stremio.com", text)
-        self.assertIn("anonymous guest", text)
-        self.assertIn("browse_web", text)
+        for forbidden in ("web.stremio.com", "browse_web", "Playwright",
+                          "Chromium"):
+            self.assertNotIn(forbidden, text)
 
 
 if __name__ == "__main__":

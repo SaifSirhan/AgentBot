@@ -1,6 +1,6 @@
 ---
 name: stremio
-description: "Watch movies and TV shows by driving the Stremio app with OS Control: screenshot, search, click the poster, then the first Torrentio stream link."
+description: "Watch movies and TV shows by driving the Desktop Stremio app with OS Control: screenshot, search, click the poster, then the first Torrentio stream link."
 ---
 
 # Stremio
@@ -10,52 +10,30 @@ description: "Watch movies and TV shows by driving the Stremio app with OS Contr
 `stream_media` covers trailers, songs, and specific YouTube URLs. Full movies
 and TV episodes belong here, in Stremio.
 
-If the user asks to watch a full movie or TV show, use the desktop route below
-to open Stremio, search for the title, and click the first Torrentio stream.
-Do not use stream_media or a browser stream for this.
+If the user asks to watch a movie or TV show, you MUST use OS Control on the
+Desktop Stremio app. Focus the Stremio window, take a screenshot, click the
+search bar, type the title, click the poster, and click the first stream.
+Do not use stream_media for this.
 
 ## Overview
 
 Stremio is the desktop media center on this machine. Torrentio is its usual
 stream add-on. The agent has no API for Stremio, so playback is driven visually:
-screenshot, click, type, screenshot again. `web.stremio.com` can navigate faster
-through the DOM, but it cannot play the desktop app's Torrentio streams. Never
-click blind and never report playback you did not see on screen.
-
-## Choosing a route
-
-- **Desktop route (playback):** OS Control with vision. This is the route that
-  uses the Torrentio add-on installed in the desktop app and can hand the
-  stream to mpv.
-- **Browser route (navigation only, when usable):** `browse_web` on
-  `https://web.stremio.com` reads the DOM and clicks by visible label (for
-  example the episode "Cherry") without screenshot or vision calls. Prefer it
-  for finding a title or episode only when the browser profile is signed in and
-  the Addons page lists Torrentio. AgentBot starts a fresh Chromium profile per
-  task, so the default is an anonymous guest with only the built-in add-ons
-  (Cinemeta, YouTube, WatchHub, Public Domain Movies, OpenSubtitles, Local
-  Files). An HTTPS page also cannot reach the local streaming server
-  (`http://127.0.0.1:11470 ... ERR_FAILED`). If Torrentio is missing, the
-  profile is anonymous, the Streaming URL shows an error, or `browse_web`
-  reports the origin is not allowlisted, stop using the browser route and
-  switch to the desktop route; do not retry it.
-- **Never mix them:** use the browser route to find or navigate, but play
-  through the desktop route. Do not claim a movie is playing from web metadata.
+screenshot, click, type, screenshot again. Never click blind and never report
+playback you did not see on screen.
 
 ## Procedure
 
-1. **Check whether Stremio is running.** Use the `list_windows` tool; if any
-   title contains "Stremio", it is open. Otherwise launch it with
-   `open_app("Stremio")` and wait a few seconds for the home screen to load.
-   If it is minimized, focus it with `focus_window("Stremio")`, or pass the
-   window title to the screenshot and click calls.
+1. **Focus Stremio.** Use `list_windows`; if no title contains "Stremio",
+   launch it with `open_app("Stremio")` and wait a few seconds. If it is
+   minimized, restore it with `focus_window("Stremio")`.
 
 2. **Screenshot the app, not the desktop.** Call
    `screenshot_background("Stremio")`. It hides AgentBot, restores/focuses
    the Stremio window, captures the screen, and returns a vision description
    with pixel coordinates. Read the X/Y of the element you need from that
-   description. Coordinates are relative to the primary monitor and change
-   with window size, so take a fresh screenshot before each click.
+   description. Coordinates change with window size, so take a fresh
+   screenshot before each click.
 
 3. **Search.** To click the search bar, you must first take a screenshot, use
    your vision to locate the text "Search", output the X/Y coordinates, and
@@ -83,9 +61,7 @@ click blind and never report playback you did not see on screen.
 
 ## Rules
 
-- The browser route is not a playback route: a fresh profile is an anonymous
-  guest without Torrentio, and the local streaming server is unreachable from
-  an HTTPS page. Do not retry `browse_web` for streams; switch to OS Control.
+- Use the Desktop Stremio app only.
 - You have a vision model. Use `analyze_screenshot("Stremio|Where is the
   search bar?")` to read the screen. Never tell the user you only received a
   file path.

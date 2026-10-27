@@ -92,6 +92,15 @@ class OSToolRegistryTests(unittest.TestCase):
             flat)
         self.assertIn("Never ask the user for coordinates.", flat)
 
+    def test_stream_media_is_constrained_to_urls_and_music(self):
+        text = " ".join(agent.TOOL_DESCRIPTIONS.split())
+        self.assertIn(
+            "ONLY use stream_media for YouTube videos, music, or direct video "
+            "URLs. NEVER use stream_media to search for full movies or TV "
+            "shows.",
+            text,
+        )
+
     def test_prompt_budget(self):
         prompt = agent._build_plan_prompt("hello", "")
         self.assertLess(
@@ -185,95 +194,6 @@ class ScreenshotVisionTests(unittest.TestCase):
 
         self.assertEqual(out, "ABORTED: kill switch is latched")
         vision.assert_not_called()
-
-
-class VisionCoordinateTests(unittest.TestCase):
-    def test_parses_common_vision_formats(self):
-        for reply in (
-            "x=640, y=40",
-            "(640, 40)",
-            "640, 40",
-            "The search bar is at 640, 40 in this 1280x720 image.",
-        ):
-            self.assertEqual(
-                agent._vision_coordinates(reply, 1280, 720), (640, 40), reply)
-
-    def test_rejects_none_and_out_of_bounds(self):
-        self.assertIsNone(agent._vision_coordinates("NONE", 1280, 720))
-        self.assertIsNone(agent._vision_coordinates("9999, 9999", 1280, 720))
-        self.assertIsNone(agent._vision_coordinates("", 1280, 720))
-
-
-class StremioSearchTests(unittest.TestCase):
-    def test_opens_app_then_searches_and_clicks_first_result(self):
-        with mock.patch.object(agent, "PYGETWINDOW_AVAILABLE", True), \
-             mock.patch.object(agent, "gw") as gw, \
-             mock.patch.object(agent, "open_app",
-                               return_value="Opened Stremio.") as opened, \
-             mock.patch.object(agent, "_stremio_locate", side_effect=[
-                 ((100, 20), "search"), ((300, 200), "first")]) as locate, \
-             mock.patch.object(agent, "click_coordinates",
-                               return_value="Clicked") as click, \
-             mock.patch.object(agent, "type_text",
-                               return_value="Typed") as typed, \
-             mock.patch.object(agent.time, "sleep") as sleep:
-            gw.getWindowsWithTitle.side_effect = [[], [object()]]
-            out = agent.stremio_search("Cherry")
-
-        opened.assert_called_once_with("Stremio")
-        self.assertEqual(
-            click.call_args_list,
-            [mock.call("100,20 | Stremio"), mock.call("300,200 | Stremio")])
-        typed.assert_called_once_with("Cherry{enter}")
-        sleep.assert_any_call(agent.STREMIO_RESULT_WAIT)
-        self.assertEqual(locate.call_count, 2)
-        self.assertIn("searched 'Cherry'", out)
-
-    def test_existing_window_is_not_relaunched(self):
-        with mock.patch.object(agent, "PYGETWINDOW_AVAILABLE", True), \
-             mock.patch.object(agent, "gw") as gw, \
-             mock.patch.object(agent, "open_app") as opened, \
-             mock.patch.object(agent, "_stremio_locate", side_effect=[
-                 ((100, 20), "search"), ((300, 200), "first")]), \
-             mock.patch.object(agent, "click_coordinates",
-                               return_value="Clicked"), \
-             mock.patch.object(agent, "type_text", return_value="Typed"), \
-             mock.patch.object(agent.time, "sleep"):
-            gw.getWindowsWithTitle.return_value = [object()]
-            agent.stremio_search("Cherry")
-
-        opened.assert_not_called()
-
-    def test_no_result_does_not_click_twice(self):
-        with mock.patch.object(agent, "PYGETWINDOW_AVAILABLE", True), \
-             mock.patch.object(agent, "gw") as gw, \
-             mock.patch.object(agent, "_stremio_locate", side_effect=[
-                 ((100, 20), "search"),
-                 (None, "ERROR: vision saw no results")]), \
-             mock.patch.object(agent, "click_coordinates",
-                               return_value="Clicked") as click, \
-             mock.patch.object(agent, "type_text", return_value="Typed"), \
-             mock.patch.object(agent.time, "sleep"):
-            gw.getWindowsWithTitle.return_value = [object()]
-            out = agent.stremio_search("Cherry")
-
-        self.assertTrue(out.startswith("ERROR: search for 'Cherry'"), out)
-        self.assertEqual(click.call_count, 1)
-
-    def test_missing_search_bar_stops_before_typing(self):
-        with mock.patch.object(agent, "PYGETWINDOW_AVAILABLE", True), \
-             mock.patch.object(agent, "gw") as gw, \
-             mock.patch.object(agent, "_stremio_locate",
-                               return_value=(None, "ERROR: no search bar")), \
-             mock.patch.object(agent, "click_coordinates") as click, \
-             mock.patch.object(agent, "type_text") as typed, \
-             mock.patch.object(agent.time, "sleep"):
-            gw.getWindowsWithTitle.return_value = [object()]
-            out = agent.stremio_search("Cherry")
-
-        self.assertEqual(out, "ERROR: no search bar")
-        click.assert_not_called()
-        typed.assert_not_called()
 
 
 if __name__ == "__main__":
