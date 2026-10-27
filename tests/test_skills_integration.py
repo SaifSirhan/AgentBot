@@ -192,5 +192,23 @@ class SkillIntegrationTests(unittest.TestCase):
             self.assertNotIn("local:temp-skill", agent.get_skill_catalog())
 
 
+class StremioSkillContentTests(unittest.TestCase):
+    """The Stremio skill must keep the user-mandated external-player note."""
+
+    def test_external_player_note_and_browser_guard(self):
+        path = (Path(__file__).resolve().parent.parent
+                / "skills" / "stremio" / "SKILL.md")
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        self.assertIn(
+            "Before clicking a stream, remind the user to ensure Stremio is "
+            "set to play in an external player (mpv) in its settings so the "
+            "video plays instantly without buffering in the Stremio window.",
+            text,
+        )
+        self.assertIn("https://web.stremio.com", text)
+        self.assertIn("anonymous guest", text)
+        self.assertIn("browse_web", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
