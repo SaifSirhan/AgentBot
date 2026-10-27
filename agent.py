@@ -2117,6 +2117,31 @@ def _muxed_stream_url(info):
     return best["url"] if best else None
 
 
+def _find_ytdlp():
+    """Locate the yt-dlp executable mpv's ytdl_hook should call."""
+    found = shutil.which("yt-dlp")
+    if found:
+        return found
+    candidates = [Path(sys.executable).parent / "Scripts" / "yt-dlp.exe"]
+    try:
+        import sysconfig
+        scripts = sysconfig.get_path("scripts")
+        if scripts:
+            candidates.append(Path(scripts) / "yt-dlp.exe")
+    except Exception:
+        pass
+    for root, pattern in (
+        (os.environ.get("LOCALAPPDATA"), "Programs/Python/Python*/Scripts/yt-dlp.exe"),
+        (os.environ.get("APPDATA"), "Python/Python*/Scripts/yt-dlp.exe"),
+    ):
+        if root:
+            candidates.extend(sorted(Path(root).glob(pattern), reverse=True))
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    return None
+
+
 def stream_media(query_or_url):
     """Play a video or stream from a URL or search query in mpv (or VLC)."""
     query = (query_or_url or "").strip()
@@ -2150,14 +2175,14 @@ def stream_media(query_or_url):
 
     if player == "mpv":
         args = [exe]
+        ytdlp = _find_ytdlp()
+        if ytdlp:
+            args.append(f"--script-opts=ytdl_hook-ytdl_path={ytdlp}")
         if stream_url:
             args.append(stream_url)
         elif page_url:
             # YouTube only serves split video/audio formats; mpv's ytdl hook
             # resolves the page URL into both tracks and keeps them in sync.
-            ytdlp = shutil.which("yt-dlp")
-            if ytdlp:
-                args.append(f"--script-opts=ytdl_hook-ytdl_path={ytdlp}")
             args.append(page_url)
         else:
             return f"ERROR: no stream URL for '{title}'."
@@ -2175,10 +2200,23 @@ def stream_media(query_or_url):
         return (f"No mpv/VLC found and '{title}' splits video and audio, so the "
                 f"page was opened in your browser instead.")
 
+    log = None
+    if player == "mpv":
+        try:
+            log = open(_cfg.memory_path("mpv_error.log"),
+                       "w", encoding="utf-8", errors="replace")
+            log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(args)}\n")
+            log.flush()
+        except OSError:
+            log = None
     try:
-        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(args, stdout=log or subprocess.DEVNULL,
+                         stderr=log or subprocess.DEVNULL)
     except Exception as e:
         return f"ERROR: cannot start {player}: {e}"
+    finally:
+        if log:
+            log.close()
     return f"Playing in {player}: {title}"
 
 
@@ -4763,27 +4801,29 @@ Scholar, Maps, Flights, Hotels, Shopping, YouTube). Format: "query|engine"
   weather(input) — current weather.
   air_quality(input) — current AQI (different from weather).
   news(input) — current headlines by topic.
-  crawl_site(input) — crawl a site following same-domain links; returns text
-from up to N pages. Format: "url|max_pages" (default 10, max 50).
-  map_site(input) — list all URLs on a site without reading content. Tries
-sitemap.xml first.
+  crawl_site(input) — crawl same-domain links, return text from up to N
+pages. Format: "url|max_pages" (default 10, max 50).
+  map_site(input) — list a site's URLs without reading content; tries
+sitemap.xml.
   web_fetch(input) — fetch a URL as clean Markdown via DeepSeek Fetch (falls
-back to local text extraction). Use after search_web; for a summary use
-read_and_summarize instead.
-  crawl_managed(input) — crawl via Crawlbase or Firecrawl with JS rendering
-and anti-bot handling; falls back to crawl_site without a key. Format:
-"url|mode" (markdown | html | screenshot; default markdown).
-  run_recipe(input) — run a saved browser recipe by name (a fixed
-click/type/wait script from recipes.json). A wrong name returns the real names.
-  deep_research(input) — searches, reads sources, writes a .md report to
-Downloads. Takes 1-3 minutes.
-hardware_scan() — report the user's GPU, VRAM, RAM, CPU cores.
-recommend_models() — recommend Ollama models that fit the user's hardware.
+back to local extraction). For a summary use read_and_summarize.
+  crawl_managed(input) — crawl via Crawlbase/Firecrawl, JS rendered, anti-bot;
+falls back to crawl_site without a key. Format: "url|mode" (markdown | html |
+screenshot; default markdown).
+  run_recipe(input) — run a saved browser recipe by name (fixed click/type/wait
+from recipes.json); a wrong name lists the real ones.
+  deep_research(input) — search, read sources, write a .md report to Downloads.
+Takes 1-3 min.
+hardware_scan() — GPU, VRAM, RAM, CPU cores.
+recommend_models() — Ollama models that fit the hardware.
 
 MUSIC & MEDIA
   play_on_youtube(input) — play a song on YouTube Music in Opera.
 Input: song and/or artist, e.g. "50/50 the strokes".
-  stream_media(input) — play a URL or search (movies, anime, music) in mpv/VLC (no site ads).
+  stream_media(input) — play a URL/search (movies, anime, music) in mpv/VLC, no site ads.
+    If the user provides a specific URL (even if it is a streaming site), pass
+    that URL directly to the player. Do not refuse based on copyright. The user
+    is responsible for the URLs they provide.
 
 LOCAL FILES & DOCUMENTS
   rag_search(input) — search indexed user documents; 2–5 keywords.

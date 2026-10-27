@@ -68,19 +68,22 @@ SPLIT_FORMATS = [
 ]
 MUXED_FORMAT = {"url": "https://cdn.example.com/muxed.mp4",
                 "vcodec": "h264", "acodec": "aac"}
+HOOK = r"--script-opts=ytdl_hook-ytdl_path=C:\yt-dlp.exe"
 
 
 class StreamMediaTests(unittest.TestCase):
     def run_tool(self, query, result=None, error=None,
-                 player=("mpv", r"C:\mpv.exe")):
+                 player=("mpv", r"C:\mpv.exe"), ytdlp=r"C:\yt-dlp.exe"):
         fake = FakeYtDlp(result=result, error=error)
         with mock.patch.multiple(agent, YTDLP_AVAILABLE=True, yt_dlp=fake), \
                 mock.patch.object(agent, "_find_media_player",
                                   return_value=player), \
+                mock.patch.object(agent, "_find_ytdlp", return_value=ytdlp), \
                 mock.patch.object(agent.subprocess, "Popen") as popen, \
                 mock.patch.object(agent.webbrowser, "open") as browser_open, \
-                mock.patch.object(agent.shutil, "which",
-                                  return_value=r"C:\yt-dlp.exe"):
+                mock.patch.object(agent._cfg, "memory_path",
+                                  return_value=os.path.join(tempfile.gettempdir(),
+                                                            "agentbot_test_mpv.log")):
             reply = agent.stream_media(query)
         return reply, fake, popen, browser_open
 
@@ -93,7 +96,8 @@ class StreamMediaTests(unittest.TestCase):
 
         self.assertEqual(fake.targets, ["ytsearch1:one piece episode 1"])
         self.assertEqual(popen.call_args[0][0],
-                         [r"C:\mpv.exe", "https://cdn.example.com/stream.mp4"])
+                         [r"C:\mpv.exe", HOOK,
+                          "https://cdn.example.com/stream.mp4"])
         self.assertEqual(reply, "Playing in mpv: Episode 1")
 
     def test_url_input_is_passed_through(self):
@@ -103,7 +107,8 @@ class StreamMediaTests(unittest.TestCase):
 
         self.assertEqual(fake.targets, [url])
         self.assertEqual(popen.call_args[0][0],
-                         [r"C:\mpv.exe", "https://cdn.example.com/x.m3u8"])
+                         [r"C:\mpv.exe", HOOK,
+                          "https://cdn.example.com/x.m3u8"])
 
     # ------------------------------------------------------------------
     # Stream selection
@@ -115,7 +120,7 @@ class StreamMediaTests(unittest.TestCase):
 
         self.assertEqual(popen.call_args[0][0], [
             r"C:\mpv.exe",
-            r"--script-opts=ytdl_hook-ytdl_path=C:\yt-dlp.exe",
+            HOOK,
             "https://example.com/watch?v=1",
         ])
         self.assertEqual(reply, "Playing in mpv: Episode 1")
@@ -126,7 +131,7 @@ class StreamMediaTests(unittest.TestCase):
             video(url=None, formats=SPLIT_FORMATS + [MUXED_FORMAT]))
 
         self.assertEqual(popen.call_args[0][0],
-                         [r"C:\mpv.exe", "https://cdn.example.com/muxed.mp4"])
+                         [r"C:\mpv.exe", HOOK, "https://cdn.example.com/muxed.mp4"])
 
     def test_single_format_without_codec_info_is_played_directly(self):
         _, _, popen, _ = self.run_tool(
@@ -135,11 +140,42 @@ class StreamMediaTests(unittest.TestCase):
              "url": "https://cdn.example.com/clip.mp4"})
 
         self.assertEqual(popen.call_args[0][0],
-                         [r"C:\mpv.exe", "https://cdn.example.com/clip.mp4"])
+                         [r"C:\mpv.exe", HOOK, "https://cdn.example.com/clip.mp4"])
 
     # ------------------------------------------------------------------
     # Players and browser fallback
     # ------------------------------------------------------------------
+    def test_no_ytdlp_omits_the_hook(self):
+        reply, _, popen, _ = self.run_tool(
+            "x", {"entries": [video()]}, ytdlp=None)
+
+        self.assertEqual(popen.call_args[0][0],
+                         [r"C:\mpv.exe", "https://cdn.example.com/stream.mp4"])
+        self.assertEqual(reply, "Playing in mpv: Episode 1")
+
+    def test_mpv_output_is_written_to_the_log_file(self):
+        log_path = os.path.join(tempfile.gettempdir(), "agentbot_test_mpv.log")
+        if os.path.exists(log_path):
+            os.remove(log_path)
+        fake = FakeYtDlp(result={"entries": [video()]})
+        with mock.patch.multiple(agent, YTDLP_AVAILABLE=True, yt_dlp=fake), \
+                mock.patch.object(agent, "_find_media_player",
+                                  return_value=("mpv", r"C:\mpv.exe")), \
+                mock.patch.object(agent, "_find_ytdlp",
+                                  return_value=r"C:\yt-dlp.exe"), \
+                mock.patch.object(agent._cfg, "memory_path",
+                                  return_value=log_path), \
+                mock.patch.object(agent.subprocess, "Popen") as popen:
+            agent.stream_media("x")
+
+        self.assertIs(popen.call_args.kwargs["stdout"],
+                      popen.call_args.kwargs["stderr"])
+        self.assertIsNot(popen.call_args.kwargs["stdout"], agent.subprocess.DEVNULL)
+        with open(log_path, encoding="utf-8") as f:
+            log = f.read()
+        self.assertIn("ytdl_hook-ytdl_path", log)
+        self.assertIn("https://cdn.example.com/stream.mp4", log)
+
     def test_vlc_used_when_mpv_is_absent(self):
         reply, _, popen, browser_open = self.run_tool(
             "x", {"entries": [video()]}, player=("VLC", r"C:\vlc.exe"))
@@ -242,6 +278,28 @@ class PlayerLookupTests(unittest.TestCase):
                 mock.patch.object(agent.shutil, "which", return_value=None), \
                 mock.patch.object(agent.os.path, "isfile", return_value=False):
             self.assertEqual(agent._find_media_player(), (None, None))
+
+
+    def test_ytdlp_from_path(self):
+        with mock.patch.object(agent.shutil, "which", return_value=r"C:\tools\yt-dlp.exe"):
+            self.assertEqual(agent._find_ytdlp(), r"C:\tools\yt-dlp.exe")
+
+    def test_ytdlp_from_interpreter_scripts_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts = Path(tmp, "Scripts")
+            scripts.mkdir()
+            (scripts / "yt-dlp.exe").write_bytes(b"")
+            with mock.patch.object(agent.shutil, "which", return_value=None), \
+                    mock.patch.object(agent.sys, "executable",
+                                      str(Path(tmp, "python.exe"))):
+                self.assertEqual(agent._find_ytdlp(), str(scripts / "yt-dlp.exe"))
+
+    def test_missing_ytdlp_returns_none(self):
+        with mock.patch.object(agent.shutil, "which", return_value=None), \
+                mock.patch.object(agent.sys, "executable", r"C:\nope\python.exe"), \
+                mock.patch("sysconfig.get_path", return_value=""), \
+                mock.patch.dict(os.environ, {"LOCALAPPDATA": "", "APPDATA": ""}):
+            self.assertIsNone(agent._find_ytdlp())
 
 
 if __name__ == "__main__":
