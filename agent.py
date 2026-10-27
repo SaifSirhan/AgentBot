@@ -1318,6 +1318,17 @@ def _extract_dsml_action(text):
     return {"tool": invoke.group(1).strip(), "input": param.group(1).strip()}
 
 
+# Raw function-call syntax, e.g. load_skill("local:stremio"). The prompt tells
+# the model never to use it, but DeepSeek still emits it when context shifts.
+_RAW_LOAD_SKILL_RE = re.compile(
+    r"""load_skill\s*\(\s*\\?['"](?P<input>.*?)\\?['"]\s*\)""", re.DOTALL)
+
+# A tool result is only ever produced by the runtime; model output that claims
+# one is a hallucination and must be retried in JSON form.
+_HALLUCINATED_RESULT_RE = re.compile(
+    r"<\s*tool_result\b[^>]*\bname\s*=", re.IGNORECASE)
+
+
 def parse_action(plan_text):
     raw = (plan_text or "").strip()
 
@@ -1332,6 +1343,10 @@ def parse_action(plan_text):
 
     if not raw:
         return None, "empty response"
+
+    if _HALLUCINATED_RESULT_RE.search(raw):
+        return None, ("Do not output <tool_result> blocks. Tool results come "
+                      "only from real tool calls.")
 
     # Try to extract one or more JSON tool calls
     actions = _extract_json_actions(raw)
@@ -1370,6 +1385,12 @@ def parse_action(plan_text):
             return None, (f"'{tool}' is not a valid tool name. "
                           f"Valid: {', '.join(sorted(VALID_TOOLS))}")
         return dsml, None
+
+    # Raw function-call syntax, e.g. load_skill("local:stremio")
+    raw_call = _RAW_LOAD_SKILL_RE.search(raw)
+    if raw_call:
+        return {"tool": "load_skill",
+                "input": raw_call.group("input").strip()}, None
 
     # No JSON → plain chat reply
     return {"tool": "chat", "input": raw}, None
@@ -4677,7 +4698,10 @@ TOOL_DESCRIPTIONS = (
     "IMPORTANT: This is just a list of names. You MUST call "
     'load_skill("local:core_tools") to read the exact instructions and '
     "input formats for these tools BEFORE calling them. Do not guess the "
-    "input format."
+    "input format.\n"
+    "To call a tool, you MUST output a valid JSON block: "
+    '{"tool": "tool_name", "input": "tool_input"}. NEVER output raw code, '
+    'XML, or function calls like tool("arg").'
 )
 
 

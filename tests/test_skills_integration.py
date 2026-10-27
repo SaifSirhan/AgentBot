@@ -97,6 +97,10 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn("AVAILABLE TOOLS:", prompt)
         self.assertIn('load_skill("local:core_tools")', prompt)
         self.assertIn("Do not guess the input format.", prompt)
+        self.assertIn(
+            'To call a tool, you MUST output a valid JSON block: '
+            '{"tool": "tool_name", "input": "tool_input"}. NEVER output raw '
+            'code, XML, or function calls like tool("arg").', prompt)
         self.assertLess(len(agent.TOOL_DESCRIPTIONS), 2000)
         for name in agent.VALID_TOOLS - {"chat", "done"}:
             self.assertIn(name, agent.TOOL_DESCRIPTIONS)
