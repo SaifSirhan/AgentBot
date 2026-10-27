@@ -52,6 +52,10 @@ class FakeOS:
         self.calls.append(("type", text))
         return f"Typed {text}"
 
+    def hotkey(self, keys):
+        self.calls.append(("hotkey", "+".join(keys)))
+        return f"Pressed {'+'.join(keys)}."
+
 
 class MacroEngineTests(unittest.TestCase):
     def setUp(self):
@@ -158,6 +162,29 @@ class MacroEngineTests(unittest.TestCase):
         self.assertEqual(
             macro_engine.required_variables(steps), ["QUERY", "TITLE"])
 
+    def test_hotkey_steps_are_validated_and_normalised(self):
+        steps = [{"action": "hotkey", "keys": ["CTRL", " F "]}]
+        out = self._save("keys", steps)
+
+        self.assertEqual(
+            macro_engine.load_macro("keys"),
+            [{"action": "hotkey", "keys": ["ctrl", "f"]}])
+        self.assertIn("Saved macro 'keys'", out)
+
+    def test_hotkey_rejects_non_string_or_empty_keys(self):
+        bad = [
+            [{"action": "hotkey"}],
+            [{"action": "hotkey", "keys": []}],
+            [{"action": "hotkey", "keys": "ctrl+f"}],
+            [{"action": "hotkey", "keys": ["ctrl", 2]}],
+            [{"action": "hotkey", "keys": [""]}],
+            [{"action": "hotkey", "keys": [None]}],
+        ]
+        for steps in bad:
+            with self.subTest(steps=steps):
+                with self.assertRaises(macro_engine.MacroError):
+                    macro_engine.save_macro("badkeys", steps)
+
     def test_rejects_unusable_variable_values(self):
         steps = [{"action": "type", "text": "{{TITLE}}"}]
         self._save("vars", steps)
@@ -241,6 +268,43 @@ class MacroEngineTests(unittest.TestCase):
 
         self.assertEqual(fake_os.calls, [("type", "ep 42")])
         self.assertIn("Played macro", out)
+
+    def test_run_presses_hotkeys_in_order(self):
+        fake_os = FakeOS()
+        self._save("hot", [
+            {"action": "hotkey", "keys": ["win"]},
+            {"action": "type", "text": "notepad{enter}"},
+            {"action": "hotkey", "keys": ["ctrl", "f"]},
+        ])
+
+        with mock.patch.dict(sys.modules, {"os_control": fake_os}), \
+             mock.patch.object(macro_engine, "time", FakeClock()):
+            out = macro_engine.run_macro("hot")
+
+        self.assertEqual(fake_os.calls, [
+            ("hotkey", "win"),
+            ("type", "notepad{enter}"),
+            ("hotkey", "ctrl+f"),
+        ])
+        self.assertIn("Played macro 'hot' (3 steps)", out)
+
+    def test_hotkey_failure_stops_replay(self):
+        class FailingOS(FakeOS):
+            def hotkey(self, keys):
+                self.calls.append(("hotkey", "+".join(keys)))
+                return "ERROR: hotkey failed: bad key"
+
+        fake_os = FailingOS()
+        self._save("badhot", [
+            {"action": "hotkey", "keys": ["ctrl", "nope"]},
+            {"action": "type", "text": "never"},
+        ])
+
+        with mock.patch.dict(sys.modules, {"os_control": fake_os}):
+            out = macro_engine.run_macro("badhot")
+
+        self.assertTrue(out.startswith("ERROR:"), out)
+        self.assertEqual(fake_os.calls, [("hotkey", "ctrl+nope")])
 
     def test_click_failure_stops_replay(self):
         class FailingOS(FakeOS):
@@ -422,6 +486,22 @@ class MacroToolTests(unittest.TestCase):
         start = text.index("save_macro(input)")
         end = text.index("play_macro(input)")
         self.assertIn("{{TITLE}}", text[start:end])
+
+    def test_save_macro_docs_mention_hotkey_steps(self):
+        text = self.agent.TOOL_DESCRIPTIONS
+        start = text.index("save_macro(input)")
+        end = text.index("play_macro(input)")
+        self.assertIn('"hotkey"', text[start:end])
+
+    def test_prompt_prefers_hotkeys_in_macros(self):
+        flat = " ".join(self.agent.TOOL_DESCRIPTIONS.split())
+        self.assertIn(
+            "When creating a macro, ALWAYS prefer using hotkeys (like win, "
+            "ctrl+f, alt+tab) for opening apps or focusing search bars "
+            "instead of clicking. Only use click for elements that have no "
+            "keyboard shortcut, like specific search results or posters.",
+            flat,
+        )
 
     def test_prompt_stays_under_budget_with_macros(self):
         prompt = self.agent._build_plan_prompt("hello", "")

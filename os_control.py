@@ -574,6 +574,26 @@ def click_coordinates(input_str: str) -> str:
                 _activate_hwnd(target_hwnd)
 
 
+def hotkey(keys) -> str:
+    """Press a key combination in the focused window, e.g. ["ctrl", "f"]."""
+    try:
+        _guard()
+        if not isinstance(keys, (list, tuple)) or not keys:
+            return "ERROR: hotkey needs a non-empty list of keys."
+        combo = []
+        for key in keys:
+            if not isinstance(key, str) or not key.strip():
+                return "ERROR: hotkey keys must be non-empty strings."
+            combo.append(key.strip().lower())
+        pyautogui.hotkey(*combo)
+        time.sleep(CLICK_SETTLE_SECONDS)
+        return f"Pressed {'+'.join(combo)}."
+    except AutomationAborted as exc:
+        return f"ABORTED: {exc}"
+    except Exception as exc:
+        return f"ERROR: hotkey failed: {exc}"
+
+
 def type_text(text: str) -> str:
     """Type text into the focused window (ASCII fast path, clipboard Unicode).
 

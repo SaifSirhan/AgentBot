@@ -214,6 +214,30 @@ class OSControlTests(unittest.TestCase):
                 self.assertTrue(out.startswith("ERROR:"), (value, out))
         move.assert_not_called()
 
+    def test_hotkey_presses_combo_and_settles(self):
+        with mock.patch.object(oc.pyautogui, "hotkey") as hotkey, \
+             mock.patch.object(oc.time, "sleep") as sleep:
+            out = oc.hotkey(["CTRL", " f "])
+
+        hotkey.assert_called_once_with("ctrl", "f")
+        sleep.assert_called_once_with(oc.CLICK_SETTLE_SECONDS)
+        self.assertIn("ctrl+f", out)
+
+    def test_hotkey_rejects_bad_keys(self):
+        with mock.patch.object(oc.pyautogui, "hotkey") as hotkey:
+            for keys in ("ctrl+f", [], [1], [""], [None], None):
+                out = oc.hotkey(keys)
+                self.assertTrue(out.startswith("ERROR:"), (keys, out))
+        hotkey.assert_not_called()
+
+    def test_hotkey_respects_kill_switch(self):
+        oc.trigger_kill_switch()
+        with mock.patch.object(oc.pyautogui, "hotkey") as hotkey:
+            out = oc.hotkey(["ctrl", "f"])
+
+        self.assertTrue(out.startswith("ABORTED:"), out)
+        hotkey.assert_not_called()
+
     def test_failsafe_reports_aborted(self):
         with mock.patch.object(oc.pyautogui, "moveTo",
                                side_effect=oc.pyautogui.FailSafeException):

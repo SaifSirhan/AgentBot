@@ -2,8 +2,9 @@
 
 A macro is a JSON list of steps:
 
-    [{"action": "click", "x": 100, "y": 200},
-     {"action": "type", "text": "hello"},
+    [{"action": "hotkey", "keys": ["ctrl", "f"]},
+     {"action": "click", "x": 100, "y": 200},
+     {"action": "type", "text": "{{TITLE}}"},
      {"action": "wait", "seconds": 1}]
 
 Storage defaults to %LOCALAPPDATA%\\AgentMemory\\macros and follows
@@ -82,6 +83,18 @@ def _validate_steps(steps: Any) -> List[dict]:
                 raise MacroError(
                     f"step {index}: text is too long (max {MAX_TYPE_CHARS})")
             clean.append({"action": "type", "text": text})
+        elif action == "hotkey":
+            keys = step.get("keys")
+            if not isinstance(keys, list) or not keys:
+                raise MacroError(
+                    f"step {index}: hotkey needs a non-empty list of keys")
+            clean_keys = []
+            for key in keys:
+                if not isinstance(key, str) or not key.strip():
+                    raise MacroError(
+                        f"step {index}: hotkey keys must be non-empty strings")
+                clean_keys.append(key.strip().lower())
+            clean.append({"action": "hotkey", "keys": clean_keys})
         elif action == "wait":
             try:
                 seconds = float(step.get("seconds", 0))
@@ -210,6 +223,10 @@ def run_macro(name: str, variables: Any = None) -> str:
                 return result
         elif action == "type":
             result = os_control.type_text(_substitute(step["text"], variables))
+            if result.startswith(("ABORTED", "ERROR")):
+                return result
+        elif action == "hotkey":
+            result = os_control.hotkey(step["keys"])
             if result.startswith(("ABORTED", "ERROR")):
                 return result
         elif action == "wait":
