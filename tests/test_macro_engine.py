@@ -145,6 +145,31 @@ class MacroEngineTests(unittest.TestCase):
             macro_engine.load_macro("json_text"),
             [{"action": "type", "text": "mpv"}])
 
+    def test_save_accepts_placeholders_and_reports_variables(self):
+        steps = [
+            {"action": "click", "x": 1, "y": 2},
+            {"action": "type", "text": "Search {{TITLE}} now {{ QUERY }}"},
+        ]
+        out = self._save("search", steps)
+
+        self.assertEqual(macro_engine.load_macro("search"), steps)
+        self.assertIn("TITLE", out)
+        self.assertIn("QUERY", out)
+        self.assertEqual(
+            macro_engine.required_variables(steps), ["QUERY", "TITLE"])
+
+    def test_rejects_unusable_variable_values(self):
+        steps = [{"action": "type", "text": "{{TITLE}}"}]
+        self._save("vars", steps)
+        fake_os = FakeOS()
+
+        for variables in ("TITLE", {"TITLE": None}, {"TITLE": ["x"]}):
+            with self.subTest(variables=variables), \
+                 mock.patch.dict(sys.modules, {"os_control": fake_os}):
+                out = macro_engine.run_macro("vars", variables)
+                self.assertTrue(out.startswith("ERROR:"), out)
+        self.assertEqual(fake_os.calls, [])
+
     # ------------------------------------------------------------------
     # Replay
     # ------------------------------------------------------------------
@@ -171,6 +196,51 @@ class MacroEngineTests(unittest.TestCase):
         self.assertAlmostEqual(sum(clock.sleeps), 0.5, places=6)
         self.assertTrue(all(s <= 0.2 for s in clock.sleeps), clock.sleeps)
         self.assertIn("Played macro 'demo' (4 steps)", out)
+
+    def test_run_substitutes_variables(self):
+        fake_os = FakeOS()
+        self._save("sub", [
+            {"action": "click", "x": 5, "y": 6},
+            {"action": "type", "text": "Search {{TITLE}} in {{QUERY}}"},
+            {"action": "type", "text": "again {{TITLE}}"},
+        ])
+
+        with mock.patch.dict(sys.modules, {"os_control": fake_os}), \
+             mock.patch.object(macro_engine, "time", FakeClock()):
+            out = macro_engine.run_macro(
+                "sub", {"TITLE": "Naruto", "QUERY": "anime"})
+
+        self.assertEqual(fake_os.calls, [
+            ("click", "5,6"),
+            ("type", "Search Naruto in anime"),
+            ("type", "again Naruto"),
+        ])
+        self.assertIn("Played macro 'sub' (3 steps)", out)
+
+    def test_missing_variables_abort_before_any_input(self):
+        fake_os = FakeOS()
+        self._save("needs", [
+            {"action": "click", "x": 1, "y": 2},
+            {"action": "type", "text": "{{TITLE}}"},
+        ])
+
+        with mock.patch.dict(sys.modules, {"os_control": fake_os}):
+            out = macro_engine.run_macro("needs")
+
+        self.assertTrue(out.startswith("ERROR:"), out)
+        self.assertIn("TITLE", out)
+        self.assertEqual(fake_os.calls, [])
+
+    def test_scalar_variables_are_coerced_and_extras_ignored(self):
+        fake_os = FakeOS()
+        self._save("coerce", [{"action": "type", "text": "ep {{N}}"}])
+
+        with mock.patch.dict(sys.modules, {"os_control": fake_os}), \
+             mock.patch.object(macro_engine, "time", FakeClock()):
+            out = macro_engine.run_macro("coerce", {"N": 42, "UNUSED": "x"})
+
+        self.assertEqual(fake_os.calls, [("type", "ep 42")])
+        self.assertIn("Played macro", out)
 
     def test_click_failure_stops_replay(self):
         class FailingOS(FakeOS):
@@ -263,6 +333,39 @@ class MacroToolTests(unittest.TestCase):
         self.assertEqual(out, "played")
         run.assert_called_once_with("demo")
 
+    def test_play_macro_accepts_an_inline_variables_object(self):
+        with mock.patch.object(
+                macro_engine, "run_macro", return_value="played") as run:
+            out = self.agent.play_macro('stremio_search|{"TITLE": "Naruto"}')
+
+        self.assertEqual(out, "played")
+        run.assert_called_once_with("stremio_search", {"TITLE": "Naruto"})
+
+    def test_play_macro_accepts_a_variables_argument(self):
+        with mock.patch.object(
+                macro_engine, "run_macro", return_value="played") as run:
+            out = self.agent.play_macro(
+                "stremio_search", variables={"TITLE": "Naruto"})
+
+        self.assertEqual(out, "played")
+        run.assert_called_once_with("stremio_search", {"TITLE": "Naruto"})
+
+    def test_play_macro_rejects_bad_inline_json(self):
+        out = self.agent.play_macro("stremio_search|{TITLE}")
+        self.assertTrue(out.startswith("ERROR:"), out)
+
+    def test_execute_tool_passes_variables_from_the_action(self):
+        with mock.patch.object(
+                self.agent, "play_macro", return_value="PLAYED") as play:
+            out = self.agent.execute_tool({
+                "tool": "play_macro",
+                "input": "stremio_search",
+                "variables": {"TITLE": "Naruto"},
+            })
+
+        self.assertEqual(out, "PLAYED")
+        play.assert_called_once_with("stremio_search", {"TITLE": "Naruto"})
+
     # ------------------------------------------------------------------
     # Registry and prompt
     # ------------------------------------------------------------------
@@ -285,7 +388,7 @@ class MacroToolTests(unittest.TestCase):
                 {"tool": "play_macro", "input": "demo"}), "PLAYED")
 
         save.assert_called_once_with("demo|[]")
-        play.assert_called_once_with("demo")
+        play.assert_called_once_with("demo", None)
 
     def test_group_mode_blocks_macro_replay(self):
         with mock.patch.object(self.agent, "GROUP_MODE", True):
@@ -304,6 +407,21 @@ class MacroToolTests(unittest.TestCase):
             "to record the coordinates so you don't have to guess next time.",
             flat,
         )
+
+    def test_prompt_requires_variables_for_placeholder_macros(self):
+        flat = " ".join(self.agent.TOOL_DESCRIPTIONS.split())
+        self.assertIn(
+            "If a macro contains placeholders like {{TITLE}}, you MUST pass "
+            "the variables dictionary when calling play_macro. Example: "
+            'play_macro("stremio_search", variables={"TITLE": "Naruto"}).',
+            flat,
+        )
+
+    def test_save_macro_docs_mention_placeholders(self):
+        text = self.agent.TOOL_DESCRIPTIONS
+        start = text.index("save_macro(input)")
+        end = text.index("play_macro(input)")
+        self.assertIn("{{TITLE}}", text[start:end])
 
     def test_prompt_stays_under_budget_with_macros(self):
         prompt = self.agent._build_plan_prompt("hello", "")

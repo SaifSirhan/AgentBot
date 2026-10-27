@@ -22,6 +22,7 @@ from typing import Any, List
 import config
 
 MACRO_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
 MAX_STEPS = 100
 MAX_TYPE_CHARS = 5_000
 MAX_WAIT_SECONDS = 60.0
@@ -112,7 +113,10 @@ def save_macro(name: str, steps: Any) -> str:
         os.replace(tmp, path)
     except OSError as exc:
         raise MacroError(f"could not save macro: {exc}") from exc
-    return f"Saved macro '{normalise_name(name)}' ({len(clean)} steps)."
+    variables = required_variables(clean)
+    detail = f"; variables: {', '.join(variables)}" if variables else ""
+    return (f"Saved macro '{normalise_name(name)}' "
+            f"({len(clean)} steps{detail}).")
 
 
 def load_macro(name: str) -> List[dict]:
@@ -133,6 +137,39 @@ def list_macros() -> List[str]:
         return []
 
 
+def required_variables(steps: List[dict]) -> List[str]:
+    """Placeholder names used by type steps, sorted."""
+    names = set()
+    for step in steps:
+        if isinstance(step, dict) and step.get("action") == "type":
+            text = str(step.get("text") or "")
+            names.update(match.group(1) for match in _PLACEHOLDER_RE.finditer(text))
+    return sorted(names)
+
+
+def _normalise_variables(variables: Any) -> dict:
+    if variables is None:
+        return {}
+    if not isinstance(variables, dict):
+        raise MacroError("variables must be a JSON object")
+    clean = {}
+    for key, value in variables.items():
+        if not isinstance(key, str) or not key.strip():
+            raise MacroError("variable names must be non-empty strings")
+        if isinstance(value, str):
+            clean[key] = value
+        elif isinstance(value, (int, float, bool)):
+            clean[key] = str(value)
+        else:
+            raise MacroError(f"variable '{key}' must be a string or number")
+    return clean
+
+
+def _substitute(text: str, variables: dict) -> str:
+    return _PLACEHOLDER_RE.sub(
+        lambda match: variables.get(match.group(1), match.group(0)), text)
+
+
 def _sleep_interruptible(seconds: float, os_control) -> bool:
     """Sleep in slices; return False when the kill switch latches."""
     end = time.time() + seconds
@@ -145,10 +182,22 @@ def _sleep_interruptible(seconds: float, os_control) -> bool:
         time.sleep(min(0.2, remaining))
 
 
-def run_macro(name: str) -> str:
-    """Execute a saved macro. Clicks go through click_coordinates, which
-    performs exactly one pyautogui click and a 0.5s post-click settle."""
+def run_macro(name: str, variables: Any = None) -> str:
+    """Execute a saved macro, filling {{VAR}} placeholders in typed text.
+
+    Missing variables abort before any click or keystroke, so a half-filled
+    macro can never run. Clicks go through click_coordinates, which performs
+    exactly one pyautogui click and a 0.5s post-click settle.
+    """
     steps = load_macro(name)
+    try:
+        variables = _normalise_variables(variables)
+    except MacroError as exc:
+        return f"ERROR: {exc}"
+    missing = [v for v in required_variables(steps) if v not in variables]
+    if missing:
+        return (f"ERROR: macro '{normalise_name(name)}' needs variables: "
+                f"{', '.join(missing)}. Pass them as name|{{\"VAR\":\"value\"}}.")
     import os_control
 
     for step in steps:
@@ -160,7 +209,7 @@ def run_macro(name: str) -> str:
             if result.startswith(("ABORTED", "ERROR")):
                 return result
         elif action == "type":
-            result = os_control.type_text(step["text"])
+            result = os_control.type_text(_substitute(step["text"], variables))
             if result.startswith(("ABORTED", "ERROR")):
                 return result
         elif action == "wait":

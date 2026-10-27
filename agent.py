@@ -4572,8 +4572,7 @@ DO NOT EXPLAIN JOKES. If they sent it, they get it. Explaining kills it.
 
 DO NOT PAD. No "here's what's happening" or "let me break this down".
 
-DO NOT OVERTHINK casual messages. If a friend would reply in under 15 words, 
-so do you.
+DO NOT OVERTHINK casual messages. Aim under 15 words.
 
 EXAMPLES (target tone):
 
@@ -4633,9 +4632,8 @@ In group chats, only a small whitelist of information tools is available.
 Personal file access, RAG search, memory writes, and system actions are
 blocked. Never attempt a blocked tool — reply that the user should DM you.
 
-Clarify only when necessary. Ask one concise question only when ambiguity would
-materially change the answer or action. Otherwise use the most reasonable
-interpretation and state the assumption briefly.
+Ask only when ambiguity would materially change the action; otherwise
+assume and say so.
 
 For file edits, inspect, write, execute, and report without asking at every step.
 
@@ -4724,8 +4722,6 @@ Follow top to bottom. Stop at the first applicable branch.
 
 A. SHOULD A TOOL BE USED?
 
-  - Can the request be answered accurately from the conversation and general
-    knowledge? → Plain text.
   - Does it require user data, a file, current/external information,
     verification, or an action in the user's world? → Use the appropriate tool.
   - Is the request materially ambiguous? → Ask one clarifying question first.
@@ -4810,7 +4806,6 @@ Respect every tool's documented input format exactly.
     or ask one question.
   - Permission, unsupported-action, or persistent failure → report the
     failure plainly, quoted.
-  - Never hide errors or silently pretend an alternative action happened.
   - No success evidence means no success claim.
   - If you discover your own mistake mid-response → stop, correct it, then
     continue.
@@ -4837,8 +4832,7 @@ Respect every tool's documented input format exactly.
   - Non-English input → reply in that language, preserving natural
     code-switching.
   - Image path supplied → use read_file; the agent handles image content.
-  - Repeated request → do not fabricate a new result; give the prior
-    answer or explicitly re-check.
+  - Repeated request → give the prior answer, never a fabricated new one.
 
 =====================================================================
 8. RESPONSE STYLE
@@ -5099,11 +5093,14 @@ MACROS
   play_macro. If it doesn't exist or fails, use OS Control with Vision to do
   it. Once you succeed, use save_macro to record the coordinates so you
   don't have to guess next time.
-  save_macro(input) — "name|steps_json"; each step is {"action":"click",
-    "x":..,"y":..}, {"action":"type","text":".."}, or {"action":"wait",
-    "seconds":..}.
-  play_macro(input) — replay a saved macro; each click fires once and
-    settles 0.5s.
+  If a macro contains placeholders like {{TITLE}}, you MUST pass the
+  variables dictionary when calling play_macro. Example:
+  play_macro("stremio_search", variables={"TITLE": "Naruto"}).
+  save_macro(input) — "name|steps_json"; type text may contain {{TITLE}}
+    variables; steps are {"action":"click","x":..,"y":..},
+    {"action":"type","text":".."}, {"action":"wait","seconds":..}.
+  play_macro(input) — "name", or name|{"TITLE":"Naruto"} to fill {{VAR}}
+    placeholders; each click fires once and settles 0.5s.
 
 SELF-SUFFICIENCY
   Missing capability with fragile OS Control → output a Python script
@@ -5595,14 +5592,28 @@ def save_macro(input_str):
         return f"ERROR: {exc}"
 
 
-def play_macro(input_str):
-    """Replay a saved macro by name."""
-    name = (input_str or "").strip()
+def play_macro(input_str, variables=None):
+    """Replay a macro, filling {{VAR}} placeholders in typed text.
+
+    Format: "name" or "name|{json variables}". An explicit variables dict
+    from the tool action wins over the inline JSON.
+    """
+    name, sep, payload = (input_str or "").partition("|")
+    name = name.strip()
     if not name:
         return "ERROR: play_macro needs a macro name."
+    if variables is None and sep and payload.strip():
+        try:
+            variables = json.loads(payload.strip())
+        except json.JSONDecodeError as exc:
+            return f"ERROR: play_macro variables are not valid JSON: {exc}"
+    if variables is not None and not isinstance(variables, dict):
+        return "ERROR: play_macro variables must be a JSON object."
     try:
         import macro_engine
-        return macro_engine.run_macro(name)
+        if variables is None:
+            return macro_engine.run_macro(name)
+        return macro_engine.run_macro(name, variables)
     except Exception as exc:
         return f"ERROR: {exc}"
 
@@ -5708,7 +5719,7 @@ def _execute_tool_impl(action):
     elif tool == 'type_text':              return type_text(inp)
     elif tool == 'get_pixel_color':        return get_pixel_color(inp)
     elif tool == 'save_macro':             return save_macro(inp)
-    elif tool == 'play_macro':             return play_macro(inp)
+    elif tool == 'play_macro':             return play_macro(inp, action.get("variables"))
     elif tool == 'crawl_managed':
         parts = inp.split("|", 1)
         url = parts[0].strip()
