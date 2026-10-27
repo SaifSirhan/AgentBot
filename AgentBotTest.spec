@@ -5,7 +5,7 @@ a = Analysis(
     ['agent_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('skills', 'skills')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

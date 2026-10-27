@@ -197,10 +197,11 @@ GROUP_MODE = False
 # Tools permitted in group chats. Everything else — RAG search, file
 # read/write, code editing, shell commands, memory writes, Telegram
 # sends as the user — is blocked. Groups get information-only tools.
+# load_skill is read-only and lets groups read the core_tools manual.
 SAFE_GROUP_TOOLS = {
     "chat", "search_web", "serp_search", "weather", "air_quality", "news",
     "current_time", "show_last_result", "read_and_summarize",
-    "generate_image", "list_reminders", "list_brains",
+    "generate_image", "list_reminders", "list_brains", "load_skill",
 }
 
 KNOWN_WEB_APPS = {
@@ -1179,8 +1180,8 @@ def _build_plan_prompt(user_request, context, correction=None):
     known_facts = memory.get_facts_block()
     facts_block = f"\nKnown facts about the user:\n{known_facts}\n" if known_facts else ""
 
-    # Skills are personal procedures; group chats never see the catalog and
-    # execute_tool blocks load_skill there too.
+    # Skills are personal procedures; group chats don't get the catalog, but
+    # load_skill stays available for the core_tools manual.
     skill_catalog = ""
     skill_directive = ""
     if not GROUP_MODE:
@@ -1211,8 +1212,9 @@ def _build_plan_prompt(user_request, context, correction=None):
     if GROUP_MODE:
         group_block = (
             "\n=== GROUP MODE ACTIVE ===\n"
-            "This message came from a GROUP CHAT, not a private DM.\n\n"
-            f"ALLOWED TOOLS: {', '.join(sorted(SAFE_GROUP_TOOLS))}\n\n"
+            f'You are in a group chat. You can use load_skill("local:core_tools") '
+            f"to read the manual, but you are restricted to the following safe "
+            f"tools: {', '.join(sorted(SAFE_GROUP_TOOLS))}.\n\n"
             "BLOCKED in groups:\n"
             "- rag_search (the user's personal indexed documents)\n"
             "- read_file, write_file, patch_file, find_files, move_files\n"
@@ -1221,7 +1223,6 @@ def _build_plan_prompt(user_request, context, correction=None):
             "- remember, forget (personal memory writes)\n"
             "- telegram_user_send, telegram_user_delete, telegram_user_edit\n"
             "- describe_image, send_image_telegram\n"
-            "- load_skill (skills are disabled in groups)\n"
             "- browse_web (browser control is disabled in groups)\n"
             "- execute_python, inspect_docx (local code and file access)\n"
             "- screenshot_background, analyze_screenshot, click_coordinates, type_text, get_pixel_color, save_macro, play_macro (OS control)\n"

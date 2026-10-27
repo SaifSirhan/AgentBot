@@ -6,6 +6,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('autocorrect_whitelist.txt', '.'),
+        ('skills', 'skills'),
     ],
 hiddenimports=[
     'pystray._win32',
@@ -29,7 +30,7 @@ hiddenimports=[
     'soundfile',
     'numpy',
     'pydub',
-], Q  Q
+],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

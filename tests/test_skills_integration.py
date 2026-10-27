@@ -130,16 +130,21 @@ class SkillIntegrationTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # Group mode
     # ------------------------------------------------------------------
-    def test_group_mode_blocks_load_skill_and_omits_catalog(self):
+    def test_group_mode_allows_load_skill_and_omits_catalog(self):
         with self.patched(group_mode=True):
             prompt = agent._build_plan_prompt("hello", "")
             self.assertNotIn("AVAILABLE SKILLS", prompt)
             self.assertNotIn("local:demo-skill", prompt)
-            self.assertIn("load_skill (skills are disabled in groups)", prompt)
+            self.assertIn("load_skill", agent.SAFE_GROUP_TOOLS)
+            self.assertIn(
+                'You are in a group chat. You can use '
+                'load_skill("local:core_tools") to read the manual',
+                prompt)
 
-            blocked = agent.execute_tool(
+            content = agent.execute_tool(
                 {"tool": "load_skill", "input": "demo-skill"})
-            self.assertIn("disabled in group chats", blocked)
+            self.assertIn("Skill: local:demo-skill", content)
+            self.assertIn("DEMO BODY LINE.", content)
 
     def test_private_prompt_includes_catalog(self):
         with self.patched(group_mode=False):
