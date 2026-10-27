@@ -332,8 +332,7 @@ class SkillManager:
                 return self._catalog_cache
 
             header = (
-                "AVAILABLE SKILLS (load the full text with load_skill before "
-                "following a matching procedure):\n"
+                "AVAILABLE SKILLS (use load_skill to read a matching one):\n"
             )
             lines: List[str] = []
             used = len(header)

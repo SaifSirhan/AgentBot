@@ -4533,7 +4533,8 @@ B. WHICH TOOL?
  18. Places/maps → send_maps_url for one link sent now, or send_maps_list
      for several places in one message.
  19. Tasks/desktop notification/misc → todo, notify, beep, list_brains.
- 20. Nothing fits → plain text; state clearly it's outside the toolset.
+ 20. Nothing fits → plain text; apply SELF-SUFFICIENCY before saying it is
+     outside the toolset.
 
 When multiple tools could work, prefer the MOST SPECIFIC semantic match,
 not the most general tool.
@@ -4702,35 +4703,28 @@ LOCAL FILES & DOCUMENTS
     else in it. Use patch_file instead.
 
 CODE EDITING (use these whenever the user asks to change or inspect code)
-  patch_file(input) — surgical SEARCH/REPLACE edit of an existing file. Format:
-    'path|||old_text|||new_text'  (three parts separated by |||)
-    old_text MUST be copied character-for-character from read_file, including
-    indentation. It MUST appear exactly ONCE. If it is missing or ambiguous the
-    tool changes nothing and tells you why — then read the file and retry.
+  patch_file(input) — surgical SEARCH/REPLACE edit of an existing file.
+    Format: 'path|||old_text|||new_text'. old_text MUST be copied
+    character-for-character from read_file (indentation included) and appear
+    exactly ONCE; if missing or ambiguous nothing changes — read and retry.
     ALWAYS use this instead of write_file when editing an existing file.
   list_symbols(input) — map ONE .py file without loading it: every class and
-    function with line numbers. Input is just the path or filename. A bare
-    filename like "config.py" is enough — the tool searches Downloads, Desktop
-    and Documents for it. NEVER ask the user which folder the file is in; just
-    call list_symbols and let it resolve the path. Also ALWAYS call this before
-    patch_file if you have not read the file.
-  repo_map(input) — map a WHOLE folder. Format: 'folder' or 'folder|max_files'.
-    Returns a compact per-file symbol summary. ALWAYS call this FIRST when the
-    user asks about a codebase, or when you do not know which file to edit.
-    NEVER ask the user "which file?" — call repo_map and find out yourself.
+    function with line numbers. Input: path or bare filename (it searches
+    Downloads, Desktop, Documents). NEVER ask which folder; ALWAYS call this
+    before patch_file if you have not read the file.
+  repo_map(input) — map a WHOLE folder: 'folder' or 'folder|max_files'.
+    Returns a per-file symbol summary. ALWAYS call FIRST for codebase
+    questions or when you do not know which file to edit; NEVER ask
+    "which file?".
   make_folder(input) — create a folder.
   find_and_open_folder(input) — find an existing folder by name.
   watch_folder(input) — start watching a folder.
   stop_watching() — stop watching a folder.
-  find_files(input) — find files by NAME. Format: 'folder|pat1,pat2,pat3'.
-The pattern list is COMMA-SEPARATED and case-insensitive. A file matches if its
-name contains ANY of the patterns. Folder shortcuts: 'downloads', 'desktop',
-'documents', 'telegram desktop', or a full path. ALWAYS use this when the user
-asks to find or list files by name — never guess.
-move_files(input) — move files matching one or more patterns. Format:
-'source|pat1,pat2|dest' to preview, 'source|pat1,pat2|dest|confirm' to execute.
-Patterns are comma-separated, case-insensitive. ALWAYS preview first, show the
-list to the user, and only call again with |confirm after they say yes.
+  find_files(input) — find files by NAME: 'folder|pat1,pat2'. Patterns are
+case-insensitive and match any part of the name; folder can be 'downloads',
+'desktop', 'documents', 'telegram desktop', or a path. NEVER guess filenames.
+move_files(input) — 'source|pat1,pat2|dest' previews; add |confirm to move.
+Patterns as in find_files. ALWAYS preview before moving.
 
 PC CONTROL
   run_command(input) — run a system command.
@@ -4793,19 +4787,16 @@ COMMUNICATION
     matching an emotion or context. Input: search term like "celebration",
     "facepalm", "sarcastic clap", "confused". USE IT sparingly — only when a
     text reply would feel flat and a GIF would land better.
-  send_gif(input) — send a GIF to a NAMED Telegram contact as the user. Format:
-    "contact|search_term". Use "me" for Saved Messages. Prefers the group's
-    own GIF library (matched by emotion labels), falls back to Giphy. USE THIS
-    when told to SEND someone a GIF ("send a funny GIF to JEE"). Search terms
-    should describe the emotion or context, not literal scenes.
+  send_gif(input) — send a GIF to a NAMED contact as the user:
+    "contact|search_term"; "me" = Saved Messages. Prefers the group library,
+    then Giphy. Use for "send a GIF to X"; search the emotion, not a scene.
 
 PLACES & MAPS
   send_maps_url(input) — build and send ONE Google Maps link via the
     user's own bot, to the user.
-  send_maps_list(input) — "Contact|place1|place2|place3"; build a real
-    link for every place and send the whole list as one Telegram message,
-    as the user, to that contact. Use this for "send a list of places"
-    requests instead of composing links yourself.
+  send_maps_list(input) — "Contact|place1|place2|..."; builds a real link
+    per place and sends them as one Telegram message to that contact as the
+    user. Use for "send a list of places" instead of composing links.
 
 MISC
   todo(input) — "add: x", "list", "done: 0", "remove: 0", "clear".
@@ -4833,6 +4824,12 @@ SECURITY
     and confirm with the user before calling this.
   list_quarantine() — list files currently in quarantine.
 
+OFFICE (NATIVE COM)
+  read_word_doc(input) — read all text from a Word file through Word's COM
+    API. Input: full path. Read-only, no conversion needed.
+  set_word_language(input) — set Word's default language for new documents.
+    Input: locale code such as "en-US" or "fr-FR".
+
 DOCUMENT EDITING
   edit_document(input) — edit an existing DOCX, XLSX, PPTX, or PDF file.
     Format: "filepath|instruction" where filepath is an absolute path and
@@ -4840,29 +4837,23 @@ DOCUMENT EDITING
     file up automatically before changing it. Examples:
       "C:\\Users\\USER\\report.docx|add paragraph: This is a new finding."
       "C:\\Users\\USER\\budget.xlsx|set cell B2 to 1500"
-      "C:\\Users\\USER\\deck.pptx|add slide: Q4 Results"
-      "C:\\Users\\USER\\contract.pdf|extract text"
     ALWAYS tell the user what you changed. NEVER invent an edit you did not run.
 
 SOCIAL MEDIA POSTING
-  post_to_social(input) — create and optionally schedule a social media post via
-    Typefully. Publishes to X (Twitter), LinkedIn, Threads, Bluesky, and
-    Mastodon. Format: "action|content|schedule_time" where action is post|queue,
-    content is the post text, and schedule_time is an ISO 8601 timestamp, "now",
-    or "next-free-slot" (optional — if omitted, creates a draft without
-    scheduling).
+  post_to_social(input) — create and optionally schedule a post via
+    Typefully (X, LinkedIn, Threads, Bluesky, Mastodon). Format:
+    "action|content|schedule_time"; action is post|queue, schedule_time is
+    ISO 8601, "now", or "next-free-slot" (omit to save a draft).
     ALWAYS confirm the content with the user before posting.
 
 SKILL MANAGEMENT
-  skill_manage(input) — manage reusable procedure files ("skills"). Skills are
-    markdown files the agent writes to itself after completing a complex
-    multi-step task. ALWAYS check for a matching skill before starting a
-    multi-step workflow. Format: "action|name|content"
+  skill_manage(input) — manage reusable procedure files ("skills") the agent
+    writes for itself after a multi-step task. ALWAYS check for a matching
+    skill before a multi-step workflow. Format: "action|name|content"
       action: create | update | list | search | read | delete
       name:   skill slug (lowercase_underscores) or search query
-      content: full SKILL.md text (required for create/update only)
-    NEVER invent a skill body. Only create skills from procedures you actually
-    executed.
+      content: full SKILL.md text (create/update only)
+    NEVER invent a skill body. Only create skills from procedures you executed.
   load_skill(input) — load the full text of one skill listed in AVAILABLE
     SKILLS. Read it before performing the workflow it describes. Format:
     "skill_id" using the id from the catalog (e.g. "local:clock-out-reminder").
@@ -4879,11 +4870,22 @@ OS CONTROL
   App control: run the full sequence (screenshot, click, type, Enter) without
   step-by-step asks. Confirm only before destructive actions or a missing
   required value.
+  If the user asks you to change a setting in a desktop app and you do not
+  have a dedicated API tool for it, you MUST use OS Control
+  (screenshot_background, click_coordinates, type_text) to visually navigate
+  the UI. Do not refuse a UI task just because you lack a direct Python API.
   screenshot_background() — hide GUI, capture screen, restore.
   click_coordinates(input) — hide GUI, focus the target, click "x,y" in
     screenshot pixels, restore GUI. Format: "x,y" or "x,y | App title".
   type_text(input) — types in the focused window; append "{enter}" to submit.
   get_pixel_color(input) — hex colour at "x,y".
+
+SELF-SUFFICIENCY
+  If a task requires a capability you do not have, AND OS Control is too
+  fragile (e.g., it requires complex file manipulation or missing
+  dependencies), stop and output a suggested Python script to the user.
+  Prefix it with [SUGGESTED_TOOL] so the user knows they can pass this to an
+  IDE to build it.
 
 =====================================================================
 10. EXAMPLES
@@ -4949,7 +4951,7 @@ VALID_TOOLS = {
     "scan_file", "scan_process", "quarantine_file", "list_quarantine",
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
     "search_group_chat", "grep_group_chat", "rag_search",
-    "edit_document", "post_to_social",
+    "edit_document", "post_to_social", "read_word_doc", "set_word_language",
     "skill_manage", "load_skill", "browse_web",
 }
 
@@ -5383,6 +5385,12 @@ def _execute_tool_impl(action):
             return f"ERROR: unsupported format '{ext}'."
         except ImportError as e:
             return f"ERROR: missing dependency for {ext}: {e}. Run: pip install python-pptx"
+    elif tool == 'read_word_doc':
+        import office_control
+        return office_control.read_word_doc(inp)
+    elif tool == 'set_word_language':
+        import office_control
+        return office_control.set_word_language(inp.strip() or "en-US")
     elif tool == 'serp_search':
         parts = inp.split("|", 1)
         query = parts[0].strip()

@@ -31,6 +31,9 @@ python-pptx          # PowerPoint editing (document_tools.edit_pptx)
 reportlab            # PDF creation (document_tools.edit_pdf)
 pytesseract          # also requires the Tesseract binary installed on the system
 
+# --- Native Office automation (desktop Word/Excel COM) ---
+pywin32              # office_control.py: Word language + text via COM
+
 # --- GIF / short video frame extraction (Telegram animations) ---
 imageio
 imageio-ffmpeg       # bundles an ffmpeg binary; no system install needed

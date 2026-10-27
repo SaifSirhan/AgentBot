@@ -9,7 +9,8 @@ Prints one line per tool:
 Most tools map to a same-name function in agent.py. The exceptions are
 listed in SPECIAL_TARGETS. set_volume and media_control also get a safe,
 read-only probe so a pycaw/pyautogui API break is caught even when the
-function still exists; stream_media probes that yt-dlp imports.
+function still exists; stream_media probes that yt-dlp imports, and the
+office tools probe that pywin32 imports.
 No API keys are used and no tool is executed.
 
 Run: python audit_tools.py
@@ -44,11 +45,13 @@ SPECIAL_TARGETS = {
     "post_to_social": ("typefully_tool.post_to_social",),
     "quarantine_file": ("security_tools.quarantine_file",),
     "rag_search": ("rag_tool.search_documents",),
+    "read_word_doc": ("office_control.read_word_doc",),
     "remember": ("agent.remember_fact",),
     "run_recipe": ("recipes.run_recipe",),
     "scan_file": ("security_tools.scan_file",),
     "scan_process": ("security_tools.scan_process",),
     "serp_search": ("serpapi_tool.serp_search",),
+    "set_word_language": ("office_control.set_word_language",),
 }
 
 
@@ -90,10 +93,19 @@ def _probe_stream_media(agent_module):
     return None
 
 
+def _probe_office_com(agent_module):
+    office_control = importlib.import_module("office_control")
+    if not getattr(office_control, "PYWIN32_AVAILABLE", False):
+        return "pywin32 is not importable"
+    return None
+
+
 PROBES = {
     "set_volume": _probe_set_volume,
     "media_control": _probe_media_control,
     "stream_media": _probe_stream_media,
+    "read_word_doc": _probe_office_com,
+    "set_word_language": _probe_office_com,
 }
 
 
