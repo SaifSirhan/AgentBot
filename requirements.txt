@@ -35,6 +35,9 @@ pytesseract          # also requires the Tesseract binary installed on the syste
 imageio
 imageio-ffmpeg       # bundles an ffmpeg binary; no system install needed
 
+# --- Media streaming ---
+yt-dlp               # stream_media: resolves page/search URLs to direct streams
+
 # --- Voice (TTS / STT) & audio ---
 kokoro
 faster-whisper

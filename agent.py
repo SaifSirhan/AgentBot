@@ -100,6 +100,12 @@ try:
 except ImportError:
     WINOTIFY_AVAILABLE = False
 
+try:
+    import yt_dlp
+    YTDLP_AVAILABLE = True
+except ImportError:
+    YTDLP_AVAILABLE = False
+
 
 # ---------------------------
 # CONFIG — load user config once at import time
@@ -1989,6 +1995,108 @@ def media_control(action):
         return f"Media: {a}."
     except Exception as e:
         return f"ERROR: {e}"
+
+
+# ---------------------------
+# MEDIA STREAMING (yt-dlp + native player)
+# ---------------------------
+PLAYER_INSTALL_PATHS = {
+    "mpv": (r"C:\Program Files\mpv\mpv.exe", r"C:\Program Files (x86)\mpv\mpv.exe"),
+    "VLC": (r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+            r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"),
+}
+
+
+def _find_media_player():
+    """Return (name, executable) for mpv or VLC, else (None, None)."""
+    for name, binary in (("mpv", "mpv"), ("VLC", "vlc")):
+        found = shutil.which(binary)
+        if found:
+            return name, found
+    for name, paths in PLAYER_INSTALL_PATHS.items():
+        for path in paths:
+            if os.path.isfile(path):
+                return name, path
+    return None, None
+
+
+def _muxed_stream_url(info):
+    """Return a direct URL whose format already carries both audio and video."""
+    if info.get("url") and not info.get("requested_formats"):
+        # A single selected format: playable as-is (e.g. a direct .mp4).
+        return info["url"]
+    best = None
+    for fmt in info.get("formats") or ():
+        if (fmt.get("url")
+                and fmt.get("vcodec", "none") != "none"
+                and fmt.get("acodec", "none") != "none"):
+            best = fmt
+    return best["url"] if best else None
+
+
+def stream_media(query_or_url):
+    """Play a video or stream from a URL or search query in mpv (or VLC)."""
+    query = (query_or_url or "").strip()
+    if not query:
+        return "ERROR: stream_media needs a URL or a search query."
+    if not YTDLP_AVAILABLE:
+        return "ERROR: yt-dlp is not installed (pip install yt-dlp)."
+
+    is_url = bool(re.match(r"^https?://", query, re.I))
+    target = query if is_url else f"ytsearch1:{query}"
+    try:
+        with yt_dlp.YoutubeDL({
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "socket_timeout": 20,
+        }) as ydl:
+            info = ydl.extract_info(target, download=False)
+    except Exception as e:
+        return f"ERROR: cannot resolve '{query}': {str(e).removeprefix('ERROR: ')[:300]}"
+
+    if info and info.get("entries") is not None:
+        info = next((entry for entry in info["entries"] if entry), None)
+    if not info:
+        return f"ERROR: no playable results for '{query}'."
+
+    title = info.get("title") or query
+    page_url = info.get("webpage_url") or (query if is_url else None)
+    stream_url = _muxed_stream_url(info)
+    player, exe = _find_media_player()
+
+    if player == "mpv":
+        args = [exe]
+        if stream_url:
+            args.append(stream_url)
+        elif page_url:
+            # YouTube only serves split video/audio formats; mpv's ytdl hook
+            # resolves the page URL into both tracks and keeps them in sync.
+            ytdlp = shutil.which("yt-dlp")
+            if ytdlp:
+                args.append(f"--script-opts=ytdl_hook-ytdl_path={ytdlp}")
+            args.append(page_url)
+        else:
+            return f"ERROR: no stream URL for '{title}'."
+    elif player == "VLC":
+        url = stream_url or page_url
+        if not url:
+            return f"ERROR: no stream URL for '{title}'."
+        args = [exe, url]
+    else:
+        if not (stream_url or page_url):
+            return f"ERROR: no stream URL for '{title}'."
+        webbrowser.open(stream_url or page_url)
+        if stream_url:
+            return f"No mpv/VLC found; opened the stream in your browser: {title}"
+        return (f"No mpv/VLC found and '{title}' splits video and audio, so the "
+                f"page was opened in your browser instead.")
+
+    try:
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        return f"ERROR: cannot start {player}: {e}"
+    return f"Playing in {player}: {title}"
 
 
 # ---------------------------
@@ -4573,6 +4681,7 @@ recommend_models() — recommend Ollama models that fit the user's hardware.
 MUSIC & MEDIA
   play_on_youtube(input) — play a song on YouTube Music via URL autoplay.
 Input: song and/or artist, e.g. "50/50 the strokes". Opens in Opera, autoplays.
+  stream_media(input) — play a URL or search (movies, anime, music) in mpv/VLC (no site ads).
 
 LOCAL FILES & DOCUMENTS
   rag_search(input) — search indexed user documents; 2–5 keywords.
@@ -4742,8 +4851,7 @@ SOCIAL MEDIA POSTING
     content is the post text, and schedule_time is an ISO 8601 timestamp, "now",
     or "next-free-slot" (optional — if omitted, creates a draft without
     scheduling).
-    ALWAYS confirm the content with the user before posting. Never post without
-    explicit confirmation.
+    ALWAYS confirm the content with the user before posting.
 
 SKILL MANAGEMENT
   skill_manage(input) — manage reusable procedure files ("skills"). Skills are
@@ -4819,7 +4927,7 @@ Confirmation:
 VALID_TOOLS = {
     "chat", "search_web", "serp_search", "show_last_result", "read_and_summarize",
     "google_search_and_open", "youtube_search", "get_video_links",
-    "play_on_youtube",
+    "play_on_youtube", "stream_media",
     "open_app", "open_website", "run_command", "make_folder",
     "find_and_open_folder", "write_file", "read_file",
     "set_reminder", "remember", "forget", "read_screen",
@@ -5331,6 +5439,7 @@ def _execute_tool_impl(action):
     elif tool == 'youtube_search':         return youtube_search(inp)
     elif tool == 'get_video_links':        return get_video_links(inp)
     elif tool == 'play_on_youtube':        return play_on_youtube(inp)
+    elif tool == 'stream_media':           return stream_media(inp)
     elif tool == 'set_reminder':           return set_reminder(inp)
     elif tool == 'set_reminder_at':        return set_reminder_at(inp)
     elif tool == 'schedule_task':          return schedule_task(inp)

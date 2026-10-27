@@ -9,7 +9,8 @@ Prints one line per tool:
 Most tools map to a same-name function in agent.py. The exceptions are
 listed in SPECIAL_TARGETS. set_volume and media_control also get a safe,
 read-only probe so a pycaw/pyautogui API break is caught even when the
-function still exists. No API keys are used and no tool is executed.
+function still exists; stream_media probes that yt-dlp imports.
+No API keys are used and no tool is executed.
 
 Run: python audit_tools.py
 Exit code: 0 when every tool is OK, 1 when anything is broken.
@@ -83,9 +84,16 @@ def _probe_media_control(agent_module):
     return None
 
 
+def _probe_stream_media(agent_module):
+    if not getattr(agent_module, "YTDLP_AVAILABLE", False):
+        return "yt-dlp is not importable"
+    return None
+
+
 PROBES = {
     "set_volume": _probe_set_volume,
     "media_control": _probe_media_control,
+    "stream_media": _probe_stream_media,
 }
 
 
