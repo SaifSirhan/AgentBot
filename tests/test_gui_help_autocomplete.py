@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -212,6 +213,48 @@ class TerminalInputTests(unittest.TestCase):
         self.assertEqual(self.input._completions("/SET")[0], "/settings")
         self.type("/SET")
         self.assertEqual(self.input._ghost, "tings")
+
+
+class StremioCommandTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.window = g.AgentWindow()
+        for _ in range(10):
+            self.app.processEvents()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_command_is_registered_and_documented(self):
+        self.assertIn("/stremio", g.SLASH_COMMANDS)
+        self.assertIn("/stremio", g.HELP_TEXT)
+
+    def test_dispatch_runs_in_background(self):
+        fake = mock.Mock()
+        with mock.patch.object(g, "get_agent", return_value=fake), \
+             mock.patch.object(
+                 self.window, "_run_background_command") as background:
+            self.assertTrue(
+                self.window._handle_slash_command("/stremio Cherry"))
+
+        background.assert_called_once()
+        text, busy, work = background.call_args.args
+        self.assertEqual(text, "/stremio Cherry")
+        self.assertIn("Cherry", busy)
+        self.assertTrue(callable(work))
+
+    def test_missing_name_reports_usage(self):
+        fake = mock.Mock()
+        with mock.patch.object(g, "get_agent", return_value=fake):
+            self.assertTrue(self.window._handle_slash_command("/stremio"))
+
+        fake.stremio_search.assert_not_called()
+        fake.save_conversation_history.assert_called_once()
 
 
 if __name__ == "__main__":

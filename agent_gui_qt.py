@@ -733,6 +733,9 @@ HELP_TEXT = (
     "Browser recipes — deterministic click/type scripts:\n\n"
     "/recipe Name      → run a recipe from recipes.json\n"
     "       e.g.  /recipe clock_out\n\n"
+    "Stremio — deterministic search:\n\n"
+    "/stremio Show Name → open Stremio, search, click the first result\n"
+    "       e.g.  /stremio Cherry\n\n"
     "Security scanning — static analysis, no AI:\n\n"
     "/scan  File        → scan a file (hash, entropy, verdict)\n"
     "       e.g.  /scan C:\\Users\\USER\\Downloads\\file.exe\n\n"
@@ -796,6 +799,7 @@ SLASH_COMMANDS = (
     "/reindex",
     "/import-chat",
     "/browse",
+    "/stremio",
     "/reload-skills",
     "/send",
     "/edit",
@@ -3487,6 +3491,17 @@ class AgentWindow(QMainWindow):
             except Exception as e:
                 result = f"ERROR: {e}"
             return self._finish_slash_command(text, result)
+
+        if cmd == "/stremio":
+            if not args:
+                self._finish_slash_command(
+                    text, "ERROR: format is /stremio <show name>")
+                return True
+            self.chat.add_message(UserMessage(text))
+            self._run_background_command(
+                text, f"Opening Stremio and searching for {args}...",
+                lambda: agent.stremio_search(args))
+            return True
 
         if cmd == "/browse":
             if "|" not in args:

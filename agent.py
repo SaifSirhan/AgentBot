@@ -5519,6 +5519,131 @@ def analyze_screenshot(input_str=""):
     return _capture_and_describe(title, question or None)
 
 
+# ---------------------------
+# STREMIO SEARCH (deterministic /stremio)
+# ---------------------------
+STREMIO_WINDOW = "Stremio"
+STREMIO_OPEN_TIMEOUT = 15.0
+STREMIO_RESULT_WAIT = 2.0
+
+_STREMIO_SEARCH_PROMPT = (
+    "Look at this {width}x{height} Stremio window. Return ONLY the pixel "
+    "coordinates of the search bar (the search input at the top) as x,y, "
+    "measured from this image's top-left. If it is not visible, reply NONE."
+)
+_STREMIO_FIRST_RESULT_PROMPT = (
+    "Look at this {width}x{height} Stremio search results page. Return ONLY "
+    "the pixel coordinates of the centre of the FIRST result (the top-left "
+    "movie or series poster) as x,y, measured from this image's top-left. "
+    "If there are no results, reply NONE."
+)
+
+
+def _vision_coordinates(reply, width, height):
+    """Pull the first in-bounds x,y pair out of a vision reply."""
+    patterns = (
+        r"x\s*[=:]\s*(\d+)\s*[,;/ ]\s*y\s*[=:]\s*(\d+)",
+        r"\((\d+)\s*,\s*(\d+)\)",
+        r"(\d+)\s*[,;]\s*(\d+)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, reply or ""):
+            x, y = int(match.group(1)), int(match.group(2))
+            if 0 <= x < width and 0 <= y < height:
+                return x, y
+    return None
+
+
+def _stremio_locate(prompt):
+    """Capture Stremio and ask vision for one control's x,y.
+
+    Returns ((x, y), reply) on success or (None, error string).
+    """
+    try:
+        result = _os_control_module().screenshot_background(STREMIO_WINDOW)
+    except Exception as exc:
+        return None, f"ERROR: OS control unavailable: {exc}"
+    if not result.startswith("Screenshot saved:"):
+        return None, result
+
+    path = result.splitlines()[0].split("Screenshot saved:", 1)[1].strip()
+    size = re.search(r"Image: (\d+)x(\d+)", result)
+    if not size:
+        return None, "ERROR: screenshot size missing."
+    width, height = int(size.group(1)), int(size.group(2))
+
+    reply = describe_image(
+        f"{path}|{prompt.format(width=width, height=height)}")
+    if not reply or reply.startswith("ERROR:"):
+        return None, f"ERROR: vision failed: {reply}"
+    xy = _vision_coordinates(reply, width, height)
+    if xy is None:
+        return None, ("ERROR: vision did not return usable coordinates "
+                      f"(reply: {reply[:200]})")
+    return xy, reply
+
+
+def stremio_search(show_name):
+    """Open Stremio, search for show_name, and click the first result.
+
+    OS Control drives the app; vision is used only to locate the search bar
+    and the first result. Returns a status string for the chat.
+    """
+    name = (show_name or "").strip()
+    if not name:
+        return "ERROR: usage is /stremio <show name>"
+
+    is_open = False
+    if PYGETWINDOW_AVAILABLE:
+        try:
+            is_open = bool(gw.getWindowsWithTitle(STREMIO_WINDOW))
+        except Exception:
+            is_open = False
+    if not is_open:
+        opened = open_app(STREMIO_WINDOW)
+        if opened.startswith("ERROR"):
+            return opened
+        if PYGETWINDOW_AVAILABLE:
+            deadline = time.time() + STREMIO_OPEN_TIMEOUT
+            while time.time() < deadline:
+                try:
+                    if gw.getWindowsWithTitle(STREMIO_WINDOW):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.4)
+            else:
+                return (f"ERROR: {STREMIO_WINDOW} did not open a window "
+                        f"within {STREMIO_OPEN_TIMEOUT:.0f}s.")
+        else:
+            time.sleep(3.0)
+
+    search, detail = _stremio_locate(_STREMIO_SEARCH_PROMPT)
+    if search is None:
+        return detail
+    sx, sy = search
+    clicked = click_coordinates(f"{sx},{sy} | {STREMIO_WINDOW}")
+    if clicked.startswith(("ABORTED", "ERROR")):
+        return clicked
+
+    typed = type_text(f"{name}{{enter}}")
+    if typed.startswith(("ABORTED", "ERROR")):
+        return typed
+
+    time.sleep(STREMIO_RESULT_WAIT)
+
+    first, detail = _stremio_locate(_STREMIO_FIRST_RESULT_PROMPT)
+    if first is None:
+        return f"ERROR: search for '{name}' found no clickable result ({detail})"
+    fx, fy = first
+    clicked = click_coordinates(f"{fx},{fy} | {STREMIO_WINDOW}")
+    if clicked.startswith(("ABORTED", "ERROR")):
+        return clicked
+
+    return (f"Stremio: searched '{name}' and clicked the first result "
+            f"at ({fx}, {fy}).")
+
+
 def click_coordinates(input_str):
     try:
         return _os_control_module().click_coordinates(input_str)
