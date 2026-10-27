@@ -34,11 +34,13 @@ OS_TOOLS = (
 
 class OSToolRegistryTests(unittest.TestCase):
     def test_tools_registered_once(self):
+        manual = agent.load_skill_tool("core_tools")
         for name in OS_TOOLS:
             self.assertIn(name, agent.VALID_TOOLS, name)
+            self.assertIn(name, agent.TOOL_DESCRIPTIONS, name)
             self.assertNotIn(name, agent.SAFE_GROUP_TOOLS, name)
             pattern = f"{name}(input)"
-            self.assertEqual(agent.TOOL_DESCRIPTIONS.count(pattern), 1, pattern)
+            self.assertEqual(manual.count(pattern), 1, pattern)
 
     def test_execute_tool_dispatches(self):
         with mock.patch.object(agent, "screenshot_background",
@@ -72,7 +74,7 @@ class OSToolRegistryTests(unittest.TestCase):
     def test_group_mode_blocks_all_os_tools(self):
         with mock.patch.object(agent, "GROUP_MODE", True):
             prompt = agent._build_plan_prompt("hello", "")
-            self.assertIn("OS control", prompt)
+            self.assertIn("screenshot_background", prompt)
             for name in OS_TOOLS:
                 out = agent.execute_tool(
                     {"tool": name,
@@ -80,7 +82,7 @@ class OSToolRegistryTests(unittest.TestCase):
                 self.assertIn("disabled in group chats", out, name)
 
     def test_prompt_requires_autonomous_execution(self):
-        text = agent.TOOL_DESCRIPTIONS
+        text = agent.load_skill_tool("core_tools")
         flat = " ".join(text.split())
         self.assertIn(
             "You are an autonomous agent. When the user asks you to perform a "
@@ -99,7 +101,7 @@ class OSToolRegistryTests(unittest.TestCase):
         self.assertIn("Never ask the user for coordinates.", flat)
 
     def test_pre_action_rubric_precedes_autonomy_rules(self):
-        flat = " ".join(agent.TOOL_DESCRIPTIONS.split())
+        flat = " ".join(agent.load_skill_tool("core_tools").split())
         rubric = (
             "Before executing a click or file modification, ask yourself: "
             "1. Is this the exact app window I want? 2. Is the target "
@@ -122,7 +124,7 @@ class OSToolRegistryTests(unittest.TestCase):
             agent._is_repeat_action("click_coordinates", "30,40", click))
 
     def test_stream_media_is_constrained_to_urls_and_music(self):
-        text = " ".join(agent.TOOL_DESCRIPTIONS.split())
+        text = " ".join(agent.load_skill_tool("core_tools").split())
         self.assertIn(
             "ONLY use stream_media for YouTube videos, music, or direct video "
             "URLs. NEVER use stream_media to search for full movies or TV "

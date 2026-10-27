@@ -75,17 +75,43 @@ class SkillIntegrationTests(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_load_skill_is_registered_and_documented_once(self):
         self.assertIn("load_skill", agent.VALID_TOOLS)
-        self.assertEqual(agent.TOOL_DESCRIPTIONS.count("load_skill(input)"), 1)
+        self.assertIn("load_skill", agent.TOOL_DESCRIPTIONS)
+        self.assertIn('load_skill("local:core_tools")',
+                      agent.TOOL_DESCRIPTIONS)
 
-        i_manage = agent.TOOL_DESCRIPTIONS.index("skill_manage(input)")
-        i_load = agent.TOOL_DESCRIPTIONS.index("load_skill(input)")
-        i_examples = agent.TOOL_DESCRIPTIONS.index("10. EXAMPLES")
+        manual = agent.load_skill_tool("core_tools")
+        self.assertEqual(manual.count("load_skill(input)"), 1)
+
+        i_manage = manual.index("skill_manage(input)")
+        i_load = manual.index("load_skill(input)")
+        i_examples = manual.index("10. EXAMPLES")
         self.assertLess(i_manage, i_load)
         self.assertLess(i_load, i_examples)
 
-        between = agent.TOOL_DESCRIPTIONS[i_manage:i_load]
+        between = manual[i_manage:i_load]
         self.assertIn("NEVER invent a skill body", between)
         self.assertNotIn("\n  run_command(input)", between)
+
+    def test_prompt_index_points_at_the_core_tools_manual(self):
+        prompt = agent._build_plan_prompt("hello", "")
+        self.assertIn("AVAILABLE TOOLS:", prompt)
+        self.assertIn('load_skill("local:core_tools")', prompt)
+        self.assertIn("Do not guess the input format.", prompt)
+        self.assertLess(len(agent.TOOL_DESCRIPTIONS), 2000)
+        for name in agent.VALID_TOOLS - {"chat", "done"}:
+            self.assertIn(name, agent.TOOL_DESCRIPTIONS)
+
+    def test_core_tools_manual_holds_the_full_catalog(self):
+        manual = agent.load_skill_tool("core_tools")
+        for anchor in ("browse_web(input)", "execute_python(input)",
+                       "NEVER CLAIM AN ACTION YOU DID NOT TAKE", "10. EXAMPLES"):
+            self.assertIn(anchor, manual)
+
+    def test_progressive_disclosure_prompt_budget(self):
+        prompt = agent._build_plan_prompt("hello", "")
+        self.assertLess(
+            len(prompt) / 4, 2000,
+            f"prompt is {len(prompt)} chars (~{len(prompt) / 4:.0f} tokens)")
 
     def test_execute_tool_loads_skill_and_reports_errors(self):
         with self.patched():
@@ -167,9 +193,12 @@ class SkillIntegrationTests(unittest.TestCase):
     def test_stremio_request_injects_exact_directive(self):
         with self.patched(group_mode=False):
             prompt = agent._build_plan_prompt("watch Cherry", "")
-        self.assertTrue(prompt.startswith(
+        directive = (
             "Use the Stremio skill now. Do not think about it, just execute "
-            "the steps. Call load_skill(\"local:stremio\") first."))
+            'the steps. Call load_skill("local:stremio") first.')
+        self.assertIn(directive, prompt)
+        self.assertLess(prompt.index("AVAILABLE SKILLS"),
+                        prompt.index(directive))
 
     def test_music_request_does_not_inject_stremio(self):
         self.assertEqual(agent._skill_directive("play a song"), "")

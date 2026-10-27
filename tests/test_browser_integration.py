@@ -30,11 +30,13 @@ MAX_PROMPT_TOKENS = 7800
 class BrowserToolIntegrationTests(unittest.TestCase):
     def test_registry_has_one_browse_web_entry(self):
         self.assertIn("browse_web", agent.VALID_TOOLS)
-        self.assertEqual(agent.TOOL_DESCRIPTIONS.count("browse_web(input)"), 1)
+        self.assertIn("browse_web", agent.TOOL_DESCRIPTIONS)
+        manual = agent.load_skill_tool("core_tools")
+        self.assertEqual(manual.count("browse_web(input)"), 1)
 
-        i_load = agent.TOOL_DESCRIPTIONS.index("load_skill(input)")
-        i_browse = agent.TOOL_DESCRIPTIONS.index("browse_web(input)")
-        i_examples = agent.TOOL_DESCRIPTIONS.index("10. EXAMPLES")
+        i_load = manual.index("load_skill(input)")
+        i_browse = manual.index("browse_web(input)")
+        i_examples = manual.index("10. EXAMPLES")
         self.assertLess(i_load, i_browse)
         self.assertLess(i_browse, i_examples)
 

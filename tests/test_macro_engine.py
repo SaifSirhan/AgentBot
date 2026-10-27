@@ -434,12 +434,13 @@ class MacroToolTests(unittest.TestCase):
     # Registry and prompt
     # ------------------------------------------------------------------
     def test_tools_are_registered_once(self):
+        manual = self.agent.load_skill_tool("core_tools")
         for name in ("save_macro", "play_macro"):
             self.assertIn(name, self.agent.VALID_TOOLS, name)
+            self.assertIn(name, self.agent.TOOL_DESCRIPTIONS, name)
             self.assertNotIn(name, self.agent.SAFE_GROUP_TOOLS, name)
             pattern = f"{name}(input)"
-            self.assertEqual(
-                self.agent.TOOL_DESCRIPTIONS.count(pattern), 1, pattern)
+            self.assertEqual(manual.count(pattern), 1, pattern)
 
     def test_execute_tool_dispatches_macros(self):
         with mock.patch.object(
@@ -463,7 +464,7 @@ class MacroToolTests(unittest.TestCase):
                 self.assertIn("disabled in group chats", out, name)
 
     def test_prompt_contains_the_self_learning_rule(self):
-        flat = " ".join(self.agent.TOOL_DESCRIPTIONS.split())
+        flat = " ".join(self.agent.load_skill_tool("core_tools").split())
         self.assertIn(
             "For repetitive tasks (like opening a specific folder or app), "
             "first try play_macro. If it doesn't exist or fails, use OS "
@@ -473,7 +474,7 @@ class MacroToolTests(unittest.TestCase):
         )
 
     def test_prompt_requires_variables_for_placeholder_macros(self):
-        flat = " ".join(self.agent.TOOL_DESCRIPTIONS.split())
+        flat = " ".join(self.agent.load_skill_tool("core_tools").split())
         self.assertIn(
             "If a macro contains placeholders like {{TITLE}}, you MUST pass "
             "the variables dictionary when calling play_macro. Example: "
@@ -482,19 +483,19 @@ class MacroToolTests(unittest.TestCase):
         )
 
     def test_save_macro_docs_mention_placeholders(self):
-        text = self.agent.TOOL_DESCRIPTIONS
+        text = self.agent.load_skill_tool("core_tools")
         start = text.index("save_macro(input)")
         end = text.index("play_macro(input)")
         self.assertIn("{{TITLE}}", text[start:end])
 
     def test_save_macro_docs_mention_hotkey_steps(self):
-        text = self.agent.TOOL_DESCRIPTIONS
+        text = self.agent.load_skill_tool("core_tools")
         start = text.index("save_macro(input)")
         end = text.index("play_macro(input)")
         self.assertIn('"hotkey"', text[start:end])
 
     def test_prompt_prefers_hotkeys_in_macros(self):
-        flat = " ".join(self.agent.TOOL_DESCRIPTIONS.split())
+        flat = " ".join(self.agent.load_skill_tool("core_tools").split())
         self.assertIn(
             "When creating a macro, ALWAYS prefer using hotkeys (like win, "
             "ctrl+f, alt+tab) for opening apps or focusing search bars "

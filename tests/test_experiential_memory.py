@@ -247,18 +247,21 @@ class LearnedBlockTests(LessonTestBase):
 
 
 class PromptInjectionTests(LessonTestBase):
-    def test_lessons_are_injected_at_the_top(self):
+    def test_lessons_are_injected_after_the_tool_index(self):
         block = "[LEARNED LESSONS]\n- Wait for the UI.\n\n"
         with mock.patch.object(em, "learned_lessons_block", return_value=block):
             prompt = agent._build_plan_prompt("hello", "")
 
-        self.assertTrue(prompt.startswith(block), prompt[:80])
+        self.assertIn(block, prompt)
+        self.assertLess(prompt.index('load_skill("local:core_tools")'),
+                        prompt.index(block))
 
-    def test_no_lessons_leaves_prompt_unchanged(self):
+    def test_no_lessons_still_leads_with_the_tool_index(self):
         with mock.patch.object(em, "learned_lessons_block", return_value=""):
             prompt = agent._build_plan_prompt("hello", "")
 
-        self.assertIn("IDENTITY & TONE", prompt[:40])
+        self.assertIn('load_skill("local:core_tools")', prompt)
+        self.assertNotIn("[LEARNED LESSONS]", prompt)
 
     def test_prompt_budget_holds_with_a_full_lessons_block(self):
         block = "[LEARNED LESSONS]\n" + "".join(

@@ -213,8 +213,10 @@ class RegistryTests(unittest.TestCase):
     def test_web_fetch_replaces_fetch_clean(self):
         self.assertIn("web_fetch", agent.VALID_TOOLS)
         self.assertNotIn("fetch_clean", agent.VALID_TOOLS)
-        self.assertEqual(agent.TOOL_DESCRIPTIONS.count("web_fetch(input)"), 1)
-        self.assertNotIn("fetch_clean(input)", agent.TOOL_DESCRIPTIONS)
+        self.assertIn("web_fetch", agent.TOOL_DESCRIPTIONS)
+        manual = agent.load_skill_tool("core_tools")
+        self.assertEqual(manual.count("web_fetch(input)"), 1)
+        self.assertNotIn("fetch_clean(input)", manual)
 
     def test_execute_tool_dispatches(self):
         with mock.patch.object(agent, "web_fetch", return_value="FETCHED") as fetch, \
