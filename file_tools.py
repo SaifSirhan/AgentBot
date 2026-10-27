@@ -12,6 +12,7 @@ Requires: pip install pypdf python-docx openpyxl pytesseract pillow
 (If you already have screen.py working for OCR, that path is tried first.)
 """
 
+import json
 import os
 
 MAX_CHARS_PER_FILE = 50_000   # guard against context blowout
@@ -143,6 +144,88 @@ def read_file(path):
         body = f"[read failed: {e}]"
 
     return f"{header}\n{_truncate(body)}\n--- end {name} ---"
+
+
+MAX_INSPECT_PARAGRAPHS = 200
+MAX_PARAGRAPH_CHARS = 400
+MAX_INSPECT_TABLES = 10
+MAX_TABLE_ROWS = 40
+MAX_ROW_CELLS = 20
+MAX_CELL_CHARS = 120
+MAX_INSPECT_CHARS = 20_000
+
+
+def _clip(text, limit):
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def inspect_docx(filepath):
+    """Return a JSON map of a Word file: paragraphs, tables, rows, columns."""
+    path = (filepath or "").strip().strip('"').strip("'")
+    if not path:
+        return "ERROR: inspect_docx needs a file path."
+    if not os.path.isfile(path):
+        return f"ERROR: file not found: {path}"
+    if os.path.splitext(path)[1].lower() != ".docx":
+        return "ERROR: inspect_docx only reads .docx files."
+    try:
+        from docx import Document
+    except ImportError:
+        return "ERROR: python-docx is not installed (pip install python-docx)."
+    try:
+        doc = Document(path)
+    except Exception as e:
+        return f"ERROR: cannot open '{path}': {e}"
+
+    remaining = MAX_INSPECT_CHARS
+    paragraphs = []
+    for i, p in enumerate(doc.paragraphs):
+        if len(paragraphs) >= MAX_INSPECT_PARAGRAPHS or remaining <= 0:
+            break
+        text = p.text.strip()
+        if not text:
+            continue
+        text = _clip(text, MAX_PARAGRAPH_CHARS)
+        remaining -= len(text)
+        paragraphs.append({
+            "index": i,
+            "style": p.style.name if p.style is not None else "",
+            "text": text,
+        })
+
+    tables = []
+    for t_i, table in enumerate(doc.tables):
+        if len(tables) >= MAX_INSPECT_TABLES or remaining <= 0:
+            break
+        rows = []
+        for row in list(table.rows)[:MAX_TABLE_ROWS]:
+            if remaining <= 0:
+                break
+            cells = []
+            for cell in list(row.cells)[:MAX_ROW_CELLS]:
+                cell_text = _clip(cell.text, MAX_CELL_CHARS)
+                remaining -= len(cell_text)
+                cells.append(cell_text)
+            rows.append(cells)
+        tables.append({
+            "index": t_i,
+            "rows": len(table.rows),
+            "columns": len(table.columns),
+            "shown_rows": len(rows),
+            "cells": rows,
+        })
+
+    payload = {
+        "file": os.path.abspath(path),
+        "paragraph_count": len(doc.paragraphs),
+        "shown_paragraphs": len(paragraphs),
+        "paragraphs": paragraphs,
+        "table_count": len(doc.tables),
+        "tables": tables,
+        "truncated": remaining <= 0,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=1)
 
 
 def _describe_image_via_agent(path, question=None):

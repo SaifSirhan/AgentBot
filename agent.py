@@ -7,6 +7,7 @@ import requests
 import webbrowser
 import time
 import shutil
+import sys
 import datetime
 import urllib.parse
 import winsound
@@ -1156,6 +1157,7 @@ def _build_plan_prompt(user_request, context, correction=None):
             "- describe_image, send_image_telegram\n"
             "- load_skill (skills are disabled in groups)\n"
             "- browse_web (browser control is disabled in groups)\n"
+            "- execute_python, inspect_docx (local code and file access)\n"
             "- screenshot_background, click_coordinates, type_text, get_pixel_color (OS control)\n"
             "- All system tools (volume, media, lock, shutdown)\n\n"
             "If a user asks for any blocked capability, reply briefly: you "
@@ -1310,6 +1312,37 @@ def run_command(command):
         return result.stdout if result.stdout else result.stderr
     except Exception as e:
         return f"ERROR: {e}"
+
+
+MAX_PYTHON_OUTPUT = 12000
+
+
+def execute_python(code):
+    """Run a Python script in a fresh interpreter and return its output."""
+    if not (code or "").strip():
+        return "ERROR: execute_python needs code."
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, cwd=os.path.dirname(os.path.abspath(__file__)), env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return "ERROR: the script ran longer than 60 seconds and was stopped."
+    except Exception as e:
+        return f"ERROR: cannot run Python: {e}"
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    if len(out) > MAX_PYTHON_OUTPUT:
+        out = (out[:MAX_PYTHON_OUTPUT]
+               + f"\n[... truncated {len(out) - MAX_PYTHON_OUTPUT} chars]")
+    if proc.returncode != 0:
+        return f"ERROR: exit code {proc.returncode}\n{(err or out)[:MAX_PYTHON_OUTPUT]}"
+    if not out and err:
+        return f"OK (no stdout). stderr:\n{err[:MAX_PYTHON_OUTPUT]}"
+    return out or "OK (no output)"
 
 
 def _iter_folders(root, max_depth=2):
@@ -4424,6 +4457,12 @@ Clarify only when necessary. Ask one concise question only when ambiguity would
 materially change the answer or action. Otherwise use the most reasonable
 interpretation and state the assumption briefly.
 
+You are an autonomous agent. If a user asks you to edit, rename, or
+restructure a file, DO NOT ask for permission at every step. Take the
+initiative: inspect the file, write the script, execute it, and report the
+result. Only ask for confirmation before destructive, irreversible actions
+(like deleting a file).
+
 Destructive or irreversible actions require explicit confirmation. shutdown_pc,
 restart_pc, and telegram_user_delete after preview require "confirm". Never
 infer consent from tone or context.
@@ -4668,14 +4707,13 @@ sitemap.xml first.
   web_fetch(input) — fetch a URL as clean Markdown via DeepSeek Fetch (falls
 back to local text extraction). Use after search_web; for a summary use
 read_and_summarize instead.
-  crawl_managed(input) — crawl via a managed service (Crawlbase or Firecrawl)
-with JS rendering and anti-bot handling; falls back to crawl_site if no API
-key is set. Format: "url|mode" (mode optional, default markdown). Modes:
-markdown | html | screenshot.
+  crawl_managed(input) — crawl via Crawlbase or Firecrawl with JS rendering
+and anti-bot handling; falls back to crawl_site without a key. Format:
+"url|mode" (markdown | html | screenshot; default markdown).
   run_recipe(input) — run a saved browser recipe by name (a fixed
 click/type/wait script from recipes.json). A wrong name returns the real names.
-  deep_research(input) — multi-step research: searches the web, reads the top
-sources, writes a structured report, saves as .md to Downloads. Takes 1-3 minutes.
+  deep_research(input) — searches, reads sources, writes a .md report to
+Downloads. Takes 1-3 minutes.
 hardware_scan() — report the user's GPU, VRAM, RAM, CPU cores.
 recommend_models() — recommend Ollama models that fit the user's hardware.
 
@@ -4701,6 +4739,13 @@ LOCAL FILES & DOCUMENTS
   write_file(input) — "filename|content". Creates or FULLY OVERWRITES a file.
     NEVER use write_file to modify an existing file — you will destroy everything
     else in it. Use patch_file instead.
+
+PYTHON EXECUTION
+  execute_python(input) — run a Python script in a fresh process with the
+    agent's interpreter; returns stdout/stderr. Input: the code itself.
+    If you need to read or edit a complex file (like a .docx, .xlsx, or .pdf),
+    write a Python script using python-docx or openpyxl, run it with this
+    tool, and observe the output. Do not use read_file for binary documents.
 
 CODE EDITING (use these whenever the user asks to change or inspect code)
   patch_file(input) — surgical SEARCH/REPLACE edit of an existing file.
@@ -4753,14 +4798,11 @@ WINDOWS & APPS
 REMINDERS & MEMORY
   set_reminder(input) — "duration|text" such as 30s, 5min, 2hr, 1day.
   set_reminder_at(input) — "HH:MM|text".
-  schedule_task(input) — set up a RECURRING job from a natural-language phrase.
-    Use this (not set_reminder) when the user says "every", "each", "daily",
-    "weekly", "every morning", or otherwise wants something to happen
-    repeatedly. A one-shot "in 10 minutes" is set_reminder, not this.
-    Format: "when|what", where "when" is natural language ("every day at 8am",
-    "every 30 minutes", "every monday at 9:00") and "what" is the request to
-    run each time. Also accepts a raw 5-field cron: "*/15 * * * *|check disk
-    space". Use "list" alone to list recurring jobs, and "remove|<n>" to delete.
+  schedule_task(input) — RECURRING job from natural language ("every day at
+    8am", "every 30 minutes"). Use this (not set_reminder) for "every"/"each"/
+    "daily"/"weekly"; a one-shot is set_reminder. Format: "when|what"; a raw
+    5-field cron ("*/15 * * * *|check disk") also works. "list" lists jobs,
+    "remove|<n>" deletes one.
   list_reminders() — list pending reminders and daily tasks.
   remember(input) — save a lasting personal fact; never secrets.
   forget(input) — remove a lasting personal fact.
@@ -4774,19 +4816,16 @@ COMMUNICATION
     to delete; append |all for every matching message; newest uses
     "Contact|latest".
   telegram_user_edit(input) — "Contact|old text|new text"; within 48h.
-  send_image_telegram(input) — send an image file to a Telegram contact as
-    the user's personal account. Format: "contact|image_path". Use "me" for
-    Saved Messages. Path can be a full path or just a filename (assumes
-    Downloads). USE THIS after generate_image when the user wants the image
-    sent to someone.
+  send_image_telegram(input) — send an image file as the user:
+    "contact|image_path"; "me" = Saved Messages; a bare filename means
+    Downloads. Use after generate_image when the user wants it sent.
   gmail_unread(input) — list unread email.
   gmail_read(input) — read email by UID.
   gmail_search(input) — search email by keyword.
   whitelist(input) — "add <word>", "remove <word>", or "list".
-  reply_with_gif(input) — reply in the CURRENT Telegram chat with a GIF
-    matching an emotion or context. Input: search term like "celebration",
-    "facepalm", "sarcastic clap", "confused". USE IT sparingly — only when a
-    text reply would feel flat and a GIF would land better.
+  reply_with_gif(input) — reply in the CURRENT chat with a GIF for an emotion
+    ("celebration", "facepalm", "confused"). Use sparingly, only when text
+    would feel flat.
   send_gif(input) — send a GIF to a NAMED contact as the user:
     "contact|search_term"; "me" = Saved Messages. Prefers the group library,
     then Giphy. Use for "send a GIF to X"; search the emotion, not a scene.
@@ -4806,22 +4845,18 @@ MISC
   set_name(input) — rename the assistant.
 
 IMAGE
-  generate_image(input) — generate an AI image from a text prompt. Format:
-    "prompt|filename" (filename optional). Saves to Downloads. Free, no API key.
-  describe_image(input) — read and describe an image using vision. Format:
-    "path|question" (question optional, defaults to a full description).
-    Handles photos, screenshots, diagrams, and charts.
+  generate_image(input) — AI image from a prompt: "prompt|filename"
+    (filename optional). Saves to Downloads. Free, no API key.
+  describe_image(input) — describe an image with vision: "path|question"
+    (question optional). Handles photos, screenshots, diagrams, charts.
 
 SECURITY
-  scan_file(input) — static analysis of a file. Computes SHA256, entropy,
-    suspicious string patterns, and returns a verdict (LIKELY CLEAN /
-    SUSPICIOUS / LIKELY MALICIOUS). Input: full file path.
-  scan_process(input) — inspect a running process. Shows path, command line,
-    user, network connections. Input: process name (partial, e.g. "svchost") or
-    PID number.
-  quarantine_file(input) — move a suspicious file to Downloads\Quarantine\.
-    Reversible. Input: full file path. ALWAYS show the scan_file result first
-    and confirm with the user before calling this.
+  scan_file(input) — SHA256, entropy, suspicious strings, verdict (CLEAN /
+    SUSPICIOUS / MALICIOUS). Input: full path.
+  scan_process(input) — path, command line, user, connections. Input: process
+    name (partial, e.g. "svchost") or PID.
+  quarantine_file(input) — move a file to Downloads\Quarantine\. Reversible.
+    Full path. ALWAYS show the scan_file result and confirm first.
   list_quarantine() — list files currently in quarantine.
 
 OFFICE (NATIVE COM)
@@ -4831,6 +4866,8 @@ OFFICE (NATIVE COM)
     Input: locale code such as "en-US" or "fr-FR".
 
 DOCUMENT EDITING
+  inspect_docx(input) — JSON map of a .docx: paragraph text/styles and every
+    table's rows, columns, and cells. Input: full path. Use before editing.
   edit_document(input) — edit an existing DOCX, XLSX, PPTX, or PDF file.
     Format: "filepath|instruction" where filepath is an absolute path and
     instruction is natural language describing the edit. The tool backs the
@@ -4861,10 +4898,9 @@ SKILL MANAGEMENT
     any files it references.
 
 BROWSER CONTROL
-  browse_web(input) — run a restricted browser agent. Format:
-    "https://site | task"; the origin must be allowlisted. The agent asks for
-    approval for clicks/fills/selects. Do not claim success unless the report
-    says completed.
+  browse_web(input) — restricted browser agent: "https://site | task"; origin
+    must be allowlisted. It asks approval for clicks/fills/selects. Claim
+    success only if the report says completed.
 
 OS CONTROL
   App control: run the full sequence (screenshot, click, type, Enter) without
@@ -4893,10 +4929,7 @@ SELF-SUFFICIENCY
 
 Tool required:
   "what's the weather" → {"tool":"weather","input":"Shah Alam"}
-  "AQI?" → {"tool":"air_quality","input":"Shah Alam"}
   "my reminders" → {"tool":"list_reminders","input":""}
-  "mute" → {"tool":"set_volume","input":"mute"}
-  "what's on my screen" → {"tool":"describe_screen","input":""}
   "what did I write about Hezbollah?" → {"tool":"rag_search","input":"Hezbollah Lebanon"}
   "read C:\\Users\\USER\\notes.md" → {"tool":"read_file","input":"C:\\Users\\USER\\notes.md"}
   "send jeffrey a list of these 3 cafes" →
@@ -4930,7 +4963,7 @@ VALID_TOOLS = {
     "chat", "search_web", "serp_search", "show_last_result", "read_and_summarize",
     "google_search_and_open", "youtube_search", "get_video_links",
     "play_on_youtube", "stream_media",
-    "open_app", "open_website", "run_command", "make_folder",
+    "open_app", "open_website", "run_command", "execute_python", "make_folder",
     "find_and_open_folder", "write_file", "read_file",
     "set_reminder", "remember", "forget", "read_screen",
     "schedule_task",    "clipboard_read", "clipboard_write", "set_volume", "media_control",
@@ -4952,6 +4985,7 @@ VALID_TOOLS = {
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
     "search_group_chat", "grep_group_chat", "rag_search",
     "edit_document", "post_to_social", "read_word_doc", "set_word_language",
+    "inspect_docx",
     "skill_manage", "load_skill", "browse_web",
 }
 
@@ -5388,6 +5422,9 @@ def _execute_tool_impl(action):
     elif tool == 'read_word_doc':
         import office_control
         return office_control.read_word_doc(inp)
+    elif tool == 'inspect_docx':
+        import file_tools
+        return file_tools.inspect_docx(inp)
     elif tool == 'set_word_language':
         import office_control
         return office_control.set_word_language(inp.strip() or "en-US")
@@ -5440,6 +5477,7 @@ def _execute_tool_impl(action):
     elif tool == 'load_skill':             return load_skill_tool(inp)
     elif tool == 'browse_web':             return browse_web(inp)
     elif tool == 'run_command':            return run_command(inp)
+    elif tool == 'execute_python':         return execute_python(inp)
     elif tool == 'search_web':             return search_web(inp)
     elif tool == 'show_last_result':       return show_last_result()
     elif tool == 'open_website':           return open_website(inp)

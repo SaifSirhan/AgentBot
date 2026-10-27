@@ -40,6 +40,7 @@ SPECIAL_TARGETS = {
         "document_tools.edit_pdf",
     ),
     "forget": ("agent.forget_fact",),
+    "inspect_docx": ("file_tools.inspect_docx",),
     "list_quarantine": ("security_tools.list_quarantine",),
     "load_skill": ("agent.load_skill_tool",),
     "post_to_social": ("typefully_tool.post_to_social",),
