@@ -363,12 +363,14 @@ def _window_at_point(x: int, y: int) -> Tuple[int, str]:
         return 0, ""
 
 
-def _activate_hwnd(hwnd: int) -> bool:
+def _activate_hwnd(hwnd: int, maximize: bool = False) -> bool:
     if not hwnd or os.name != "nt":
         return False
     try:
         user32 = _user32()
-        if user32.IsIconic(hwnd):
+        if maximize:
+            user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+        elif user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, 9)  # SW_RESTORE
         user32.SetForegroundWindow(hwnd)
         time.sleep(FOCUS_SETTLE_SECONDS)
@@ -377,10 +379,12 @@ def _activate_hwnd(hwnd: int) -> bool:
         return False
 
 
-def _focus_window_by_title(title: str) -> Tuple[int, str]:
+def _focus_window_by_title(title: str, maximize: bool = False) -> Tuple[int, str]:
     """Restore and activate the first matching non-AgentBot window.
 
-    Returns (hwnd, human-readable label), or (0, "") when nothing matches.
+    With ``maximize`` the window is also maximized so screenshot coordinates
+    stay stable between runs. Returns (hwnd, human-readable label), or
+    (0, "") when nothing matches.
     """
     gw = _load_pygetwindow()
     if gw is None:
@@ -396,12 +400,14 @@ def _focus_window_by_title(title: str) -> Tuple[int, str]:
         try:
             if win.isMinimized:
                 win.restore()
+            if maximize:
+                win.maximize()
             win.activate()
             time.sleep(FOCUS_SETTLE_SECONDS)
         except Exception:
             pass
         if hwnd:
-            _activate_hwnd(hwnd)
+            _activate_hwnd(hwnd, maximize=maximize)
         return hwnd, str(getattr(win, "title", "") or title)
     return 0, ""
 
@@ -463,7 +469,7 @@ def screenshot_background(title: str = "") -> str:
 
         focus_note = "none"
         if title:
-            hwnd, label = _focus_window_by_title(title)
+            hwnd, label = _focus_window_by_title(title, maximize=True)
             if hwnd or label:
                 focus_note = f"focused {label}"
                 time.sleep(FOCUS_SETTLE_SECONDS)
@@ -540,6 +546,7 @@ def click_coordinates(input_str: str) -> str:
         pyautogui.moveTo(absolute_x, absolute_y, duration=0.1)
         _guard()
         pyautogui.click()
+        time.sleep(CLICK_SETTLE_SECONDS)
         target_note = f" Target: {target_label}." if target_label else ""
         return (f"Clicked ({x}, {y}) — absolute screen "
                 f"({absolute_x}, {absolute_y}).{target_note}")

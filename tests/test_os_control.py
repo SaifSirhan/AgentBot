@@ -120,11 +120,23 @@ class OSControlTests(unittest.TestCase):
         with mock.patch.object(oc.time, "sleep") as sleep, \
              mock.patch.object(oc.pyautogui, "moveTo") as move, \
              mock.patch.object(oc.pyautogui, "click") as click:
+            order = mock.Mock()
+            order.attach_mock(click, "click")
+            order.attach_mock(sleep, "sleep")
             out = oc.click_coordinates("10, 20")
 
         move.assert_called_once_with(110, 70, duration=0.1)
         click.assert_called_once()
-        sleep.assert_called_once_with(oc.CLICK_SETTLE_SECONDS)
+        # One click, then a settle sleep so the UI reacts before the
+        # next screenshot. The hide settle happens before the click.
+        self.assertEqual(
+            [name for name, _, _ in order.mock_calls],
+            ["sleep", "click", "sleep"])
+        for _, args, kwargs in order.mock_calls:
+            if args or kwargs:
+                self.assertEqual(
+                    (args, kwargs),
+                    ((oc.CLICK_SETTLE_SECONDS,), {}))
         self.assertEqual(calls, ["hide", "show"])
         self.assertEqual(self.focus_calls, [("", 110, 70)])
         self.assertIn("Clicked (10, 20)", out)
@@ -183,7 +195,7 @@ class OSControlTests(unittest.TestCase):
         self.assertTrue(win.activated)
         self.assertEqual(hwnd, 55)
         self.assertIn("YouTube Music", label)
-        activate.assert_called_once_with(55)
+        activate.assert_called_once_with(55, maximize=False)
 
     def test_target_focus_falls_back_to_window_under_point(self):
         with mock.patch.object(
@@ -236,9 +248,65 @@ class OSControlTests(unittest.TestCase):
              mock.patch.object(oc.time, "sleep"):
             out = oc.screenshot_background("Stremio")
 
-        focus.assert_called_once_with("Stremio")
+        focus.assert_called_once_with("Stremio", maximize=True)
         self.assertIn("Focus: focused Stremio", out)
         self.assertEqual(calls, ["hide", "show"])
+
+    def test_focus_maximizes_before_activating(self):
+        class FakeWindow:
+            _hWnd = 88
+            isMinimized = False
+            title = "Qoder IDE"
+            events = []
+
+            def activate(self):
+                self.events.append("activate")
+
+            def maximize(self):
+                self.events.append("maximize")
+
+        win = FakeWindow()
+
+        class FakeGW:
+            @staticmethod
+            def getWindowsWithTitle(_title):
+                return [win]
+
+        with mock.patch.object(oc, "_load_pygetwindow", return_value=FakeGW), \
+             mock.patch.object(oc, "_window_process_id", return_value=999), \
+             mock.patch.object(oc, "_activate_hwnd") as activate, \
+             mock.patch.object(oc.time, "sleep"):
+            hwnd, _ = oc._focus_window_by_title("Qoder IDE", maximize=True)
+
+        self.assertEqual(hwnd, 88)
+        self.assertEqual(win.events, ["maximize", "activate"])
+        activate.assert_called_once_with(88, maximize=True)
+
+    def test_focus_does_not_maximize_by_default(self):
+        class FakeWindow:
+            _hWnd = 99
+            isMinimized = False
+            title = "Stremio"
+
+            def activate(self):
+                pass
+
+            def maximize(self):
+                raise AssertionError("must not maximize without the flag")
+
+        class FakeGW:
+            @staticmethod
+            def getWindowsWithTitle(_title):
+                return [FakeWindow()]
+
+        with mock.patch.object(oc, "_load_pygetwindow", return_value=FakeGW), \
+             mock.patch.object(oc, "_window_process_id", return_value=999), \
+             mock.patch.object(oc, "_activate_hwnd") as activate, \
+             mock.patch.object(oc.time, "sleep"):
+            hwnd, _ = oc._focus_window_by_title("Stremio")
+
+        self.assertEqual(hwnd, 99)
+        activate.assert_called_once_with(99, maximize=False)
 
     def test_screenshot_reports_missing_window(self):
         with mock.patch.object(
@@ -278,7 +346,7 @@ class OSControlTests(unittest.TestCase):
         self.assertTrue(win.restored)
         self.assertTrue(win.activated)
         self.assertEqual((hwnd, label), (55, "Stremio"))
-        activate.assert_called_once_with(55)
+        activate.assert_called_once_with(55, maximize=False)
 
     def test_screenshot_abort_still_restores_gui(self):
         calls = []

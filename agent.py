@@ -1223,7 +1223,7 @@ def _build_plan_prompt(user_request, context, correction=None):
             "- load_skill (skills are disabled in groups)\n"
             "- browse_web (browser control is disabled in groups)\n"
             "- execute_python, inspect_docx (local code and file access)\n"
-            "- screenshot_background, analyze_screenshot, click_coordinates, type_text, get_pixel_color (OS control)\n"
+            "- screenshot_background, analyze_screenshot, click_coordinates, type_text, get_pixel_color, save_macro, play_macro (OS control)\n"
             "- All system tools (volume, media, lock, shutdown)\n\n"
             "If a user asks for any blocked capability, reply briefly: you "
             "can't do that in a group, DM the bot directly. Do NOT attempt "
@@ -4657,10 +4657,6 @@ Destructive or irreversible actions require explicit confirmation. shutdown_pc,
 restart_pc, and telegram_user_delete after preview require "confirm". Never
 infer consent from tone or context.
 
-Never claim an action succeeded without evidence. Only say "sent", "opened",
-"done", etc. when the step log contains a matching
-Action: <tool>(...) -> Result: entry. No entry, nothing happened.
-
 Never invent inputs. Do not invent URLs, file paths, contact names, locations,
 IDs, or facts.
 
@@ -4762,8 +4758,7 @@ B. WHICH TOOL?
  18. Places/maps → send_maps_url for one link sent now, or send_maps_list
      for several places in one message.
  19. Tasks/desktop notification/misc → todo, notify, beep, list_brains.
- 20. Nothing fits → plain text; apply SELF-SUFFICIENCY before saying it is
-     outside the toolset.
+ 20. Nothing fits → plain text; apply SELF-SUFFICIENCY.
 
 When multiple tools could work, prefer the MOST SPECIFIC semantic match,
 not the most general tool.
@@ -5089,31 +5084,36 @@ BROWSER CONTROL
     only if the report says completed.
 
 OS CONTROL
-  Stremio: use skill "local:stremio" for movies and TV shows; never scrape
-    pirate sites.
-  If a desktop app lacks a dedicated API, use OS Control
-  (screenshot_background, click_coordinates, type_text) to navigate its UI.
-  Never refuse a UI task just because you lack a direct Python API.
+  Stremio: use skill "local:stremio"; never scrape pirate sites.
+  No dedicated API? Use OS Control to navigate the UI. Never refuse a UI
+  task for lack of a Python API.
   You have a vision model. Use analyze_screenshot to read the screen.
-  screenshot_background(input) — hide GUI, focus the app (optional title),
-    capture, and return a vision description with coordinates. Input: app
-    title.
+  screenshot_background(input) — hide GUI, focus the app (title optional),
+    capture, return vision coordinates.
   analyze_screenshot(input) — capture and answer a vision question:
-    "question" or "App title|question". To click, screenshot, read X/Y from
-    the vision result, then click_coordinates. Never ask the user for
-    coordinates. If a button is missing after two attempts: Stop, take a
-    fresh screenshot, and look again.
+    "question" or "App title|question". To click, screenshot, read X/Y, then
+    click_coordinates. Never ask the user for coordinates. Missing button
+    twice: Stop, take a fresh screenshot, and look again.
   click_coordinates(input) — hide GUI, focus the target, click "x,y" in
     screenshot pixels, restore GUI. Format: "x,y" or "x,y | App title".
   type_text(input) — types in the focused window; append "{enter}" to submit.
   get_pixel_color(input) — hex colour at "x,y".
 
+MACROS
+  If the user asks you to do a repetitive task (like opening a specific
+  folder in an IDE, or opening Stremio), first try play_macro. If the macro
+  doesn't exist or fails, use OS Control with Vision to accomplish the task.
+  Once you succeed, use save_macro to record the coordinates so you never
+  have to guess again.
+  save_macro(input) — "name|steps_json"; each step is {"action":"click",
+    "x":..,"y":..}, {"action":"type","text":".."}, or {"action":"wait",
+    "seconds":..}.
+  play_macro(input) — replay a saved macro; each click fires once and
+    settles 0.5s.
+
 SELF-SUFFICIENCY
-  If a task requires a capability you do not have, AND OS Control is too
-  fragile (e.g., it requires complex file manipulation or missing
-  dependencies), stop and output a suggested Python script to the user.
-  Prefix it with [SUGGESTED_TOOL] so the user knows they can pass this to an
-  IDE to build it.
+  Missing capability with fragile OS Control → output a Python script
+  prefixed [SUGGESTED_TOOL] for the user to build.
 
 =====================================================================
 10. EXAMPLES
@@ -5156,7 +5156,7 @@ VALID_TOOLS = {
     "system_status", "lock_pc", "sleep_pc", "shutdown_pc", "restart_pc",
     "save_screenshot", "todo", "list_windows", "focus_window", "notify",
     "screenshot_background", "analyze_screenshot", "click_coordinates",
-    "type_text", "get_pixel_color",
+    "type_text", "get_pixel_color", "save_macro", "play_macro",
     "beep", "done", "set_reminder_at", "list_reminders", "list_brains",
     "close_window", "watch_folder", "stop_watching",
     "gmail_unread", "gmail_read", "gmail_search",
@@ -5589,6 +5589,30 @@ def get_pixel_color(input_str):
         return f"ERROR: OS control unavailable: {exc}"
 
 
+def save_macro(input_str):
+    """Save a replayable OS-control macro. Format: "name|steps_json"."""
+    name, sep, steps_json = (input_str or "").partition("|")
+    if not sep:
+        return 'ERROR: save_macro format is "name|steps_json".'
+    try:
+        import macro_engine
+        return macro_engine.save_macro(name.strip(), steps_json.strip())
+    except Exception as exc:
+        return f"ERROR: {exc}"
+
+
+def play_macro(input_str):
+    """Replay a saved macro by name."""
+    name = (input_str or "").strip()
+    if not name:
+        return "ERROR: play_macro needs a macro name."
+    try:
+        import macro_engine
+        return macro_engine.run_macro(name)
+    except Exception as exc:
+        return f"ERROR: {exc}"
+
+
 def browse_web(input_str):
     """Run one bounded browser task. Format: "https://site | task"."""
     parts = (input_str or "").split("|", 1)
@@ -5689,6 +5713,8 @@ def _execute_tool_impl(action):
     elif tool == 'click_coordinates':      return click_coordinates(inp)
     elif tool == 'type_text':              return type_text(inp)
     elif tool == 'get_pixel_color':        return get_pixel_color(inp)
+    elif tool == 'save_macro':             return save_macro(inp)
+    elif tool == 'play_macro':             return play_macro(inp)
     elif tool == 'crawl_managed':
         parts = inp.split("|", 1)
         url = parts[0].strip()
