@@ -69,6 +69,7 @@ SPLIT_FORMATS = [
 MUXED_FORMAT = {"url": "https://cdn.example.com/muxed.mp4",
                 "vcodec": "h264", "acodec": "aac"}
 HOOK = r"--script-opts=ytdl_hook-ytdl_path=C:\yt-dlp.exe"
+FORMAT = "--ytdl-format=bv*+ba/b"
 
 
 class StreamMediaTests(unittest.TestCase):
@@ -98,7 +99,7 @@ class StreamMediaTests(unittest.TestCase):
 
         self.assertEqual(fake.targets, ["ytsearch1:one piece episode 1"])
         self.assertEqual(popen.call_args[0][0],
-                         [r"C:\mpv.exe", HOOK,
+                         [r"C:\mpv.exe", FORMAT, HOOK,
                           "https://cdn.example.com/stream.mp4"])
         self.assertEqual(reply, "Playing in mpv: Episode 1")
 
@@ -109,7 +110,7 @@ class StreamMediaTests(unittest.TestCase):
 
         self.assertEqual(fake.targets, [url])
         self.assertEqual(popen.call_args[0][0],
-                         [r"C:\mpv.exe", HOOK,
+                         [r"C:\mpv.exe", FORMAT, HOOK,
                           "https://cdn.example.com/x.m3u8"])
 
     # ------------------------------------------------------------------
@@ -122,6 +123,7 @@ class StreamMediaTests(unittest.TestCase):
 
         self.assertEqual(popen.call_args[0][0], [
             r"C:\mpv.exe",
+            FORMAT,
             HOOK,
             "https://example.com/watch?v=1",
         ])
@@ -133,7 +135,8 @@ class StreamMediaTests(unittest.TestCase):
             video(url=None, formats=SPLIT_FORMATS + [MUXED_FORMAT]))
 
         self.assertEqual(popen.call_args[0][0],
-                         [r"C:\mpv.exe", HOOK, "https://cdn.example.com/muxed.mp4"])
+                         [r"C:\mpv.exe", FORMAT, HOOK,
+                          "https://cdn.example.com/muxed.mp4"])
 
     def test_single_format_without_codec_info_is_played_directly(self):
         _, _, popen, _ = self.run_tool(
@@ -142,7 +145,8 @@ class StreamMediaTests(unittest.TestCase):
              "url": "https://cdn.example.com/clip.mp4"})
 
         self.assertEqual(popen.call_args[0][0],
-                         [r"C:\mpv.exe", HOOK, "https://cdn.example.com/clip.mp4"])
+                         [r"C:\mpv.exe", FORMAT, HOOK,
+                          "https://cdn.example.com/clip.mp4"])
 
     # ------------------------------------------------------------------
     # Players and browser fallback
@@ -152,7 +156,8 @@ class StreamMediaTests(unittest.TestCase):
             "x", {"entries": [video()]}, ytdlp=None)
 
         self.assertEqual(popen.call_args[0][0],
-                         [r"C:\mpv.exe", "https://cdn.example.com/stream.mp4"])
+                         [r"C:\mpv.exe", FORMAT,
+                          "https://cdn.example.com/stream.mp4"])
         self.assertEqual(reply, "Playing in mpv: Episode 1")
 
     def test_mpv_output_is_written_to_the_log_file(self):

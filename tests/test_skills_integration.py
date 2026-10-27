@@ -126,9 +126,14 @@ class SkillIntegrationTests(unittest.TestCase):
     # Prompt budget
     # ------------------------------------------------------------------
     def test_real_prompt_stays_under_token_budget(self):
+        # Worst case: late-night directive plus the frustration directive, on
+        # top of the real catalog. Mood and time of day otherwise make this
+        # measurement vary between runs.
         with mock.patch.multiple(
             agent, _skill_manager=None, _skills_dirty=True, GROUP_MODE=False
-        ):
+        ), mock.patch.object(agent, "day_part", return_value="late"), \
+                mock.patch.object(agent, "get_mood_directive",
+                                  return_value=agent.FRUSTRATION_DIRECTIVE):
             prompt = agent._build_plan_prompt("hello", "")
             catalog = agent.get_skill_catalog()
 

@@ -5,6 +5,15 @@ description: "Watch movies and TV shows by driving the Stremio app with OS Contr
 
 # Stremio
 
+## Scope
+
+`stream_media` covers trailers, songs, and specific YouTube URLs. Full movies
+and TV episodes belong here, in Stremio.
+
+If the user asks to watch a full movie or TV show, you MUST use OS Control to
+open Stremio, search for the title, and click the first stream. Do not use
+stream_media for this.
+
 ## Overview
 
 Stremio is the desktop media center on this machine. Torrentio is its usual

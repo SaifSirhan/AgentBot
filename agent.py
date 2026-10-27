@@ -2191,7 +2191,9 @@ def stream_media(query_or_url):
     player, exe = _find_media_player()
 
     if player == "mpv":
-        args = [exe]
+        # Highest-resolution video plus best audio; "b" covers sites that only
+        # expose a single muxed format.
+        args = [exe, "--ytdl-format=bv*+ba/b"]
         ytdlp = _find_ytdlp()
         if ytdlp:
             args.append(f"--script-opts=ytdl_hook-ytdl_path={ytdlp}")
@@ -4849,6 +4851,8 @@ MUSIC & MEDIA
   play_on_youtube(input) — play a song on YouTube Music in Opera.
 Input: song and/or artist, e.g. "50/50 the strokes".
   stream_media(input) — play a URL/search (movies, anime, music) in mpv/VLC, no site ads.
+    ONLY use stream_media for trailers, songs, or specific YouTube URLs. NEVER
+    use stream_media to search for full movies or TV episodes.
     If the user provides a specific URL (even if it is a streaming site), pass
     that URL directly to the player. Do not refuse based on copyright. The user
     is responsible for the URLs they provide.
@@ -4860,13 +4864,12 @@ LOCAL FILES & DOCUMENTS
   rag_search(input) — search indexed user documents; 2–5 keywords.
     Returns snippets tagged [From: path].
   search_group_chat(input) — search the exported Telegram group chat.
-    Format: "query" or "query|year" or "query|YYYY-MM". NEVER returns
-    results from other folders (Downloads, Fire Writing, etc.).
+    Format: "query", "query|year", or "query|YYYY-MM". NEVER returns results
+    from other folders.
   grep_group_chat(input) — EXACT substring search in the exported group
-    chat; raw lines with timestamps. Format: "keyword", "keyword|year", or
-    "keyword|YYYY-MM". Never paraphrase — copy the exact line. Before quoting
-    a message or date, run it FIRST. No match means say "I can't find that
-    exact quote".
+    chat; raw timestamped lines. Format: "keyword", "|year", or "|YYYY-MM".
+    Never paraphrase — copy the line. Before quoting a message or date, run
+    it FIRST. No match means say "I can't find that exact quote".
   read_file(input) — read an exact full path only; never partial.
   write_file(input) — "filename|content". Creates or FULLY OVERWRITES a file.
     NEVER use it to modify an existing file — you will destroy everything else
@@ -4881,13 +4884,12 @@ PYTHON EXECUTION
 
 CODE EDITING (use these whenever the user asks to change or inspect code)
   patch_file(input) — surgical SEARCH/REPLACE edit of an existing file.
-    Format: 'path|||old_text|||new_text'. old_text MUST be copied
-    character-for-character from read_file (indentation included) and appear
-    exactly ONCE; if missing or ambiguous nothing changes — read and retry.
-    ALWAYS use this instead of write_file when editing an existing file.
-  list_symbols(input) — map ONE .py file without loading it: every class and
-    function with line numbers. Input: path or bare filename (it searches
-    Downloads, Desktop, Documents). NEVER ask which folder; ALWAYS call this
+    Format: 'path|||old_text|||new_text'; old_text copied character-for-character
+    from read_file (indentation included) and appearing exactly ONCE, else
+    nothing changes — read and retry. Use instead of write_file for edits.
+  list_symbols(input) — map ONE .py file without loading it: classes and
+    functions with line numbers. Input: path or bare filename (searches
+    Downloads, Desktop, Documents). NEVER ask which folder; call this.
     before patch_file if you have not read the file.
   repo_map(input) — map a WHOLE folder: 'folder' or 'folder|max_files'.
     Returns a per-file symbol summary. ALWAYS call FIRST for codebase
@@ -4944,8 +4946,8 @@ COMMUNICATION
     for other people.
   telegram_user_send(input) — send as the user: "ContactName|message";
     "me" means Saved Messages.
-  telegram_user_delete(input) — "Contact|text" previews; add |confirm to
-    delete, |all for every match; "Contact|latest" is the newest.
+  telegram_user_delete(input) — "Contact|text" previews; |confirm deletes,
+    |all every match; "Contact|latest" is newest.
   telegram_user_edit(input) — "Contact|old text|new text"; within 48h.
   send_image_telegram(input) — send an image as the user:
     "contact|image_path"; "me" = Saved Messages; a bare filename means
@@ -4997,8 +4999,8 @@ OFFICE (NATIVE COM)
     Input: locale, e.g. "en-US".
 
 DOCUMENT EDITING
-  inspect_docx(input) — JSON map of a .docx: paragraphs and every table's
-    rows, columns, cells. Full path. Use before editing.
+  inspect_docx(input) — JSON map of a .docx: paragraphs, table rows/columns,
+    cells. Full path. Use before editing.
   edit_document(input) — edit an existing DOCX, XLSX, PPTX, or PDF file.
     Format: "filepath|instruction" (absolute path | plain-language edit); the
     file is backed up first. Example:
@@ -5012,13 +5014,11 @@ SOCIAL MEDIA POSTING
     "next-free-slot" (omit = draft). ALWAYS confirm the content first.
 
 SKILL MANAGEMENT
-  skill_manage(input) — manage reusable procedure files ("skills") the agent
-    writes for itself after a multi-step task. ALWAYS check for a matching
-    skill before a multi-step workflow. Format: "action|name|content"
-      action: create | update | list | search | read | delete
-      name:   skill slug (lowercase_underscores) or search query
-      content: full SKILL.md text (create/update only)
-    NEVER invent a skill body. Only create skills from procedures you executed.
+  skill_manage(input) — manage reusable "skills" the agent writes for itself.
+    Check for a matching skill before a multi-step workflow. Format:
+    "action|name|content"; action: create|update|list|search|read|delete;
+    name: slug or query; content: full SKILL.md (create/update only).
+    NEVER invent a skill body; only from procedures you executed.
   load_skill(input) — load the full text of one skill listed in AVAILABLE
     SKILLS. Read it before performing the workflow it describes. Format:
     "skill_id" using the id from the catalog (e.g. "local:clock-out-reminder").
@@ -5026,17 +5026,19 @@ SKILL MANAGEMENT
 
 BROWSER CONTROL
   browse_web(input) — restricted browser agent: "https://site | task"; origin
-    must be allowlisted. It asks approval for clicks/fills/selects. Claim
-    success only if the report says completed.
+    must be allowlisted. Asks approval for clicks/fills/selects; claim success
+    only if the report says completed.
 
 OS CONTROL
   App control: run the full sequence (screenshot, click, type, Enter) without
   step-by-step asks. Confirm only before destructive actions or a missing
   required value.
-  Stremio (media center): to watch a movie or show, load "local:stremio" and
-  drive it with OS Control — search bar, title{enter}, poster, Torrentio link.
+  Stremio (media center): skill id "local:stremio" holds the click sequence.
     If the user asks to watch a specific movie or TV show, use OS Control to
     operate Stremio. Do not try to scrape pirate websites, as they are blocked.
+    If the user asks to watch a full movie or TV show, you MUST use OS Control
+    to open Stremio, search for the title, and click the first stream. Do not
+    use stream_media for this.
   If the user asks you to change a setting in a desktop app and you do not
   have a dedicated API tool for it, you MUST use OS Control
   (screenshot_background, click_coordinates, type_text) to visually navigate
@@ -5063,8 +5065,6 @@ Tool required:
   "my reminders" → {"tool":"list_reminders","input":""}
   "what did I write about Hezbollah?" → {"tool":"rag_search","input":"Hezbollah Lebanon"}
   "read C:\\Users\\USER\\notes.md" → {"tool":"read_file","input":"C:\\Users\\USER\\notes.md"}
-  "send jeffrey a list of these 3 cafes" →
-    {"tool":"send_maps_list","input":"Jeffrey|Dalrock Diner Shah Alam|Lakewood Cafe Shah Alam|Starbucks Shah Alam"}
 Compound, independent (one per line):
   {"tool":"weather","input":"Shah Alam"}
   {"tool":"telegram_user_send","input":"John|it's raining, bring an umbrella"}
