@@ -77,6 +77,7 @@ DESCRIPTIONS = {
     "set_volume": "Set, mute, or unmute system volume.",
     "media_control": "Play/pause, next, previous, or stop media.",
     "check_battery_health": "Battery health percentage, design and full-charge capacities via powercfg; no input or file path needed.",
+    "watch_system_condition": "Notify once when battery charge, CPU or RAM reaches a threshold in the background. Input: condition|target_percent|message.",
     "lock_pc": "Lock Windows.",
     "sleep_pc": "Put Windows to sleep.",
     "shutdown_pc": "Shut down Windows (requires confirmation).",
@@ -150,6 +151,7 @@ EXTRA_KEYWORDS = {
     "stream_media": ("youtube", "music", "video", "stream", "play"),
     "play_on_youtube": ("youtube", "music", "song", "play"),
     "load_skill": ("skill", "manual", "instructions", "format", "tool"),
+    "watch_system_condition": ("battery", "cpu", "ram", "notify", "notified", "alert", "monitor", "watch"),
     "run_command": ("run", "command", "terminal", "shell", "docker",
                     "server", "code"),
 }

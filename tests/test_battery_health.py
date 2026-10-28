@@ -6,11 +6,17 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import agent
+import config
+
+with mock.patch.object(config, "load_config", return_value=dict(config.DEFAULTS)):
+    import agent
 
 
 class BatteryHealthTests(unittest.TestCase):
     def setUp(self):
+        patcher = mock.patch.object(agent, "note_tool_result")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         agent._clear_turn_route()
         self.addCleanup(agent._clear_turn_route)
         patcher = mock.patch.object(agent, "GROUP_MODE", False)

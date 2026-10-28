@@ -2594,6 +2594,11 @@ def system_status():
         return f"ERROR: {e}"
 
 
+def watch_system_condition(condition, target, message):
+    import system_watcher
+    return system_watcher.start_watch(condition, target, message)
+
+
 def check_battery_health():
     import tempfile
     import xml.etree.ElementTree as ET
@@ -4912,7 +4917,7 @@ VALID_TOOLS = {
     "screenshot_background", "analyze_screenshot", "click_coordinates",
     "type_text", "get_pixel_color", "save_macro", "play_macro",
     "beep", "done", "set_reminder_at", "list_reminders", "list_brains",
-    "close_window", "watch_folder", "stop_watching",
+    "close_window", "watch_folder", "stop_watching", "watch_system_condition",
     "gmail_unread", "gmail_read", "gmail_search",
     "send_maps_url",
     "weather", "air_quality", "news", "describe_screen",
@@ -5587,6 +5592,10 @@ def _execute_tool_impl(action):
     elif tool == 'media_control':          return media_control(inp)
     elif tool == 'system_status':          return system_status()
     elif tool == 'check_battery_health':   return check_battery_health()
+    elif tool == 'watch_system_condition':
+        if not isinstance(inp, str) or len(parts := inp.split('|', 2)) != 3:
+            return "ERROR: watch_system_condition needs condition|target|message."
+        return watch_system_condition(*parts)
     elif tool == 'lock_pc':                return lock_pc()
     elif tool == 'sleep_pc':               return sleep_pc()
     elif tool == 'shutdown_pc':            return shutdown_pc(inp)
