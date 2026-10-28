@@ -239,6 +239,8 @@ _ICON_SVGS = {
     "clip": '<path d="M8 12.5l6.5-6.5a3 3 0 0 1 4.2 4.2l-8 8a5 5 0 0 1-7-7'
             'l8-8"/>',
     "send": '<path d="M12 19V6M6.5 11.5L12 6l5.5 5.5"/>',
+    "stop": '<rect x="7" y="7" width="10" height="10" rx="2.2" '
+            'fill="{c}" stroke="none"/>',
     "mic": '<rect x="9" y="3" width="6" height="11" rx="3"/>'
            '<path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21M9 21h6"/>',
 }
@@ -828,11 +830,13 @@ class AgentWorker(QObject):
     failed = Signal(str)         # error text
     step = Signal(str)           # one raw step_log line, live
 
-    def __init__(self, user_input, conversation_history, attached_paths=None):
+    def __init__(self, user_input, conversation_history, attached_paths=None,
+                 stop_event=None):
         super().__init__()
         self._user_input = user_input
         self._history = conversation_history
         self._attached_paths = list(attached_paths or [])
+        self._stop_event = stop_event
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
@@ -849,7 +853,8 @@ class AgentWorker(QObject):
             self._history.append(f"User: {self._user_input}{suffix}")
             with contextlib.redirect_stdout(log_capture):
                 step_log = agent.run_agent_turn(
-                    effective_input, self._history, on_step=self.step.emit)
+                    effective_input, self._history, on_step=self.step.emit,
+                    stop_event=self._stop_event)
         except Exception as e:
             self.failed.emit(f"⚠️ Agent error: {e}")
             return
@@ -957,6 +962,11 @@ def _icon_button(icon: str, tooltip: str = "", size: int = 30,
     btn.setToolTip(tooltip)
     btn.setFixedSize(size + 2, size)
     btn.setIconSize(QSize(icon_size, icon_size))
+    # Callers that swap the glyph (send <-> stop) update these instead of the
+    # closure so hover recolours the current icon, not the original one.
+    btn._icon_name = icon
+    btn._icon_color = COLOR_TEXT_MID
+    btn._icon_hover = COLOR_TEXT_HI
     btn.setIcon(_svg_icon(icon, icon_size, COLOR_TEXT_MID))
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     btn.setStyleSheet(
@@ -977,11 +987,11 @@ def _icon_button(icon: str, tooltip: str = "", size: int = 30,
     _orig_leave = btn.leaveEvent
 
     def _enter(e):
-        btn.setIcon(_svg_icon(icon, icon_size, COLOR_TEXT_HI))
+        btn.setIcon(_svg_icon(btn._icon_name, icon_size, btn._icon_hover))
         _orig_enter(e)
 
     def _leave(e):
-        btn.setIcon(_svg_icon(icon, icon_size, COLOR_TEXT_MID))
+        btn.setIcon(_svg_icon(btn._icon_name, icon_size, btn._icon_color))
         _orig_leave(e)
 
     btn.enterEvent = _enter
@@ -2598,6 +2608,12 @@ class AgentWindow(QMainWindow):
 
         self._worker = None
         self._processing = False
+        # Stop mechanism: the flag is read by the GUI, the event by the agent
+        # thread. A fresh event is created at the start of every turn.
+        self._stop_requested = False
+        self._stop_event = threading.Event()
+        # Only agent turns can be cancelled; slash-command jobs cannot.
+        self._turn_cancellable = False
         self._settings_overlay = None
         self._tray_icon = None
         self._tray_menu = None
@@ -3122,6 +3138,9 @@ class AgentWindow(QMainWindow):
                 and self._settings_overlay is not None):
             self._close_settings()
             return
+        if event.key() == Qt.Key.Key_Escape and self._processing:
+            self._request_stop()
+            return
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
@@ -3200,6 +3219,14 @@ class AgentWindow(QMainWindow):
         text_col.addStretch(1)
         pill_row.addWidget(text_host, 1)
 
+        # Send doubles as Stop while a turn is running (red square, Esc too).
+        self.send_button = _icon_button("send", "Send (Enter)",
+                                        size=INPUT_LINE_H, icon_size=13)
+        self.send_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.send_button.clicked.connect(self._on_send_or_stop)
+        pill_row.addWidget(self.send_button, 0, Qt.AlignmentFlag.AlignTop)
+        self._update_send_button()
+
         self._input_col_layout.addWidget(self.input_pill)
         col.addWidget(holder)
         return outer
@@ -3215,6 +3242,36 @@ class AgentWindow(QMainWindow):
 
     def _on_input_changed(self):
         self._autogrow_input()
+
+    def _on_send_or_stop(self):
+        if self._processing:
+            self._request_stop()
+        else:
+            self.send()
+
+    def _request_stop(self):
+        """Ask the running agent turn to abort; it exits at its next boundary."""
+        if not (self._processing and self._turn_cancellable):
+            return
+        if self._stop_requested:
+            return
+        self._stop_requested = True
+        self._stop_event.set()
+        self.set_status("Stopping…", busy=True)
+
+    def _update_send_button(self):
+        if self._processing and self._turn_cancellable:
+            name, color, hover, tip = (
+                "stop", COLOR_DANGER, COLOR_DANGER_HOVER, "Stop (Esc)")
+        else:
+            name, color, hover, tip = (
+                "send", COLOR_TEXT_MID, COLOR_TEXT_HI, "Send (Enter)")
+        btn = self.send_button
+        btn._icon_name = name
+        btn._icon_color = color
+        btn._icon_hover = hover
+        btn.setIcon(_svg_icon(name, 13, color))
+        btn.setToolTip(tip)
 
     def _autogrow_input(self):
         doc = self.input_field.document()
@@ -3299,6 +3356,10 @@ class AgentWindow(QMainWindow):
     def eventFilter(self, obj, event):
         # Enter sends, Shift+Enter inserts a newline.
         if obj is self.input_field and event.type() == QKeyEvent.Type.KeyPress:
+            if (event.key() == Qt.Key.Key_Escape
+                    and self._processing):
+                self._request_stop()
+                return True
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                     return False  # let QPlainTextEdit insert the newline
@@ -3449,7 +3510,13 @@ class AgentWindow(QMainWindow):
     def _start_agent_turn(self, text, attached_paths=None):
         """Kick off a background agent turn for `text`."""
         self._reset_task_context_if_new(text)
+        # A new message starts a fresh, uncancelled turn: never inherit the
+        # previous turn's stop request or its already-set event.
+        self._stop_requested = False
+        self._stop_event = threading.Event()
         self._processing = True
+        self._turn_cancellable = True
+        self._update_send_button()
         self.input_field.setEnabled(False)
         self.set_status("Reading attachments…" if attached_paths else "Thinking…",
                         busy=True)
@@ -3458,7 +3525,9 @@ class AgentWindow(QMainWindow):
         self._thinking_message = SystemMessage("Thinking…")
         self.chat.add_message(self._thinking_message, fade=False)
 
-        self._worker = AgentWorker(text, self.conversation_history, attached_paths)
+        self._worker = AgentWorker(text, self.conversation_history,
+                                   attached_paths,
+                                   stop_event=self._stop_event)
         self._worker.completed.connect(self._on_turn_completed)
         self._worker.failed.connect(self._on_turn_failed)
         self._worker.step.connect(self._on_worker_step)
@@ -3480,6 +3549,10 @@ class AgentWindow(QMainWindow):
 
     def _end_turn(self):
         self._processing = False
+        self._turn_cancellable = False
+        self._stop_requested = False
+        self._worker = None
+        self._update_send_button()
         self.input_field.setEnabled(True)
         self.input_field.setFocus()
         self.set_status("Ready", busy=False)
@@ -3878,6 +3951,8 @@ class AgentWindow(QMainWindow):
     def _run_background_command(self, text, busy_msg, work):
         """Run a blocking command off the GUI thread; post the result back."""
         self._processing = True
+        self._turn_cancellable = False
+        self._update_send_button()
         self.input_field.setEnabled(False)
         self.chat.add_message(AssistantMessage(busy_msg))
         self.set_status("Working…", busy=True)

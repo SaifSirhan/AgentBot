@@ -1246,6 +1246,21 @@ def _clear_turn_route():
     _ROUTED.__dict__.clear()
 
 
+_STOP = _threading.local()
+
+
+def _set_stop_event(event):
+    _STOP.event = event
+
+
+def _current_stop_event():
+    return getattr(_STOP, "event", None)
+
+
+def _clear_stop_event():
+    _STOP.__dict__.clear()
+
+
 def _router_tool_description(name):
     for tool in prompt_catalog.build_tools(frozenset(VALID_TOOLS)):
         if tool.name == name:
@@ -1586,6 +1601,8 @@ def run_command(command):
 
 
 MAX_PYTHON_OUTPUT = 12000
+PY_TIMEOUT = 60
+CANCELLED_MESSAGE = "ERROR: Task cancelled by user."
 
 # Hard stop for runaway retry loops: after this many failed execute_python
 # calls in one turn the tool refuses to run again until the next user turn.
@@ -1608,31 +1625,70 @@ def python_failure_count():
 
 def execute_python(code):
     """Run a Python script in a fresh interpreter and return its output."""
+    stop = _current_stop_event()
+    if stop is not None and stop.is_set():
+        return CANCELLED_MESSAGE
     if _PY_FAILURES["count"] >= PY_FAILURE_LIMIT:
         return PY_DISABLED_MESSAGE
     result = _execute_python_once(code)
-    if result.startswith("ERROR:"):
+    if result.startswith("ERROR:") and result != CANCELLED_MESSAGE:
         _PY_FAILURES["count"] += 1
     return result
+
+
+def _terminate_process(proc):
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=2)
+        return
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except Exception:
+        pass
 
 
 def _execute_python_once(code):
     if not (code or "").strip():
         return "ERROR: execute_python needs code."
+    stop = _current_stop_event()
+    if stop is not None and stop.is_set():
+        return CANCELLED_MESSAGE
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-c", code],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=60, cwd=os.path.dirname(os.path.abspath(__file__)), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+            cwd=os.path.dirname(os.path.abspath(__file__)), env=env,
         )
-    except subprocess.TimeoutExpired:
-        return "ERROR: the script ran longer than 60 seconds and was stopped."
     except Exception as e:
         return f"ERROR: cannot run Python: {e}"
 
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
+    deadline = time.monotonic() + PY_TIMEOUT
+    while True:
+        if stop is not None and stop.is_set():
+            _terminate_process(proc)
+            return CANCELLED_MESSAGE
+        try:
+            out, err = proc.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                _terminate_process(proc)
+                return (f"ERROR: the script ran longer than "
+                        f"{PY_TIMEOUT:g} seconds and was stopped.")
+
+    out = (out or "").strip()
+    err = (err or "").strip()
     if len(out) > MAX_PYTHON_OUTPUT:
         out = (out[:MAX_PYTHON_OUTPUT]
                + f"\n[... truncated {len(out) - MAX_PYTHON_OUTPUT} chars]")
@@ -5630,9 +5686,11 @@ def _autonomous_judge(goal, history):
         evidence if isinstance(evidence, str) else "")
 
 
-def _run_autonomous_goal(goal, on_step=None):
+def _run_autonomous_goal(goal, on_step=None, stop_event=None):
     step_log = _StepLog(on_step)
     _set_turn_route(goal)
+    stop_event = stop_event or _threading.Event()
+    _set_stop_event(stop_event)
     try:
         allowed = sorted(
             (getattr(_ROUTED, "allowed", None) or set()) - {"chat", "done"})
@@ -5678,21 +5736,24 @@ def _run_autonomous_goal(goal, on_step=None):
             authorize=authorize,
             tool_descriptions=descriptions,
             max_steps=MAX_STEPS_PER_TURN,
-            stop_event=_threading.Event(),
+            stop_event=stop_event,
         )
         holder["loop"] = loop
         result = loop.run(goal)
         for record in result.history:
             step_log.append(
                 f"Action: {record.tool}(autonomous) -> Result: {record.observation}")
+        final = (CANCELLED_MESSAGE if result.status == "cancelled"
+                 else result.message)
         step_log.append(
-            f"Action: chat(autonomous) -> Result: AI: {result.message}")
+            f"Action: chat(autonomous) -> Result: AI: {final}")
         return step_log
     finally:
+        _clear_stop_event()
         _clear_turn_route()
 
 
-def run_agent_turn(user_input, conversation_history, on_step=None):
+def run_agent_turn(user_input, conversation_history, on_step=None, stop_event=None):
     """Run a turn and record an eval trace around it.
 
     Returns the same step_log (list[str]) as _run_agent_turn_impl. The trace
@@ -5706,7 +5767,8 @@ def run_agent_turn(user_input, conversation_history, on_step=None):
             goal = stripped[len(prefix):].strip()
             if not goal:
                 return ["System: /task needs a goal."]
-            return _run_autonomous_goal(goal, on_step=on_step)
+            return _run_autonomous_goal(
+                goal, on_step=on_step, stop_event=stop_event)
     if lowered in ("/task", "/autonomous"):
         return ["System: /task needs a goal."]
 
@@ -5723,9 +5785,11 @@ def run_agent_turn(user_input, conversation_history, on_step=None):
 
     try:
         step_log = _run_agent_turn_impl(
-            user_input, conversation_history, on_step=on_step)
+            user_input, conversation_history, on_step=on_step,
+            stop_event=stop_event)
     finally:
         _clear_turn_route()
+        _clear_stop_event()
     if _evals is not None:
         try:
             tool_calls = []
@@ -5767,6 +5831,7 @@ def run_agent_turn(user_input, conversation_history, on_step=None):
             print(f"[evals] trace failed: {e}")
 
     _clear_turn_route()
+    _clear_stop_event()
     return step_log
 
 
@@ -5778,12 +5843,15 @@ def _history_window(conversation_history):
         return list(conversation_history or [])[-10:]
 
 
-def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
+def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
+                         stop_event=None):
     # Request setup and bounded tool-call loop.
     step_log = _StepLog(on_step)
     last_signature = None
     reset_python_failures()
     _set_turn_route(user_input)
+    stop_event = stop_event or _threading.Event()
+    _set_stop_event(stop_event)
     try:
         import context_compactor
         conversation_history = context_compactor.compact_history(conversation_history)
@@ -5825,6 +5893,8 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
 
     def _run_queued(action):
         for qa in action.get('_queued_actions', []):
+            if stop_event.is_set():
+                return False
             qtool = qa.get('tool')
             qinp = qa.get('input', '')
             try:
@@ -5835,6 +5905,11 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
                 step_log.append(f"Action: {qtool}({qinp}) -> Result: {qout}")
             except Exception as e:
                 step_log.append(f"Action: {qtool}({qinp}) -> ERROR: {e}")
+        return True
+
+    def _log_cancelled():
+        step_log.append(
+            f"Action: chat(cancelled) -> Result: AI: {CANCELLED_MESSAGE}")
 
     def _reply_allowed(reply):
         try:
@@ -5856,6 +5931,9 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
         return False
 
     for step in range(MAX_STEPS_PER_TURN):
+        if stop_event.is_set():
+            _log_cancelled()
+            break
         step_start = time.time()
         context = "\n".join(_history_window(conversation_history) + step_log)
 
@@ -5883,6 +5961,9 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
             )
 
         action, error = get_valid_action(next_input, context)
+        if stop_event.is_set():
+            _log_cancelled()
+            break
         if action is None:
             print(f"\nGiving up this turn: {error}")
             step_log.append(f"System: {error}")
@@ -5923,6 +6004,9 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
 
         # Special-case: read_screen on step 0 forces a text reply next
         if tool == 'read_screen' and step == 0:
+            if stop_event.is_set():
+                _log_cancelled()
+                break
             output = execute_tool(action)
             tool_executions_this_turn.append((tool, inp, output))
             print(f"\n{output}")
@@ -5931,7 +6015,13 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
                 f"Original request: '{user_input}'. OCR text of the user's screen is above. "
                 f"Answer the user directly in plain conversational language based on that text."
             )
+            if stop_event.is_set():
+                _log_cancelled()
+                break
             force_action, _ = get_valid_action(force_prompt, "\n".join(step_log))
+            if stop_event.is_set():
+                _log_cancelled()
+                break
             if force_action and force_action.get('tool') == 'chat':
                 final = force_action['input']
                 if not _reply_allowed(final):
@@ -5953,8 +6043,13 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
             break
 
         if tool == 'chat':
+            if stop_event.is_set():
+                _log_cancelled()
+                break
             output = execute_tool(action)
-            _run_queued(action)
+            if not _run_queued(action):
+                _log_cancelled()
+                break
             if not _reply_allowed(inp):
                 if _retry_after_rejection():
                     continue
@@ -5963,6 +6058,9 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
             step_log.append(f"Action: chat({inp}) -> Result: {output}")
             break
 
+        if stop_event.is_set():
+            _log_cancelled()
+            break
         output = execute_tool(action)
         tool_executions_this_turn.append((tool, inp, output))
         print(f"\n{output}")
@@ -5970,7 +6068,9 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
         print(f"  [step {step+1} took {time.time()-step_start:.1f}s]")
 
         # Run any extra tool calls the LLM packed into the same response
-        _run_queued(action)
+        if not _run_queued(action):
+            _log_cancelled()
+            break
 
         # Otherwise: loop back, feed the tool result to the LLM,
         # let it decide next (usually: wrap the result in a natural reply).
@@ -6090,5 +6190,6 @@ Reply:"""
         except Exception as e:
             print(f"[skill-gen] failed: {e}")
 
+    _clear_stop_event()
     _clear_turn_route()
     return step_log

@@ -29,7 +29,15 @@ class AutonomousIntegrationTests(unittest.TestCase):
         with mock.patch.object(agent, "_run_autonomous_goal",
                                return_value=["ok"]) as run:
             self.assertEqual(agent.run_agent_turn("/task save hello", []), ["ok"])
-        run.assert_called_once_with("save hello", on_step=None)
+        run.assert_called_once_with("save hello", on_step=None, stop_event=None)
+
+    def test_task_prefix_forwards_the_stop_event(self):
+        import threading
+        event = threading.Event()
+        with mock.patch.object(agent, "_run_autonomous_goal",
+                               return_value=["ok"]) as run:
+            agent.run_agent_turn("/task save hello", [], stop_event=event)
+        run.assert_called_once_with("save hello", on_step=None, stop_event=event)
 
     def test_empty_task_goal_is_rejected(self):
         result = agent.run_agent_turn("/task", [])

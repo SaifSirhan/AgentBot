@@ -53,10 +53,10 @@ class ExecutePythonTests(unittest.TestCase):
         self.assertLessEqual(len(out), agent.MAX_PYTHON_OUTPUT + 80)
 
     def test_timeout_is_reported(self):
-        expired = agent.subprocess.TimeoutExpired("python", 60)
-        with mock.patch.object(agent.subprocess, "run", side_effect=expired):
-            out = agent.execute_python("print('slow')")
-        self.assertIn("longer than 60 seconds", out)
+        with mock.patch.object(agent, "PY_TIMEOUT", 0.3):
+            out = agent.execute_python("import time; time.sleep(5)")
+        self.assertIn("longer than", out)
+        self.assertIn("was stopped", out)
 
     def test_third_failure_blocks_further_execution(self):
         for _ in range(agent.PY_FAILURE_LIMIT):
