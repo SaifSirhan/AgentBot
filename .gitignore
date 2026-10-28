@@ -23,6 +23,8 @@ rag_db/
 AgentMemory/
 *.log
 research_*.md
+# Unreviewed agent-written SKILL.md drafts from self_curriculum.py
+skill_quarantine/
 # Timestamped backups written next to a file by document_tools before editing.
 *.bak_*
 
