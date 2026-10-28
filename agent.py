@@ -9,6 +9,7 @@ import time
 import shutil
 import sys
 import datetime
+import traceback
 import urllib.parse
 import winsound
 import weather_news
@@ -31,6 +32,7 @@ import security_tools
 import air_quality as air_quality_tool
 import threading as _threading
 import telegram_user
+import verification_adapter
 
 # MODULE GUIDE
 # 1. Configuration, persistent state, and LLM provider failover
@@ -5518,6 +5520,41 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
     is_pushback = any(w in user_lower for w in pushback_words)
 
     _ran_out_of_steps = False
+    tool_executions_this_turn = []
+    verification_retries = 0
+
+    def _run_queued(action):
+        for qa in action.get('_queued_actions', []):
+            qtool = qa.get('tool')
+            qinp = qa.get('input', '')
+            try:
+                qout = execute_tool(qa)
+                if qtool != 'chat':
+                    tool_executions_this_turn.append((qtool, qinp, qout))
+                print(f"\n{qout}")
+                step_log.append(f"Action: {qtool}({qinp}) -> Result: {qout}")
+            except Exception as e:
+                step_log.append(f"Action: {qtool}({qinp}) -> ERROR: {e}")
+
+    def _reply_allowed(reply):
+        try:
+            engine = verification_adapter.build_engine(tool_executions_this_turn)
+            return verification_adapter.reply_is_supported(engine, reply)
+        except Exception:
+            traceback.print_exc()
+            return True
+
+    def _retry_after_rejection():
+        nonlocal verification_retries
+        if verification_retries < verification_adapter.MAX_RETRIES:
+            verification_retries += 1
+            step_log.append("System: " + verification_adapter.RETRY_MESSAGE)
+            return True
+        step_log.append(
+            "Action: chat(verification-blocked) -> Result: AI: "
+            + verification_adapter.ERROR_REPLY)
+        return False
+
     for step in range(MAX_STEPS_PER_TURN):
         step_start = time.time()
         context = "\n".join(_history_window(conversation_history) + step_log)
@@ -5563,6 +5600,10 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
             inp = action["input"]
 
         if tool == 'done':
+            if not _reply_allowed(inp):
+                if _retry_after_rejection():
+                    continue
+                break
             print(f"\nDone: {inp}")
             step_log.append(f"Done: {inp}")
             break
@@ -5577,6 +5618,7 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
         # Special-case: read_screen on step 0 forces a text reply next
         if tool == 'read_screen' and step == 0:
             output = execute_tool(action)
+            tool_executions_this_turn.append((tool, inp, output))
             print(f"\n{output}")
             step_log.append(f"Action: {tool}({inp}) -> Result: {output}")
             force_prompt = (
@@ -5586,35 +5628,43 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
             force_action, _ = get_valid_action(force_prompt, "\n".join(step_log))
             if force_action and force_action.get('tool') == 'chat':
                 final = force_action['input']
+                if not _reply_allowed(final):
+                    if _retry_after_rejection():
+                        continue
+                    break
                 print(f"\nAI: {final}")
                 step_log.append(f"Action: chat(forced) -> Result: AI: {final}")
             else:
                 direct = ask_llm_direct(
                     f"User asked: {user_input}\n\nScreen text:\n{output}\n\nAnswer:"
                 )
+                if not _reply_allowed(direct):
+                    if _retry_after_rejection():
+                        continue
+                    break
                 print(f"\nAI: {direct}")
                 step_log.append(f"Action: chat(fallback) -> Result: AI: {direct}")
             break
 
+        if tool == 'chat':
+            output = execute_tool(action)
+            _run_queued(action)
+            if not _reply_allowed(inp):
+                if _retry_after_rejection():
+                    continue
+                break
+            print(f"\n{output}")
+            step_log.append(f"Action: chat({inp}) -> Result: {output}")
+            break
+
         output = execute_tool(action)
+        tool_executions_this_turn.append((tool, inp, output))
         print(f"\n{output}")
         step_log.append(f"Action: {tool}({inp}) -> Result: {output}")
         print(f"  [step {step+1} took {time.time()-step_start:.1f}s]")
 
         # Run any extra tool calls the LLM packed into the same response
-        for qa in action.get('_queued_actions', []):
-            qtool = qa.get('tool')
-            qinp = qa.get('input', '')
-            try:
-                qout = execute_tool(qa)
-                print(f"\n{qout}")
-                step_log.append(f"Action: {qtool}({qinp}) -> Result: {qout}")
-            except Exception as e:
-                step_log.append(f"Action: {qtool}({qinp}) -> ERROR: {e}")
-
-        # chat = the LLM's actual reply → done
-        if tool == 'chat':
-            break
+        _run_queued(action)
 
         # Otherwise: loop back, feed the tool result to the LLM,
         # let it decide next (usually: wrap the result in a natural reply).
@@ -5671,6 +5721,8 @@ Reply:"""
         if not fallback_reply or fallback_reply.startswith("Error:"):
             fallback_reply = ("Couldn't figure that one out — nothing clean came back. "
                               "Try rephrasing.")
+        if not _reply_allowed(fallback_reply):
+            fallback_reply = verification_adapter.ERROR_REPLY
         print(f"\n(Fallback) AI: {fallback_reply}")
         step_log.append(f"Action: chat(fallback) -> Result: AI: {fallback_reply}")
 
