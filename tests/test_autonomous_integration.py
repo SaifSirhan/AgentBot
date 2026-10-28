@@ -140,6 +140,171 @@ class AutonomousIntegrationTests(unittest.TestCase):
         judge.assert_called_once()
         self.assertIn("Goal independently verified", "\n".join(step_log))
 
+    def test_delegation_requires_a_terminal_observation_before_done(self):
+        replies = iter([
+            '{"tool":"delegate_to_qoder","args":'
+            '{"prompt":"Build a todo app","goal":"Server running"}}',
+            "DONE",
+            '{"tool":"analyze_screenshot","args":'
+            '{"input":"Qoder IDE|Does the terminal say Server running?"}}',
+            "DONE",
+        ])
+        prompts = []
+        calls = []
+
+        def llm(prompt):
+            prompts.append(prompt)
+            return next(replies)
+
+        def fake_execute(action):
+            calls.append(action)
+            if action["tool"] == "delegate_to_qoder":
+                return "Prompt sent to Qoder IDE. Waiting for completion."
+            return "Server running on http://127.0.0.1:5000"
+
+        with mock.patch.object(agent, "ask_llm_direct", side_effect=llm), \
+                mock.patch.object(agent, "execute_tool",
+                                  side_effect=fake_execute), \
+                mock.patch.object(
+                    agent, "_autonomous_judge",
+                    return_value=agent.autonomous_engine.Verification(
+                        True, "Server running")):
+            step_log = agent._run_autonomous_goal(
+                "build a localhost server for a todo app")
+
+        self.assertEqual(
+            [call["tool"] for call in calls],
+            ["delegate_to_qoder", "analyze_screenshot"])
+        self.assertEqual(calls[0]["goal"], "Server running")
+        self.assertIn("NEXT REQUIRED STEP", prompts[1])
+        self.assertIn("analyze_screenshot", prompts[1])
+        self.assertIn("Goal independently verified", "\n".join(step_log))
+
+    def test_failed_delegation_cannot_reach_verification(self):
+        replies = iter([
+            '{"tool":"delegate_to_qoder","args":'
+            '{"prompt":"Build a todo app","goal":"Server running"}}',
+            "DONE",
+        ])
+        with mock.patch.object(agent, "MAX_STEPS_PER_TURN", 2), \
+                mock.patch.object(agent, "ask_llm_direct",
+                                  side_effect=lambda _: next(replies)), \
+                mock.patch.object(agent, "execute_tool",
+                                  return_value="ABORTED: kill switch is latched"), \
+                mock.patch.object(agent, "_autonomous_judge") as judge:
+            step_log = agent._run_autonomous_goal(
+                "build a localhost server for a todo app")
+
+        judge.assert_not_called()
+        self.assertNotIn("Goal independently verified", "\n".join(step_log))
+
+    def test_probe_text_without_success_marker_keeps_delegation_pending(self):
+        replies = iter([
+            '{"tool":"delegate_to_qoder","args":'
+            '{"prompt":"Build a todo app","goal":"Server running"}}',
+            '{"tool":"analyze_screenshot","args":{"input":"Qoder IDE|status"}}',
+            "DONE",
+            '{"tool":"analyze_screenshot","args":{"input":"Qoder IDE|status"}}',
+            "DONE",
+        ])
+        outcomes = iter([
+            agent.autonomous_engine.ToolResult(
+                True, "Prompt sent to Qoder IDE. Waiting for completion."),
+            agent.autonomous_engine.ToolResult(
+                True, "Error: port 5000 is already in use"),
+            agent.autonomous_engine.ToolResult(
+                True, "Server running on http://127.0.0.1:5000"),
+        ])
+
+        loop = agent.autonomous_engine.AutonomousLoop(
+            llm=lambda _: next(replies),
+            execute_tool=lambda tool, args, stop: next(outcomes),
+            verify_goal=lambda goal, history: agent.autonomous_engine.Verification(
+                True, "Server running"),
+            authorize=lambda *_: True,
+            tool_descriptions={
+                "delegate_to_qoder": 'args: {"prompt": string, "goal": string}',
+                "analyze_screenshot": 'args: {"input": string}',
+            },
+            max_steps=5,
+        )
+        result = loop.run("build a todo app")
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(
+            [item.tool for item in result.history],
+            ["delegate_to_qoder", "analyze_screenshot", "analyze_screenshot"])
+        self.assertEqual(result.steps, 5)
+
+    def test_delegation_accepts_input_alias_in_autonomous_args(self):
+        replies = iter([
+            '{"tool":"delegate_to_qoder","args":'
+            '{"input":"Build X","goal":"Server running"}}',
+            '{"tool":"analyze_screenshot","args":'
+            '{"input":"Qoder IDE|Does it say Server running?"}}',
+            "DONE",
+        ])
+        calls = []
+
+        def fake_execute(action):
+            calls.append(action)
+            if action["tool"] == "delegate_to_qoder":
+                return "Prompt sent to Qoder IDE. Waiting for completion."
+            return "Server running on http://127.0.0.1:5000"
+
+        with mock.patch.object(agent, "ask_llm_direct",
+                               side_effect=lambda _: next(replies)), \
+                mock.patch.object(agent, "execute_tool",
+                                  side_effect=fake_execute), \
+                mock.patch.object(
+                    agent, "_autonomous_judge",
+                    return_value=agent.autonomous_engine.Verification(
+                        True, "Server running")):
+            agent._run_autonomous_goal(
+                "build a localhost server for a todo app")
+
+        self.assertEqual(calls[0]["tool"], "delegate_to_qoder")
+        self.assertEqual(calls[0]["input"], "Build X")
+        self.assertEqual(calls[0]["goal"], "Server running")
+
+    def test_failed_probe_keeps_delegation_pending(self):
+        replies = iter([
+            '{"tool":"delegate_to_qoder","args":'
+            '{"prompt":"Build a todo app","goal":"Server running"}}',
+            '{"tool":"analyze_screenshot","args":{"input":"Qoder IDE|status"}}',
+            "DONE",
+            '{"tool":"analyze_screenshot","args":{"input":"Qoder IDE|status"}}',
+            "DONE",
+        ])
+        outcomes = iter([
+            agent.autonomous_engine.ToolResult(
+                True, "Prompt sent to Qoder IDE. Waiting for completion."),
+            agent.autonomous_engine.ToolResult(
+                False, "ERROR: vision failed"),
+            agent.autonomous_engine.ToolResult(
+                True, "Server running on http://127.0.0.1:5000"),
+        ])
+
+        loop = agent.autonomous_engine.AutonomousLoop(
+            llm=lambda _: next(replies),
+            execute_tool=lambda tool, args, stop: next(outcomes),
+            verify_goal=lambda goal, history: agent.autonomous_engine.Verification(
+                True, "Server running"),
+            authorize=lambda *_: True,
+            tool_descriptions={
+                "delegate_to_qoder": 'args: {"prompt": string, "goal": string}',
+                "analyze_screenshot": 'args: {"input": string}',
+            },
+            max_steps=5,
+        )
+        result = loop.run("build a todo app")
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(
+            [item.tool for item in result.history],
+            ["delegate_to_qoder", "analyze_screenshot", "analyze_screenshot"])
+        self.assertEqual(result.steps, 5)
+
     def test_grant_followed_by_failed_action_cannot_reach_verification(self):
         replies = iter([
             '{"tool":"request_tool","input":"check_battery_health"}',
@@ -165,6 +330,24 @@ class AutonomousIntegrationTests(unittest.TestCase):
             verdict = agent._autonomous_judge("check battery health", history)
         self.assertFalse(verdict.achieved)
         llm.assert_not_called()
+
+    def test_judge_requires_terminal_evidence_after_delegation(self):
+        history = (
+            RecordedAction(1, "delegate_to_qoder", True,
+                           "Prompt sent to Qoder IDE."),
+            RecordedAction(2, "analyze_screenshot", True,
+                           "Qoder is still building."),
+        )
+        with mock.patch.object(
+                agent, "ask_llm_direct",
+                return_value='{"achieved":false,"evidence":"still building"}') as llm:
+            verdict = agent._autonomous_judge("build a server", history)
+
+        prompt = llm.call_args.args[0]
+        self.assertIn("Server running", prompt)
+        self.assertIn("Build successful", prompt)
+        self.assertIn("Prompt sent to Qoder IDE", prompt)
+        self.assertFalse(verdict.achieved)
 
     def test_unrequestable_tool_reports_exact_error_without_json(self):
         with mock.patch.object(agent, "ask_llm_direct", return_value=

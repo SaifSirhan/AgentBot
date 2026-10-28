@@ -318,6 +318,7 @@ def _user32():
         user32.GetAncestor.restype = ctypes.c_void_p
         user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
         user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
         user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
         user32.IsIconic.argtypes = [ctypes.c_void_p]
         user32.GetWindowThreadProcessId.argtypes = [
@@ -377,6 +378,22 @@ def _activate_hwnd(hwnd: int, maximize: bool = False) -> bool:
         return True
     except Exception:
         return False
+
+
+def foreground_window() -> int:
+    """HWND of the current foreground window, or 0 when unavailable."""
+    if os.name != "nt":
+        return 0
+    try:
+        return int(_user32().GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
+def activate_window(hwnd: int, maximize: bool = False) -> bool:
+    """Bring an existing window to the foreground. Callers must verify it."""
+    _guard()
+    return _activate_hwnd(int(hwnd), maximize=maximize)
 
 
 def _focus_window_by_title(title: str, maximize: bool = False) -> Tuple[int, str]:

@@ -571,6 +571,20 @@ OS CONTROL
   type_text(input) — types in the focused window; append "{enter}" to submit.
   get_pixel_color(input) — hex colour at "x,y".
 
+  QODER DELEGATION
+  If the user asks you to build a complex website, app, or run a localhost
+  server, use delegate_to_qoder to send the requirements to Qoder IDE.
+  Do not try to write the code yourself.
+  delegate_to_qoder(prompt, goal) — copies the prompt, focuses the verified
+    Qoder IDE window, opens chat with Ctrl+L, pastes with Ctrl+V, and presses
+    Enter. JSON: {"tool":"delegate_to_qoder","prompt":"<prompt>",
+    "goal":"<goal>"}. Returns exactly "Prompt sent to Qoder IDE. Waiting for
+    completion."
+    Then take a screenshot of Qoder IDE and inspect the terminal/output panel
+    before DONE. If it says "Server running" or "Build successful", the goal is
+    achieved. If it says "Error", read the error and delegate a corrected
+    prompt. Never claim success from the "Prompt sent" message alone.
+
 MACROS
   For repetitive tasks (like opening a specific folder or app), first try
   play_macro. If it doesn't exist or fails, use OS Control with Vision to do

@@ -412,6 +412,22 @@ class OSControlTests(unittest.TestCase):
         self.assertIn("GUI: hide failed", out)
         self.assertEqual(calls, ["hide", "show"])
 
+    def test_foreground_window_returns_hwnd(self):
+        fake_user32 = mock.Mock()
+        fake_user32.GetForegroundWindow.return_value = 321
+        with mock.patch.object(oc, "_user32", return_value=fake_user32):
+            self.assertEqual(oc.foreground_window(), 321)
+
+    def test_activate_window_uses_activate_hwnd(self):
+        with mock.patch.object(oc, "_activate_hwnd", return_value=True) as activate:
+            self.assertTrue(oc.activate_window(55, maximize=True))
+        activate.assert_called_once_with(55, maximize=True)
+
+    def test_activate_window_respects_kill_switch(self):
+        oc.trigger_kill_switch()
+        with self.assertRaises(oc.AutomationAborted):
+            oc.activate_window(55)
+
     # ------------------------------------------------------------------
     # Pixel colour
     # ------------------------------------------------------------------

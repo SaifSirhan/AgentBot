@@ -16,6 +16,8 @@ from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
+DELEGATION_SUCCESS_MARKERS = ("server running", "build successful")
+
 
 @dataclass(frozen=True)
 class ToolResult:
@@ -64,11 +66,27 @@ class AutonomousLoop:
         *,
         max_steps: int = 15,
         stop_event: Event | None = None,
+        delegation_tool: str | None = "delegate_to_qoder",
+        delegation_probe_tools: Collection[str] = (
+            "screenshot_background", "analyze_screenshot"),
+        delegation_success_markers: Collection[str] = DELEGATION_SUCCESS_MARKERS,
     ):
         if type(max_steps) is not int or not 1 <= max_steps <= 15:
             raise ValueError(
                 "max_steps must be an integer from 1 through 15"
             )
+        if delegation_tool is not None and not isinstance(delegation_tool, str):
+            raise ValueError("delegation_tool must be a string or None")
+        probes = frozenset(delegation_probe_tools or ())
+        if any(not isinstance(name, str) or not name.strip() for name in probes):
+            raise ValueError("delegation_probe_tools must contain tool names")
+        markers = tuple(
+            str(marker).strip().lower()
+            for marker in delegation_success_markers
+            if str(marker).strip()
+        )
+        if not markers:
+            raise ValueError("delegation_success_markers must not be empty")
 
         self.llm = llm
         self.execute_tool = execute_tool
@@ -79,6 +97,9 @@ class AutonomousLoop:
         self.stop_event = (
             stop_event if stop_event is not None else Event()
         )
+        self.delegation_tool = delegation_tool
+        self.delegation_probe_tools = probes
+        self.delegation_success_markers = markers
 
     def run(
         self,
@@ -122,6 +143,7 @@ class AutonomousLoop:
             )
 
         last = "No actions have been taken."
+        delegation_pending = False
 
         def finish(
             status: str,
@@ -210,6 +232,17 @@ class AutonomousLoop:
             )
 
             if reply == "DONE":
+                if delegation_pending:
+                    observe(
+                        "You delegated a task but have not inspected the "
+                        "result. Take a screenshot of the delegated app and "
+                        "inspect its terminal/output panel with "
+                        "analyze_screenshot before DONE. If it says "
+                        "'Server running' or 'Build successful', the goal is "
+                        "achieved. If it says 'Error', read the error, fix the "
+                        "prompt, and delegate again."
+                    )
+                    continue
                 if history and (
                     history[-1].tool == "request_tool"
                     or not any(item.ok and item.tool != "request_tool" for item in history)
@@ -405,8 +438,35 @@ class AutonomousLoop:
                 )
             )
 
-            observe(f"{tool} {'succeeded' if outcome.ok else 'failed'}: "
-                    f"{outcome.observation[:8000]}")
+            observation_text = (
+                f"{tool} {'succeeded' if outcome.ok else 'failed'}: "
+                f"{outcome.observation[:8000]}"
+            )
+            if outcome.ok and self.delegation_tool and tool == self.delegation_tool:
+                delegation_pending = True
+                observation_text += (
+                    "\n\nNEXT REQUIRED STEP: Take a screenshot of the "
+                    "delegated app and inspect its terminal/output panel with "
+                    "analyze_screenshot. If it says 'Server running' or "
+                    "'Build successful', the goal is achieved. If it says "
+                    "'Error', read the error and delegate again with a "
+                    "corrected prompt. If the terminal is still building or "
+                    "has no result yet, wait and inspect again. Do not output "
+                    "DONE until you have inspected the result."
+                )
+            elif outcome.ok and tool in self.delegation_probe_tools:
+                normalized = " ".join(
+                    outcome.observation.lower().split())
+                if any(marker in normalized
+                       for marker in self.delegation_success_markers):
+                    delegation_pending = False
+                else:
+                    observation_text += (
+                        "\n\nThe terminal does not yet show 'Server running' "
+                        "or 'Build successful'. Inspect again; if it shows an "
+                        "error, fix the prompt and delegate again."
+                    )
+            observe(observation_text)
 
             if self.stop_event.is_set():
                 return finish(

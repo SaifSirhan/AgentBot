@@ -23,7 +23,7 @@ OS_TOOLS = frozenset({
     "get_pixel_color", "save_macro", "play_macro", "set_volume",
     "media_control", "system_status", "lock_pc", "sleep_pc", "shutdown_pc",
     "restart_pc", "read_screen", "describe_screen", "clipboard_read",
-    "clipboard_write",
+    "clipboard_write", "delegate_to_qoder",
 })
 
 # The five tools the Stremio skill actually needs before it can see and click.
@@ -72,6 +72,7 @@ DESCRIPTIONS = {
     "analyze_screenshot": "Capture the screen and answer a vision question.",
     "click_coordinates": "Click x,y in a fresh screenshot.",
     "type_text": "Type into the focused window.",
+    "delegate_to_qoder": "Send a complex website/app/localhost-server build to Qoder IDE via clipboard and Ctrl+L chat, then let the turn inspect the terminal. Input: prompt and goal.",
     "save_macro": "Save a reusable click/type/hotkey macro.",
     "play_macro": "Run a saved macro by name.",
     "set_volume": "Set, mute, or unmute system volume.",
@@ -129,6 +130,8 @@ EXTRA_KEYWORDS = {
     "analyze_screenshot": ("screenshot", "screen", "look", "vision", "desktop"),
     "click_coordinates": ("click", "desktop", "screen"),
     "type_text": ("type", "write", "keyboard", "desktop", "terminal"),
+    "delegate_to_qoder": ("qoder", "delegate", "build", "website", "web",
+                          "app", "localhost", "server", "complex", "manager"),
     "play_macro": ("macro", "play", "movie", "film", "episode", "stremio"),
     "save_macro": ("macro", "save", "record"),
     "search_web": ("search", "web", "google", "look", "up"),
