@@ -194,6 +194,64 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn(pr.RULES["python"], result.system_prompt)
 
 
+class ReactLoopClassificationTests(unittest.TestCase):
+    def test_complex_requests_require_the_react_loop(self):
+        for request in (
+            "install the ADB driver",
+            "debloat my phone",
+            "reinstall Chrome",
+            "build a localhost server",
+            "building a local server",
+            "fix the script",
+            "automate my morning routine",
+            "multi-step setup",
+            "use adb to uninstall the app",
+            "control my desktop",
+            "open notepad and type hello",
+            "search the web and summarize the results",
+            "create a website",
+            "set up a server",
+            "get Discord installed",
+            "remove the bloatware",
+            "setup my new laptop",
+            "update my drivers",
+            "open notepad, type hello",
+            "turn off notifications and enable dark mode",
+            "Can you install Python 3.12?",
+        ):
+            self.assertTrue(pr.requires_react_loop(request), request)
+
+    def test_conversational_and_single_tool_requests_stay_fast(self):
+        for request in (
+            "",
+            "hello",
+            "what's the weather",
+            "what time is it",
+            "tell me a joke",
+            "open notepad",
+            "launch Spotify",
+            "take a screenshot",
+            "play a movie",
+            "set volume to 30",
+            "move this file",
+            "read this file",
+            "send a message to Sam",
+            "Should I install Python 3.12?",
+            "what is a build",
+            "explain the fix",
+            "dont install anything",
+            "build a playlist",
+            "start the app",
+            "how do I fix the build",
+            "is adb installed",
+        ):
+            self.assertFalse(pr.requires_react_loop(request), request)
+
+    def test_complexity_wins_over_conversational_words(self):
+        self.assertTrue(pr.requires_react_loop("fix the weather app"))
+        self.assertTrue(pr.requires_react_loop("install the news app"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

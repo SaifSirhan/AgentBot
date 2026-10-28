@@ -412,5 +412,106 @@ class AutonomousPermissionTests(unittest.TestCase):
         self.assertIn("Tool registry unavailable", result.message)
 
 
+class AutoRoutingTests(unittest.TestCase):
+    def setUp(self):
+        agent._clear_turn_route()
+        self.addCleanup(agent._clear_turn_route)
+        p = mock.patch.object(agent, "GROUP_MODE", False)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_complex_request_auto_routes(self):
+        with mock.patch.object(
+                agent, "_run_autonomous_goal",
+                return_value=["AUTO"]) as auto:
+            result = agent._auto_route_complex_request(
+                "install the adb driver")
+        self.assertEqual(result, ["AUTO"])
+        auto.assert_called_once_with(
+            "install the adb driver", on_step=None, stop_event=None)
+
+    def test_simple_and_conversational_requests_do_not_auto_route(self):
+        for request in ("hello", "open notepad", "what's the weather"):
+            with mock.patch.object(agent, "_run_autonomous_goal") as auto:
+                self.assertIsNone(
+                    agent._auto_route_complex_request(request), request)
+            auto.assert_not_called()
+
+    def test_slash_commands_and_group_mode_do_not_auto_route(self):
+        with mock.patch.object(agent, "_run_autonomous_goal") as auto:
+            self.assertIsNone(
+                agent._auto_route_complex_request("/task install X"))
+            with mock.patch.object(agent, "GROUP_MODE", True):
+                self.assertIsNone(
+                    agent._auto_route_complex_request("install X"))
+        auto.assert_not_called()
+
+    def test_run_agent_turn_auto_routes_complex_requests(self):
+        with mock.patch.object(
+                agent, "_run_autonomous_goal",
+                return_value=["AUTO"]) as auto, \
+                mock.patch.object(
+                    agent, "_run_agent_turn_impl",
+                    return_value=["FAST"]) as fast:
+            result = agent.run_agent_turn("install the adb driver")
+        self.assertEqual(result, ["AUTO"])
+        auto.assert_called_once_with(
+            "install the adb driver", on_step=None, stop_event=None)
+        fast.assert_not_called()
+
+    def test_run_agent_turn_keeps_simple_requests_fast(self):
+        with mock.patch.dict(sys.modules, {"evals": mock.Mock()}), \
+                mock.patch.object(agent, "_run_autonomous_goal") as auto, \
+                mock.patch.object(
+                    agent, "_run_agent_turn_impl",
+                    return_value=["FAST"]) as fast:
+            result = agent.run_agent_turn("hello")
+        self.assertEqual(result, ["FAST"])
+        auto.assert_not_called()
+        fast.assert_called_once()
+
+    def test_task_prefix_wins_over_auto_routing(self):
+        with mock.patch.object(
+                agent, "_run_autonomous_goal",
+                return_value=["AUTO"]) as auto:
+            result = agent.run_agent_turn("/task install the adb driver")
+        self.assertEqual(result, ["AUTO"])
+        auto.assert_called_once_with(
+            "install the adb driver", on_step=None, stop_event=None)
+
+    def test_group_mode_kwarg_skips_auto_routing(self):
+        with mock.patch.dict(sys.modules, {"evals": mock.Mock()}), \
+                mock.patch.object(agent, "_run_autonomous_goal") as auto, \
+                mock.patch.object(
+                    agent, "_run_agent_turn_impl",
+                    return_value=["FAST"]) as fast:
+            result = agent.run_agent_turn(
+                "install the adb driver", group_mode=True)
+        self.assertEqual(result, ["FAST"])
+        auto.assert_not_called()
+        fast.assert_called_once()
+
+    def test_auto_routed_turn_skips_eval_trace(self):
+        fake_evals = mock.Mock()
+        with mock.patch.dict(sys.modules, {"evals": fake_evals}), \
+                mock.patch.object(
+                    agent, "_run_autonomous_goal",
+                    return_value=["AUTO"]):
+            agent.run_agent_turn("install the adb driver")
+        fake_evals.record_trace.assert_not_called()
+
+    def test_read_only_events_do_not_auto_route(self):
+        with mock.patch.object(
+                agent, "_run_read_only_event",
+                return_value=["EVENT"]) as event, \
+                mock.patch.object(agent, "_run_autonomous_goal") as auto:
+            result = agent.run_agent_turn(
+                "install the adb driver", read_only=True, group_mode=False)
+        self.assertEqual(result, ["EVENT"])
+        event.assert_called_once_with(
+            "install the adb driver", None, None)
+        auto.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

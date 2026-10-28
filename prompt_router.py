@@ -36,6 +36,68 @@ INTENT_PATTERNS = {
     ),
 }
 
+# Requests that need the ReAct loop: installation/debloat work, builds, fixes,
+# automation, explicit multi-step chains, and ADB/desktop automation.
+REACT_LOOP_PATTERNS = (
+    r"\b(?:install|installing|uninstall|uninstalling|reinstall|"
+    r"reinstalling|debloat|debloating|bloatware|fix|fixing|"
+    r"automate|automating)\b",
+    r"\b(?:build|building)\b.*\b(?:website|web app|webapp|application|"
+    r"app|server|service|database|script|project|tool|bot|api|backend|"
+    r"frontend|cli)\b",
+    r"\bmulti[- ]?step\b",
+    r"\badb\b",
+    r"\b(?:os control|desktop automation|control\b.*\bdesktop)\b",
+    r"\b(?:create|make|write|develop|design|set up|setup)\b.*"
+    r"\b(?:website|web app|webapp|application|app|server|service|"
+    r"database|script|project|tool|bot|api)\b",
+    r"\b(?:setup|set up)\b.*\b(?:laptop|pc|computer|phone|device)\b",
+    r"\bstart\b.*\b(?:server|service|database)\b",
+    r"\b(?:update|upgrade)\b.*\b(?:driver|drivers|firmware|bios)\b",
+    r"\b(?:get|have)\b.*\b(?:installed|setup|set up)\b",
+    r"\b(?:click|type|press|scroll|open|launch|focus|close|search|read|"
+    r"write|summarize|play|move|copy|rename|turn off|turn on|enable|"
+    r"disable|toggle|take|analyze)\b.*"
+    r"(?:and then|then|and|,).*"
+    r"\b(?:click|type|press|scroll|open|launch|focus|close|search|read|"
+    r"write|summarize|play|move|copy|rename|turn off|turn on|enable|"
+    r"disable|toggle|take|analyze)\b",
+)
+
+# Questions, explanations, and negated commands stay on the fast path even if
+# they mention a complexity keyword.
+INFORMATIONAL_PATTERNS = (
+    r"^\s*(?:should i|should we|have you|what|what's|whats|why|how|when|"
+    r"where|who|which|is|are|does|do|did)\b",
+    r"\b(?:explain|tell me about|what is|what's|how does|how do)\b",
+)
+NEGATION_PATTERNS = (
+    r"\b(?:don't|do not|dont|never)\b.*"
+    r"\b(?:install|uninstall|reinstall|debloat|build|fix|automate|"
+    r"open|launch|click|type|run|start|change|update)\b",
+    r"\bno need to\b",
+)
+
+
+def requires_react_loop(user_request: str) -> bool:
+    """Return True when a request needs multi-step ReAct execution.
+
+    Only recognized command-shaped complexity returns True. Questions,
+    explanations, negated commands, conversation, and single-tool actions
+    stay on the fast path. So "fix the weather app" is complex while
+    "what's the weather" is not.
+    """
+    text = " ".join(str(user_request or "").split())[:8000]
+    if not text:
+        return False
+    if any(re.search(pattern, text, re.I) for pattern in NEGATION_PATTERNS):
+        return False
+    if any(re.search(pattern, text, re.I) for pattern in INFORMATIONAL_PATTERNS):
+        return False
+    return any(
+        re.search(pattern, text, re.I) for pattern in REACT_LOOP_PATTERNS)
+
+
 DEPENDENCIES = {"stremio": {"os"}}
 
 # Used when nothing in the request matches an intent pattern or a tool

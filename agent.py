@@ -5859,6 +5859,17 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None):
         _clear_turn_route()
 
 
+def _auto_route_complex_request(user_input, on_step=None, stop_event=None):
+    """Run a complex request through the autonomous loop, else return None."""
+    stripped = (user_input or "").strip()
+    if not stripped or stripped.startswith("/") or GROUP_MODE:
+        return None
+    if not prompt_router.requires_react_loop(stripped):
+        return None
+    return _run_autonomous_goal(
+        stripped, on_step=on_step, stop_event=stop_event)
+
+
 # Shared by GUI, Telegram, and external event turns; reentrant for nested calls.
 _TURN_LOCK = _threading.RLock()
 EVENT_SUMMARY_TIMEOUT = 30.0
@@ -5984,6 +5995,13 @@ def _run_agent_turn_with_trace(user_input, conversation_history, on_step=None,
                 goal, on_step=on_step, stop_event=stop_event)
     if lowered in ("/task", "/autonomous"):
         return ["System: /task needs a goal."]
+
+    # Auto-routing deliberately mirrors /task: it returns before the eval
+    # trace and history compaction, keeping the two paths identical.
+    auto_routed = _auto_route_complex_request(
+        stripped, on_step=on_step, stop_event=stop_event)
+    if auto_routed is not None:
+        return auto_routed
 
     import time as _time
     t_start = _time.time()
