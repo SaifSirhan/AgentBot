@@ -1188,7 +1188,9 @@ TOOL_PROTOCOL = (
     '{"tool": "tool_name", "input": "tool_input"}.\n'
     'Output ONLY valid JSON. NEVER write tool("arg") or XML.\n'
     'Call load_skill("local:core_tools") before using a tool whose input '
-    'format you do not know. Do not guess the input format.'
+    'format you do not know. Do not guess the input format.\n'
+    'If a needed tool is not listed, output '
+    '{"tool": "request_tool", "input": "tool_name"} to add it for this turn.'
 )
 
 
@@ -1241,6 +1243,30 @@ def _route_prompt(user_request):
 
 def _clear_turn_route():
     _ROUTED.__dict__.clear()
+
+
+def _router_tool_description(name):
+    for tool in prompt_catalog.build_tools(frozenset(VALID_TOOLS)):
+        if tool.name == name:
+            return tool.description
+    return name.replace("_", " ")
+
+
+def _grant_requested_tool(name):
+    """Add one valid tool to the current turn allowlist. Fail closed."""
+    name = str(name).strip()
+    if name not in VALID_TOOLS or name in ("chat", "done"):
+        return False, f"Cannot add unknown tool '{name}'."
+    if GROUP_MODE and name not in SAFE_GROUP_TOOLS:
+        return False, f"Tool '{name}' is blocked in group chats."
+    allowed = getattr(_ROUTED, "allowed", None)
+    if allowed is not None:
+        allowed.add(name)
+    prompt = getattr(_ROUTED, "prompt", None)
+    if prompt is not None and f"- {name}:" not in prompt:
+        _ROUTED.prompt = (
+            prompt + f"\n\n- {name}: {_router_tool_description(name)}")
+    return True, f"Tool '{name}' is now available for this turn."
 
 
 def _tool_allowed(tool):
@@ -1467,6 +1493,9 @@ def parse_action(plan_text):
             first['tool'] = first.pop('action')
 
         tool = first.get('tool')
+        if tool == "request_tool":
+            first.setdefault('input', '')
+            return first, None
         if tool not in VALID_TOOLS:
             return None, (f"'{tool}' is not a valid tool name. "
                           f"Valid: {', '.join(sorted(VALID_TOOLS))}")
@@ -5753,6 +5782,12 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
             print(f"\nDone: {inp}")
             step_log.append(f"Done: {inp}")
             break
+
+        if tool == 'request_tool':
+            _ok, message = _grant_requested_tool(inp)
+            print(f"\n[Tool request] {message}")
+            step_log.append("System: " + message)
+            continue
 
         signature = (tool, inp)
         if _is_repeat_action(tool, inp, last_signature):
