@@ -2592,6 +2592,7 @@ class RightPanel(QFrame):
 class AgentWindow(QMainWindow):
     _command_done = Signal(str)      # background slash-command result
     _scheduled_triggered = Signal(str)  # scheduler fired (from its own thread)
+    _event_result = Signal(str)
     _reminder_result = Signal(str, str)  # (result, reminder_text)
     _hotkey_changed = Signal(bool)   # F9 pressed/released (from keyboard thread)
     _voice_event = Signal(str)       # recording/transcription status from worker
@@ -2648,6 +2649,7 @@ class AgentWindow(QMainWindow):
         self._telegram_service = None
         self._telegram_results = None
         self._telegram_timer = None
+        self._event_bus = None
         # Section 4 — browser approval bridge (created after the chat view).
         self._browser_bridge = None
         # Option 2 — OS control (hide/show bridge and kill switch).
@@ -2678,6 +2680,8 @@ class AgentWindow(QMainWindow):
         self._gpu_unavailable = True
         self._command_done.connect(self._on_command_done)
         self._scheduled_triggered.connect(self._on_scheduled_trigger)
+        self._event_result.connect(self._show_event_result)
+        QApplication.instance().aboutToQuit.connect(self._stop_event_bus)
         self._reminder_result.connect(self._reminder_done)
         self._hotkey_changed.connect(self._on_hotkey_changed)
         self._voice_event.connect(self._on_voice_event)
@@ -5193,6 +5197,7 @@ class AgentWindow(QMainWindow):
         except Exception as e:
             print(f"[watcher] registration failed: {e}")
 
+        self._start_event_bus()
         self._setup_global_hotkey()
 
         # Phase 6b — start the panel polling timers (SYSTEM 2s, WEATHER 10min).
@@ -5239,6 +5244,25 @@ class AgentWindow(QMainWindow):
         self._start_spontaneous_thoughts()
 
     # -- Telegram document listener (Section 2) -------------------------
+    def _start_event_bus(self):
+        if self._event_bus is not None:
+            return
+        try:
+            from event_bus import EventBus
+            bus = EventBus(on_result=self._event_result.emit)
+            if bus.start():
+                self._event_bus = bus
+        except Exception as exc:
+            self._show_event_result(f"Event bus not started: {exc}")
+
+    def _stop_event_bus(self):
+        bus, self._event_bus = self._event_bus, None
+        if bus is not None:
+            bus.stop()
+
+    def _show_event_result(self, text):
+        self.chat.add_message(UntrustedTextMessage(text, source="EVENT BUS"))
+
     def _start_telegram_doc_service(self):
         """Start the dedicated Telegram listener and its GUI drain timer.
 
@@ -5409,6 +5433,7 @@ class AgentWindow(QMainWindow):
         self.activateWindow()
 
     def quit_app(self):
+        self._stop_event_bus()
         try:
             get_agent().save_conversation_history(self.conversation_history)
         except Exception:

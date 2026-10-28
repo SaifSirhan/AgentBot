@@ -11,6 +11,7 @@ APP_DIR = os.path.join(os.environ.get("APPDATA", ""), "AgentBot")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 DEFAULTS = {
+    "TRIGGERS": [],
     "RAG_AUTO_INDEX_FOLDERS": [
         "C:\\Users\\USER\\Downloads\\Fire Writing",
         "C:\\Users\\USER\\Downloads\\AgentBot",
