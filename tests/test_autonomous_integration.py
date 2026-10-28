@@ -99,11 +99,134 @@ class AutonomousIntegrationTests(unittest.TestCase):
         self.assertIn("blocked in group chats", joined)
         self.assertNotIn("read_file(autonomous)", joined)
 
+    def test_missing_tool_then_grant_refreshes_prompt_and_continues(self):
+        replies = iter([
+            '{"tool":"screenshot_background","input":""}',
+            '{"tool":"request_tool","input":" screenshot_background "}',
+            '{"tool":"screenshot_background","input":""}',
+            "DONE",
+            '{"achieved":true,"evidence":"captured screen"}',
+        ])
+        prompts = []
+
+        def llm(prompt):
+            prompts.append(prompt)
+            return next(replies)
+
+        with mock.patch.object(agent, "ask_llm_direct", side_effect=llm), \
+                mock.patch.object(agent, "execute_tool", return_value="captured screen") as execute:
+            step_log = agent._run_autonomous_goal("check my battery health")
+        self.assertIn("not available", prompts[1])
+        self.assertIn("request_tool", prompts[1])
+        system = prompts[2].split("\n\nUSER:", 1)[0]
+        catalog = json.loads(system.split("Allowed tools: ", 1)[1])
+        self.assertIn("screenshot_background", catalog)
+        execute.assert_called_once_with({"tool": "screenshot_background", "input": ""})
+        self.assertIn("Goal independently verified", "\n".join(step_log))
+
+    def test_done_after_grant_does_not_verify_or_finish_the_goal(self):
+        replies = iter([
+            '{"tool":"request_tool","input":"screenshot_background"}',
+            "DONE",
+            '{"tool":"screenshot_background","input":""}',
+            "DONE",
+        ])
+        with mock.patch.object(agent, "ask_llm_direct", side_effect=lambda _: next(replies)), \
+                mock.patch.object(agent, "execute_tool", return_value="captured screen") as execute, \
+                mock.patch.object(agent, "_autonomous_judge", return_value=
+                                  agent.autonomous_engine.Verification(True, "captured screen")) as judge:
+            step_log = agent._run_autonomous_goal("check my battery health")
+        execute.assert_called_once()
+        judge.assert_called_once()
+        self.assertIn("Goal independently verified", "\n".join(step_log))
+
+    def test_grant_followed_by_failed_action_cannot_reach_verification(self):
+        replies = iter([
+            '{"tool":"request_tool","input":"check_battery_health"}',
+            '{"tool":"check_battery_health","input":""}',
+            "DONE",
+        ])
+        with mock.patch.object(agent, "MAX_STEPS_PER_TURN", 3), \
+                mock.patch.object(agent, "ask_llm_direct", side_effect=lambda _: next(replies)), \
+                mock.patch.object(agent, "execute_tool", return_value="ERROR: powercfg failed"), \
+                mock.patch.object(agent, "_autonomous_judge", return_value=
+                                  agent.autonomous_engine.Verification(True, "incorrect")) as judge:
+            step_log = agent._run_autonomous_goal("check battery health")
+        judge.assert_not_called()
+        self.assertNotIn("Goal independently verified", "\n".join(step_log))
+
+    def test_judge_does_not_count_grants_as_successful_work(self):
+        history = (
+            RecordedAction(1, "request_tool", True, "Tool enabled"),
+            RecordedAction(2, "check_battery_health", False, "ERROR: powercfg failed"),
+        )
+        with mock.patch.object(agent, "ask_llm_direct", return_value=
+                               '{"achieved":true,"evidence":"incorrect"}') as llm:
+            verdict = agent._autonomous_judge("check battery health", history)
+        self.assertFalse(verdict.achieved)
+        llm.assert_not_called()
+
+    def test_unrequestable_tool_reports_exact_error_without_json(self):
+        with mock.patch.object(agent, "ask_llm_direct", return_value=
+                               '{"tool":"request_tool","input":"no_such_tool"}') as llm, \
+                mock.patch.object(agent, "execute_tool") as execute:
+            step_log = agent._run_autonomous_goal("check battery health")
+        self.assertEqual(llm.call_count, 1)
+        execute.assert_not_called()
+        self.assertIn("Cannot add unknown tool 'no_such_tool'.", step_log[-1])
+        self.assertNotIn('{"tool":', step_log[-1])
+
     def test_llm_failure_is_reported_not_retried_forever(self):
         with mock.patch.object(agent, "ask_llm_direct",
                                return_value="Error: provider down"):
             step_log = agent._run_autonomous_goal("do the task")
         self.assertIn("LLM failed", "\n".join(step_log))
+
+
+class AutonomousPermissionTests(unittest.TestCase):
+    def run_loop(self, reply, *, tools=None, authorize=None, execute=None):
+        self.execute = execute or mock.Mock()
+        self.judge = mock.Mock()
+        loop = agent.autonomous_engine.AutonomousLoop(
+            llm=lambda _: reply,
+            execute_tool=self.execute,
+            verify_goal=self.judge,
+            authorize=authorize or (lambda *_: True),
+            tool_descriptions=tools or {"read_file": "Read a file"},
+            max_steps=2,
+        )
+        return loop.run("read a file")
+
+    def test_missing_tool_without_request_mechanism_reports_its_name(self):
+        result = self.run_loop('{"tool":"no_such_tool","args":{}}')
+        self.assertEqual(result.status, "error")
+        self.assertIn("no_such_tool", result.message)
+        self.assertIn("request_tool", result.message)
+        self.execute.assert_not_called()
+
+    def test_actual_authorization_denial_still_stops_without_retry(self):
+        result = self.run_loop('{"tool":"read_file","args":{}}',
+                               authorize=lambda *_: False)
+        self.assertEqual(result.status, "denied")
+        self.assertEqual(result.steps, 1)
+        self.execute.assert_not_called()
+        self.judge.assert_not_called()
+
+    def test_dispatcher_denial_reports_exact_reason_without_retry(self):
+        result = self.run_loop('{"tool":"read_file","args":{}}',
+                               execute=mock.Mock(side_effect=PermissionError("Policy blocked private folder")))
+        self.assertEqual(result.status, "denied")
+        self.assertEqual(result.steps, 1)
+        self.assertIn("Policy blocked private folder", result.message)
+        self.execute.assert_called_once()
+
+    def test_failed_request_reports_dispatcher_exception(self):
+        result = self.run_loop('{"tool":"request_tool","args":{"input":"read_file"}}',
+                               tools={"request_tool": "Request a tool"},
+                               execute=mock.Mock(side_effect=RuntimeError("Tool registry unavailable")))
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.steps, 1)
+        self.assertIn("Tool registry unavailable", result.message)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,7 @@ DESCRIPTIONS = {
     "play_macro": "Run a saved macro by name.",
     "set_volume": "Set, mute, or unmute system volume.",
     "media_control": "Play/pause, next, previous, or stop media.",
+    "check_battery_health": "Battery health percentage, design and full-charge capacities via powercfg; no input or file path needed.",
     "lock_pc": "Lock Windows.",
     "sleep_pc": "Put Windows to sleep.",
     "shutdown_pc": "Shut down Windows (requires confirmation).",

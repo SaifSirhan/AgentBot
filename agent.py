@@ -2594,6 +2594,41 @@ def system_status():
         return f"ERROR: {e}"
 
 
+def check_battery_health():
+    import tempfile
+    import xml.etree.ElementTree as ET
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="agentbot-battery-") as directory:
+            subprocess.run(
+                ["powercfg", "/batteryreport", "/xml", "/output", "battery.xml"],
+                cwd=directory, capture_output=True, text=True, check=True,
+                timeout=30, creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            root = ET.parse(Path(directory) / "battery.xml").getroot()
+            batteries = root.findall(".//{*}Batteries/{*}Battery")
+            if not batteries:
+                return "ERROR: No installed battery found in the battery report."
+            design = current = 0
+            for battery in batteries:
+                design_text = battery.findtext("{*}DesignCapacity")
+                current_text = battery.findtext("{*}FullChargeCapacity")
+                if not design_text or not current_text:
+                    return "ERROR: Battery report is missing DesignCapacity or FullChargeCapacity."
+                rated, full = int(design_text), int(current_text)
+                if rated <= 0 or full < 0:
+                    return "ERROR: Battery report contains invalid battery capacities."
+                design += rated
+                current += full
+            return (f"Battery Health: {current / design * 100:.0f}% "
+                    f"(Design: {design:,} mWh, Current: {current:,} mWh)")
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        return f"ERROR: powercfg failed: {detail}"
+    except (OSError, subprocess.SubprocessError, ET.ParseError, ValueError) as exc:
+        return f"ERROR: Battery health check failed: {exc}"
+
+
 # ---------------------------
 # POWER CONTROLS
 # ---------------------------
@@ -4872,7 +4907,7 @@ VALID_TOOLS = {
     "find_and_open_folder", "write_file", "read_file",
     "set_reminder", "remember", "forget", "read_screen",
     "schedule_task",    "clipboard_read", "clipboard_write", "set_volume", "media_control",
-    "system_status", "lock_pc", "sleep_pc", "shutdown_pc", "restart_pc",
+    "system_status", "check_battery_health", "lock_pc", "sleep_pc", "shutdown_pc", "restart_pc",
     "save_screenshot", "todo", "list_windows", "focus_window", "notify",
     "screenshot_background", "analyze_screenshot", "click_coordinates",
     "type_text", "get_pixel_color", "save_macro", "play_macro",
@@ -5551,6 +5586,7 @@ def _execute_tool_impl(action):
     elif tool == 'set_volume':             return set_volume(inp)
     elif tool == 'media_control':          return media_control(inp)
     elif tool == 'system_status':          return system_status()
+    elif tool == 'check_battery_health':   return check_battery_health()
     elif tool == 'lock_pc':                return lock_pc()
     elif tool == 'sleep_pc':               return sleep_pc()
     elif tool == 'shutdown_pc':            return shutdown_pc(inp)
@@ -5658,7 +5694,7 @@ def _autonomous_llm(messages):
 
 
 def _autonomous_judge(goal, history):
-    if not history or not any(record.ok for record in history):
+    if not any(record.ok and record.tool != "request_tool" for record in history):
         return autonomous_engine.Verification(False, "No successful tool action.")
     lines = "\n".join(
         f"{record.step}. {record.tool} ok={record.ok}: "
@@ -5711,7 +5747,7 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None):
             if stop_event.is_set():
                 raise InterruptedError()
             if tool == "request_tool":
-                requested = args["input"]
+                requested = args["input"].strip()
                 ok, message = _grant_requested_tool(requested)
                 if ok and "loop" in holder:
                     holder["loop"].tools[requested] = _autonomous_tool_spec(requested)

@@ -418,7 +418,11 @@ Patterns as in find_files. ALWAYS preview before moving.
 
 PC CONTROL
   run_command(input) — run a system command.
-  system_status() — CPU/RAM/disk/battery.
+  system_status() — CPU/RAM/disk/battery charge level.
+  check_battery_health() — battery health percentage from full-charge / design
+    capacity, both in mWh. Uses powercfg and deletes its temporary XML report.
+    Use for battery health/wear instead of run_command, execute_python, or
+    screenshots. No file path needed. Invoke with input: "".
   set_volume(input) — "0"–"100", "mute", "unmute".
   media_control(input) — "play_pause", "next", "prev", "stop".
   lock_pc() — lock Windows.
