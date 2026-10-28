@@ -73,6 +73,18 @@ class AdapterTests(unittest.TestCase):
     def test_underscore_emphasis_is_detected(self):
         self.assertFalse(self.allowed([], "I __saved__ it."))
 
+    def test_structured_tool_failure_is_not_evidence(self):
+        failure = ('{"ok": false, "retryable": false, "error": '
+                   '{"code": "TEXT_NOT_FOUND", "message": "missing"}}')
+        success = ('{"ok": true, "action": "replace_text", '
+                   '"filepath": "report.docx", "changes": 1}')
+        self.assertFalse(self.allowed(
+            [("edit_docx_safe", '{"filepath": "report.docx"}', failure)],
+            "I saved the report."))
+        self.assertTrue(self.allowed(
+            [("edit_docx_safe", '{"filepath": "report.docx"}', success)],
+            "I saved the report."))
+
     def test_conditional_tool_evidence_matches_the_operation(self):
         self.assertTrue(self.allowed(
             [("skill_manage", "create|demo|body", "Created skill")], "I created the skill."))

@@ -113,7 +113,7 @@ by similar filenames (like .bak files).
 After the user confirms an action, do it immediately; re-inspect only if it
 fails.
 
-For ANY .docx or .xlsx file manipulation, you MUST use python-docx or
+For .docx edits, use edit_docx_safe. For .xlsx manipulation, use
 openpyxl. NEVER use zipfile or re to parse binary Office files.
 
 If execute_python fails twice on the same task, STOP. Do not try a third
@@ -384,12 +384,14 @@ LOCAL FILES & DOCUMENTS
 PYTHON EXECUTION
   execute_python(input) — run a Python script in a fresh process with the
     agent's interpreter; returns stdout/stderr. Input: the code itself.
-    If you need to read or edit a complex file (like a .docx, .xlsx, or .pdf),
-    write a Python script using python-docx or openpyxl, run it with this
-    tool, and observe the output. Do not use read_file for binary documents.
+    For .xlsx or .pdf work, write a script with the relevant library, run it
+    with this tool, and observe the output. Do not use read_file for binary
+    documents.
+    NEVER write your own python-docx script. ALWAYS use the edit_docx_safe
+    tool to make changes to Word documents. It handles locks, atomic saves,
+    and validation.
     WARNING: If you use zipfile or re to parse a .docx file, you will grab the
-    XML formatting tags instead of the text, and your script will fail. You
-    MUST use from docx import Document and doc.save() to edit Word files.
+    XML formatting tags instead of the text, and your script will fail.
 
 CODE EDITING (use these whenever the user asks to change or inspect code)
   patch_file(input) — surgical SEARCH/REPLACE edit of an existing file.
@@ -509,6 +511,11 @@ OFFICE (NATIVE COM)
 DOCUMENT EDITING
   inspect_docx(input) — JSON map of a .docx: paragraphs, table rows/columns,
     cells. Full path. Use before editing.
+  edit_docx_safe(input) — locked, atomic Word edit. Input is a JSON object
+    (or JSON string): {"filepath": "...", "action": "append_paragraph |
+    replace_text | add_table_row", "data": {...}}. Returns JSON: {"ok": true,
+    ...} or {"ok": false, "retryable": false, "error": {...}}. Use it for
+    every .docx change; never write a python-docx script.
   edit_document(input) — edit an existing DOCX, XLSX, PPTX, or PDF file.
     Format: "filepath|instruction" (absolute path | plain-language edit); the
     file is backed up first. Example:

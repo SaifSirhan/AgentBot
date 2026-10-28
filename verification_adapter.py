@@ -6,6 +6,7 @@ read/search/analyze claims stay on the existing heuristic guards.
 """
 from __future__ import annotations
 
+import json
 import traceback
 from collections.abc import Iterable
 
@@ -137,6 +138,16 @@ def _verified(_arguments, result):
     )
 
 
+def _tool_succeeded(tool, text):
+    if tool == "edit_docx_safe":
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(payload, dict) and payload.get("ok") is True
+    return bool(text.strip()) and not text.lstrip().lower().startswith("error:")
+
+
 def build_engine(executions: Iterable[tuple[str, object, object]]) -> VerificationEngine:
     tools = {}
     pending = []
@@ -145,7 +156,7 @@ def build_engine(executions: Iterable[tuple[str, object, object]]) -> Verificati
         if not actions:
             continue
         text = _text(output)
-        success = bool(text.strip()) and not text.lstrip().lower().startswith("error:")
+        success = _tool_succeeded(tool, text)
         key = f"{tool}:{index}"
         tools[key] = ToolSpec(
             run=(lambda _arguments, _text=text, _success=success: ToolResult(

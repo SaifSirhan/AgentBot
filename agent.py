@@ -4698,7 +4698,7 @@ VALID_TOOLS = {
     "generate_image", "describe_image", "reply_with_gif", "send_gif",
     "search_group_chat", "grep_group_chat", "rag_search",
     "edit_document", "post_to_social", "read_word_doc", "set_word_language",
-    "inspect_docx",
+    "inspect_docx", "edit_docx_safe",
     "skill_manage", "load_skill", "browse_web",
 }
 
@@ -5200,6 +5200,37 @@ def _is_repeat_action(tool, inp, last_signature):
     return (tool, inp) == last_signature and tool not in REPEATABLE_OS_TOOLS
 
 
+def _docx_input_error(message):
+    return json.dumps({
+        "ok": False,
+        "retryable": False,
+        "error": {"code": "INVALID_DATA", "message": message},
+    })
+
+
+def edit_docx_safe(input_value):
+    """Validate the edit_docx_safe envelope and call the supplied editor."""
+    if isinstance(input_value, str):
+        try:
+            payload = json.loads(input_value)
+        except json.JSONDecodeError:
+            return _docx_input_error(
+                "input must be a JSON object with filepath, action, and data.")
+    else:
+        payload = input_value
+    if not isinstance(payload, dict) or set(payload) != {"filepath", "action", "data"}:
+        return _docx_input_error("input must contain exactly: filepath, action, data.")
+    filepath = payload["filepath"]
+    action = payload["action"]
+    data = payload["data"]
+    if not isinstance(filepath, str) or not isinstance(action, str) \
+            or not isinstance(data, dict):
+        return _docx_input_error(
+            "filepath and action must be strings; data must be an object.")
+    import office_editor
+    return office_editor.safe_edit_docx(filepath, action, data)
+
+
 def _execute_tool_impl(action):
     tool = action.get('tool')
     inp = action.get('input', '')
@@ -5241,6 +5272,7 @@ def _execute_tool_impl(action):
             return f"ERROR: unsupported format '{ext}'."
         except ImportError as e:
             return f"ERROR: missing dependency for {ext}: {e}. Run: pip install python-pptx"
+    elif tool == 'edit_docx_safe':         return edit_docx_safe(inp)
     elif tool == 'read_word_doc':
         import office_control
         return office_control.read_word_doc(inp)
