@@ -1141,8 +1141,8 @@ _SKILL_NEGATIVE = re.compile(
     r"chess|piano|guitar|spotify|news|tutorial|recommend|suggest|best|"
     r"similar|trivia)\b"
 )
-_SKILL_MEDIA = re.compile(
-    r"\b(movie|film|tv\s*show|tv\s*series|episode|season)\b"
+_SKILL_STREMIO = re.compile(
+    r"\b(?:stremio|movie|watch|episode)\b"
 )
 
 
@@ -1152,9 +1152,7 @@ def _skill_directive(user_request):
     if not text.strip():
         return ""
     if re.search(r"\bstremio\b", text) or (
-            not _SKILL_NEGATIVE.search(text) and (
-                re.search(r"\b(watch|stream|play)\b", text)
-                or _SKILL_MEDIA.search(text))):
+            not _SKILL_NEGATIVE.search(text) and _SKILL_STREMIO.search(text)):
         return ('Use the Stremio skill now. Do not think about it, just '
                 'execute the steps. Call load_skill("local:stremio") first.')
 
@@ -1222,6 +1220,7 @@ def _route_prompt(user_request):
         classify_intents=_classify_unmatched_intents,
         max_tokens=MAX_PROMPT_TOKENS,
         reserve_tokens=200,
+        fallback_tools=prompt_catalog.FALLBACK_TOOLS,
     )
     selected = list(routed.tools)
     prompt = routed.system_prompt.replace(

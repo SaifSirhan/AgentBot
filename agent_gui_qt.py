@@ -710,7 +710,9 @@ HELP_TEXT = (
     "/activity          → toggle the activity log\n"
     "/theme [name]      → switch theme (brutalist | crt_green)\n"
     "/tg-clear          → clear the Telegram panel\n"
-    "/clear             → clear the chat and history\n\n"
+    "/clear             → clear the chat and history\n"
+    "/task goal         → run a multi-step task with the autonomous loop\n"
+    "/autonomous goal   → alias for /task\n\n"
     "/send  Contact|message\n"
     "       e.g.  /send JEE|helo\n\n"
     "/edit  Contact|old text|new text\n"
@@ -777,6 +779,8 @@ SLASH_COMMANDS = (
     "/theme",
     "/clear",
     "/new",
+    "/task",
+    "/autonomous",
     "/copy",
     "/export",
     "/activity",
@@ -3672,6 +3676,19 @@ class AgentWindow(QMainWindow):
         handler = ui_commands.get(cmd)
         if handler is not None:
             handler()
+            return True
+
+        # /task and /autonomous run the execution engine: the worker calls
+        # agent.run_agent_turn, which routes the prefix to the ReAct loop.
+        if cmd in ("/task", "/autonomous"):
+            if not args:
+                self.chat.add_message(UserMessage(text))
+                self.chat.add_message(AssistantMessage(
+                    "ERROR: /task needs a goal."))
+                return True
+            self._reset_task_context()
+            self.chat.add_message(UserMessage(text))
+            self._start_agent_turn(text)
             return True
 
         # A new tool command starts a new task: do not inherit the previous

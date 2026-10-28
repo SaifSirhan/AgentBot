@@ -32,6 +32,12 @@ STREMIO_TOOLS = frozenset({
     "analyze_screenshot", "click_coordinates",
 })
 
+# Fallback when a request matches no intent or keyword: desktop control plus
+# file/Python access, so the turn is never left without a way to act.
+FALLBACK_TOOLS = (
+    "open_app", "type_text", "execute_python", "read_file", "write_file",
+)
+
 DESCRIPTIONS = {
     "search_web": "Search the live web and return titles, URLs, and summaries.",
     "serp_search": "Structured Google/News/Images/Scholar search via SerpApi.",
@@ -112,13 +118,15 @@ EXTRA_KEYWORDS = {
     "find_files": ("find", "search"),
     "move_files": ("move", "rename"),
     "make_folder": ("folder", "create", "directory"),
-    "execute_python": ("python", "script", "run", "code"),
-    "open_app": ("open", "app", "launch", "application"),
+    "execute_python": ("python", "script", "run", "code", "docker",
+                       "terminal", "server"),
+    "open_app": ("open", "app", "launch", "application", "docker",
+                 "terminal", "server", "code"),
     "open_website": ("open", "website", "site", "url", "browser"),
     "screenshot_background": ("screenshot", "screen", "capture", "desktop"),
     "analyze_screenshot": ("screenshot", "screen", "look", "vision", "desktop"),
     "click_coordinates": ("click", "desktop", "screen"),
-    "type_text": ("type", "write", "keyboard", "desktop"),
+    "type_text": ("type", "write", "keyboard", "desktop", "terminal"),
     "play_macro": ("macro", "play", "movie", "film", "episode", "stremio"),
     "save_macro": ("macro", "save", "record"),
     "search_web": ("search", "web", "google", "look", "up"),
@@ -141,6 +149,8 @@ EXTRA_KEYWORDS = {
     "stream_media": ("youtube", "music", "video", "stream", "play"),
     "play_on_youtube": ("youtube", "music", "song", "play"),
     "load_skill": ("skill", "manual", "instructions", "format", "tool"),
+    "run_command": ("run", "command", "terminal", "shell", "docker",
+                    "server", "code"),
 }
 
 

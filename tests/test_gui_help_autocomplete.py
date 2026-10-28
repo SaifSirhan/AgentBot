@@ -131,15 +131,17 @@ class TerminalInputTests(unittest.TestCase):
         self.press(Qt.Key.Key_Tab)
         self.assertEqual(self.input._ghost, "heme")
         self.press(Qt.Key.Key_Tab)
+        self.assertEqual(self.input._ghost, "ask")
+        self.press(Qt.Key.Key_Tab)
         self.assertEqual(self.input._ghost, "g-clear")
         self.press(Qt.Key.Key_Tab)
         self.assertTrue(self.input._replace)
         self.assertEqual(
             self.input._ghost,
-            "  \u2192 " + self.input._matches[3])
+            "  \u2192 " + self.input._matches[4])
 
         # Keep cycling until the list wraps back to the first match.
-        for _ in range(len(self.input._matches) - 3):
+        for _ in range(len(self.input._matches) - 4):
             self.press(Qt.Key.Key_Tab)
         self.assertEqual(self.input._match_index, 0)
         self.assertEqual(self.input._ghost, "asks")

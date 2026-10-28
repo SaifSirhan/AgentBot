@@ -242,11 +242,21 @@ class SkillIntegrationTests(unittest.TestCase):
     def test_music_request_does_not_inject_stremio(self):
         self.assertEqual(agent._skill_directive("play a song"), "")
 
-    def test_play_title_starts_a_stremio_task(self):
-        self.assertTrue(agent.starts_new_task("play Jujutsu Kaisen"))
+    def test_watch_title_starts_a_stremio_task(self):
         self.assertTrue(agent.starts_new_task("watch Jujutsu Kaisen"))
         self.assertFalse(agent.starts_new_task("now click the poster"))
         self.assertFalse(agent.starts_new_task("play a song"))
+
+    def test_generic_start_and_play_do_not_inject_stremio(self):
+        for text in ("start", "start a Docker server", "start the server",
+                     "start the app", "play", "play Jujutsu Kaisen"):
+            self.assertEqual(agent._skill_directive(text), "", text)
+
+    def test_only_media_words_inject_stremio(self):
+        for text in ("stremio", "watch Cherry", "play a movie",
+                     "start the episode"):
+            self.assertIn("Use the Stremio skill now.",
+                          agent._skill_directive(text), text)
 
     def test_named_skill_injects_directive(self):
         with self.patched(group_mode=False):

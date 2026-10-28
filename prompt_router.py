@@ -38,6 +38,10 @@ INTENT_PATTERNS = {
 
 DEPENDENCIES = {"stremio": {"os"}}
 
+# Used when nothing in the request matches an intent pattern or a tool
+# keyword: a turn must still be able to act on the desktop and the filesystem.
+DEFAULT_FALLBACK_GROUPS = ("os", "python")
+
 
 @dataclass(frozen=True)
 class Tool:
@@ -62,6 +66,8 @@ def build_dynamic_prompt(
     classify_intents: Callable[[str], Iterable[str]] | None = None,
     max_tokens: int = 2000,
     reserve_tokens: int = 200,
+    fallback_tools: Sequence[str] = (),
+    fallback_groups: Sequence[str] = DEFAULT_FALLBACK_GROUPS,
 ) -> RoutedPrompt:
     budget = max_tokens - reserve_tokens
     if budget <= 0:
@@ -71,6 +77,11 @@ def build_dynamic_prompt(
     for tool in available_tools:
         if set(tool.rule_groups) - RULES.keys():
             raise ValueError(f"Unknown rule group for tool {tool.name!r}")
+    for group in fallback_groups:
+        if group not in RULES:
+            raise ValueError(f"Unknown fallback group {group!r}")
+    if any(not isinstance(name, str) for name in fallback_tools):
+        raise ValueError("Fallback tool names must be strings.")
 
     intents = {
         group
@@ -120,12 +131,27 @@ def build_dynamic_prompt(
     )
     selected = [tool for relevance, tool in ranked if relevance > 0][:5]
 
+    # Nothing matched: fall back to the named core tools, then to every tool
+    # in the OS/Python groups. An empty selection is never a valid default.
+    used_fallback = False
+    if not selected:
+        by_name = {tool.name: tool for tool in available_tools}
+        selected = [by_name[name] for name in fallback_tools if name in by_name][:5]
+        if not selected:
+            selected = [
+                tool for tool in sorted(available_tools, key=lambda t: t.name)
+                if set(tool.rule_groups) & set(fallback_groups)
+            ][:5]
+        used_fallback = True
+
+    # Rules follow the request, never a tool's incidental membership: a
+    # shared tool such as open_app must not pull in the Stremio rules.
+    if not intents or used_fallback:
+        active_groups = expand(set(active_groups) | set(fallback_groups))
+
     def render(tools: list[Tool]) -> str:
-        groups = set(active_groups)
-        for tool in tools:
-            groups.update(tool.rule_groups)
         sections = [CORE_RULES]
-        sections.extend(RULES[group] for group in sorted(expand(groups)))
+        sections.extend(RULES[group] for group in sorted(active_groups))
         if tools:
             sections.append("Available tools:")
             sections.extend(

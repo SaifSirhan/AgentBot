@@ -149,12 +149,49 @@ class RoutingTests(unittest.TestCase):
                 count_tokens=words,
             )
 
-    def test_no_relevant_tools_uses_the_fallback_line(self):
+    def test_unmatched_request_falls_back_to_os_and_python_tools(self):
         result = pr.build_dynamic_prompt(
             "tell me a joke", example_tools(), count_tokens=words, max_tokens=2000)
-        self.assertEqual(result.tools, ())
-        self.assertIn("No relevant tools are exposed.", result.system_prompt)
-        self.assertNotIn("Available tools:", result.system_prompt)
+        self.assertNotEqual(result.tools, ())
+        self.assertEqual(
+            [tool.name for tool in result.tools],
+            ["os_control", "python_execute"],
+        )
+        self.assertIn(pr.RULES["os"], result.system_prompt)
+        self.assertIn(pr.RULES["python"], result.system_prompt)
+        self.assertNotIn(pr.RULES["stremio"], result.system_prompt)
+        self.assertNotIn("No relevant tools are exposed.", result.system_prompt)
+
+    def test_fallback_uses_the_named_core_tools_in_order(self):
+        result = pr.build_dynamic_prompt(
+            "tell me a joke", example_tools(), count_tokens=words,
+            max_tokens=2000,
+            fallback_tools=("python_execute", "os_control"),
+        )
+        self.assertEqual(
+            [tool.name for tool in result.tools],
+            ["python_execute", "os_control"],
+        )
+
+    def test_fallback_names_missing_from_the_catalog_are_ignored(self):
+        result = pr.build_dynamic_prompt(
+            "tell me a joke", example_tools(), count_tokens=words,
+            max_tokens=2000,
+            fallback_tools=("os_control", "no_such_tool"),
+        )
+        self.assertEqual([tool.name for tool in result.tools], ["os_control"])
+
+    def test_matched_requests_never_receive_the_fallback(self):
+        result = pr.build_dynamic_prompt(
+            "watch a movie", example_tools(), count_tokens=words,
+            max_tokens=2000,
+            fallback_tools=("python_execute", "os_control"),
+        )
+        self.assertEqual(
+            [tool.name for tool in result.tools],
+            ["stremio_play", "os_control"],
+        )
+        self.assertNotIn(pr.RULES["python"], result.system_prompt)
 
 
 if __name__ == "__main__":
@@ -204,6 +241,32 @@ class AgentRoutingTests(unittest.TestCase):
             self.assertEqual(
                 self.agent._classify_unmatched_intents("watch Cherry"),
                 ["stremio"])
+
+    def test_unmatched_request_keeps_core_os_and_python_tools(self):
+        prompt = self.agent._build_plan_prompt("tell me a joke", "")
+        for name in ("open_app", "type_text", "execute_python",
+                     "read_file", "write_file", "load_skill"):
+            self.assertIn(name, prompt)
+        self.assertIn(pr.RULES["os"], prompt)
+        self.assertIn(pr.RULES["python"], prompt)
+        self.assertNotIn("No relevant tools are exposed.", prompt)
+
+    def test_docker_and_terminal_requests_keep_core_tools(self):
+        for request in ("start a Docker server", "type in the terminal"):
+            self.agent._clear_turn_route()
+            prompt = self.agent._build_plan_prompt(request, "")
+            self.assertIn("open_app", prompt, request)
+            self.assertIn("execute_python", prompt, request)
+            self.assertIn(pr.RULES["os"], prompt, request)
+            self.assertIn(pr.RULES["python"], prompt, request)
+            self.assertNotIn(pr.RULES["stremio"], prompt, request)
+
+    def test_keyword_only_request_does_not_leak_stremio_rules(self):
+        self.agent._clear_turn_route()
+        prompt = self.agent._build_plan_prompt("look at my screen", "")
+        self.assertIn(pr.RULES["os"], prompt)
+        self.assertIn(pr.RULES["python"], prompt)
+        self.assertNotIn(pr.RULES["stremio"], prompt)
 
     def test_turn_allowlist_blocks_unrelated_tools(self):
         self.agent._set_turn_route("watch a movie")
