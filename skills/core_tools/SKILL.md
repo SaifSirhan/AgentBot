@@ -387,6 +387,9 @@ PYTHON EXECUTION
     If you need to read or edit a complex file (like a .docx, .xlsx, or .pdf),
     write a Python script using python-docx or openpyxl, run it with this
     tool, and observe the output. Do not use read_file for binary documents.
+    WARNING: If you use zipfile or re to parse a .docx file, you will grab the
+    XML formatting tags instead of the text, and your script will fail. You
+    MUST use from docx import Document and doc.save() to edit Word files.
 
 CODE EDITING (use these whenever the user asks to change or inspect code)
   patch_file(input) — surgical SEARCH/REPLACE edit of an existing file.

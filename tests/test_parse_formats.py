@@ -56,11 +56,11 @@ def test_valid_json_still_parses():
 
 
 def test_prompt_index_states_the_json_contract():
-    instruction = (
-        'To call a tool, you MUST output a valid JSON block: '
-        '{"tool": "tool_name", "input": "tool_input"}. NEVER output raw code, '
-        'XML, or function calls like tool("arg").')
-    assert instruction in agent.TOOL_DESCRIPTIONS
+    assert ('To call a tool, you MUST output a valid JSON block: '
+            '{"tool": "tool_name", "input": "tool_input"}.'
+            in agent.TOOL_DESCRIPTIONS)
+    assert ('Output ONLY valid JSON. NEVER write tool("arg") or XML.'
+            in agent.TOOL_DESCRIPTIONS)
 
 
 def _run_standalone():

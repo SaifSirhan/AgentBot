@@ -291,6 +291,11 @@ def load_skill_tool(skill_id):
     skill_id = (skill_id or "").strip()
     if not skill_id:
         return "ERROR: load_skill needs a skill id from the AVAILABLE SKILLS list."
+    if GROUP_MODE:
+        base_id = (skill_id[len("local:"):]
+                   if skill_id.startswith("local:") else skill_id)
+        if base_id != "core_tools":
+            return "ERROR: Only core_tools can be loaded in group mode."
     try:
         result = get_skill_manager().invoke_tool(skill_id)
     except Exception as exc:
@@ -1240,6 +1245,7 @@ def _build_plan_prompt(user_request, context, correction=None):
         learned_block = ""
 
     prompt = f"""{skill_catalog}{skill_directive}{TOOL_DESCRIPTIONS}
+{CORE_RULES}
 {CORE_PERSONA}{learned_block}{group_block}{time_block}{persona_block}{facts_block}
 Context (recent conversation and tool results):
 {context}
@@ -4654,6 +4660,12 @@ Agent: [uses rag_search, returns the answer with sources]
 Humor is seasoning, not the meal: 90% of replies are just replies.
 """
 
+# Safety rules that must stay in the prompt: both failures were observed in
+# production (claimed a translation that never ran; lost the user's exact path).
+CORE_RULES = r"""NEVER tell the user a task is Done, Saved, Translated, or Opened unless you have just received a successful tool result confirming it. If you haven't run execute_python and seen the result, you haven't done the task.
+
+When a user provides an exact absolute file path (e.g., C:\Users\USER\Downloads\Log Intern.docx), you must use that EXACT string in your script. Do not search other folders like Telegram Desktop."""
+
 # ---------------------------
 # TOOL REGISTRY
 # ---------------------------
@@ -4700,8 +4712,8 @@ TOOL_DESCRIPTIONS = (
     "input formats for these tools BEFORE calling them. Do not guess the "
     "input format.\n"
     "To call a tool, you MUST output a valid JSON block: "
-    '{"tool": "tool_name", "input": "tool_input"}. NEVER output raw code, '
-    'XML, or function calls like tool("arg").'
+    '{"tool": "tool_name", "input": "tool_input"}.\n'
+    'Output ONLY valid JSON. NEVER write tool("arg") or XML.'
 )
 
 

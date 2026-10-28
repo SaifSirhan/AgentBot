@@ -99,17 +99,39 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn("Do not guess the input format.", prompt)
         self.assertIn(
             'To call a tool, you MUST output a valid JSON block: '
-            '{"tool": "tool_name", "input": "tool_input"}. NEVER output raw '
-            'code, XML, or function calls like tool("arg").', prompt)
+            '{"tool": "tool_name", "input": "tool_input"}.', prompt)
+        self.assertIn(
+            'Output ONLY valid JSON. NEVER write tool("arg") or XML.', prompt)
         self.assertLess(len(agent.TOOL_DESCRIPTIONS), 2000)
         for name in agent.VALID_TOOLS - {"chat", "done"}:
             self.assertIn(name, agent.TOOL_DESCRIPTIONS)
+
+    def test_prompt_carries_anti_hallucination_and_path_lock_rules(self):
+        prompt = agent._build_plan_prompt("hello", "")
+        self.assertIn(
+            "NEVER tell the user a task is Done, Saved, Translated, or Opened "
+            "unless you have just received a successful tool result confirming "
+            "it. If you haven't run execute_python and seen the result, you "
+            "haven't done the task.", prompt)
+        self.assertIn(
+            r"When a user provides an exact absolute file path (e.g., "
+            r"C:\Users\USER\Downloads\Log Intern.docx), you must use that "
+            r"EXACT string in your script. Do not search other folders like "
+            r"Telegram Desktop.", prompt)
 
     def test_core_tools_manual_holds_the_full_catalog(self):
         manual = agent.load_skill_tool("core_tools")
         for anchor in ("browse_web(input)", "execute_python(input)",
                        "NEVER CLAIM AN ACTION YOU DID NOT TAKE", "10. EXAMPLES"):
             self.assertIn(anchor, manual)
+
+    def test_core_tools_manual_warns_against_zipfile_docx(self):
+        manual = " ".join(agent.load_skill_tool("core_tools").split())
+        self.assertIn(
+            "WARNING: If you use zipfile or re to parse a .docx file, you "
+            "will grab the XML formatting tags instead of the text, and your "
+            "script will fail. You MUST use from docx import Document and "
+            "doc.save() to edit Word files.", manual)
 
     def test_progressive_disclosure_prompt_budget(self):
         prompt = agent._build_plan_prompt("hello", "")
@@ -145,10 +167,18 @@ class SkillIntegrationTests(unittest.TestCase):
                 'load_skill("local:core_tools") to read the manual',
                 prompt)
 
-            content = agent.execute_tool(
-                {"tool": "load_skill", "input": "demo-skill"})
-            self.assertIn("Skill: local:demo-skill", content)
-            self.assertIn("DEMO BODY LINE.", content)
+    def test_group_mode_loads_only_core_tools(self):
+        with mock.patch.object(agent, "GROUP_MODE", True):
+            for skill_id in ("demo-skill", "local:stremio", "stremio"):
+                self.assertEqual(
+                    agent.execute_tool(
+                        {"tool": "load_skill", "input": skill_id}),
+                    "ERROR: Only core_tools can be loaded in group mode.")
+            for skill_id in ("core_tools", "local:core_tools"):
+                self.assertIn(
+                    "Skill: local:core_tools",
+                    agent.execute_tool(
+                        {"tool": "load_skill", "input": skill_id}))
 
     def test_private_prompt_includes_catalog(self):
         with self.patched(group_mode=False):
