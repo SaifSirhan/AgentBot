@@ -56,6 +56,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QGuiApplication,
     QIcon,
+    QImage,
     QKeyEvent,
     QPainter,
     QPen,
@@ -1720,6 +1721,16 @@ class BrowserApprovalBridge(QObject):
 # ----------------------------------------------------------------------
 # Chat view with scroll-lock
 # ----------------------------------------------------------------------
+def _paste_image_path():
+    """Absolute path where a clipboard screenshot is saved for the agent."""
+    try:
+        return get_config_module().memory_path("temp_paste.png")
+    except Exception:
+        base = (os.environ.get("LOCALAPPDATA")
+                or str(Path.home() / "AppData" / "Local"))
+        return os.path.join(base, "AgentMemory", "temp_paste.png")
+
+
 class TerminalInput(QPlainTextEdit):
     """Prompt editor with inline ghost completion.
 
@@ -1833,6 +1844,79 @@ class TerminalInput(QPlainTextEdit):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    # -- context menu ---------------------------------------------------
+    def _build_context_menu(self):
+        """Explicit menu: the platform menu's actions are no-ops here."""
+        menu = QMenu(self)
+        has_selection = self.textCursor().hasSelection()
+
+        cut = menu.addAction("Cut")
+        cut.triggered.connect(self.cut)
+        cut.setEnabled(has_selection)
+
+        copy = menu.addAction("Copy")
+        copy.triggered.connect(self.copy)
+        copy.setEnabled(has_selection)
+
+        mime = QApplication.clipboard().mimeData()
+        paste = menu.addAction("Paste")
+        paste.triggered.connect(self.paste)
+        paste.setEnabled(bool(mime) and (
+            mime.hasText() or mime.hasUrls() or mime.hasImage()))
+
+        select_all = menu.addAction("Select All")
+        select_all.triggered.connect(self.selectAll)
+        return menu
+
+    def contextMenuEvent(self, event):
+        menu = self._build_context_menu()
+        menu.exec(event.globalPos())
+        event.accept()
+
+    # -- clipboard: files and screenshots -------------------------------
+    @staticmethod
+    def _clipboard_paths(mime):
+        if mime is None or not mime.hasUrls():
+            return []
+        paths = []
+        for url in mime.urls():
+            path = url.toLocalFile()
+            if path:
+                paths.append(os.path.normpath(path))
+        return paths
+
+    def _insert_paths(self, paths):
+        text = ", ".join(paths)
+        cursor = self.textCursor()
+        start = (cursor.selectionStart() if cursor.hasSelection()
+                 else cursor.position())
+        plain = self.toPlainText()
+        if start > 0 and plain[start - 1] not in " \t\n,;":
+            text = ", " + text
+        self.insertPlainText(text)
+        self.ensureCursorVisible()
+
+    def insertFromMimeData(self, source):
+        """Paste files as paths and screenshots as a saved PNG path."""
+        paths = self._clipboard_paths(source)
+        if paths:
+            self._insert_paths(paths)
+            return
+        if source is not None and source.hasImage():
+            image = source.imageData()
+            if isinstance(image, QPixmap):
+                image = image.toImage()
+            if isinstance(image, QImage) and not image.isNull():
+                path = str(_paste_image_path())
+                try:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    if image.save(path, "PNG"):
+                        self._insert_paths([os.path.normpath(path)])
+                        return
+                except OSError:
+                    pass
+        super().insertFromMimeData(source)
 
     def paintEvent(self, event):
         super().paintEvent(event)
