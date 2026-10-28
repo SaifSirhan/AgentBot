@@ -32,6 +32,8 @@ import security_tools
 import air_quality as air_quality_tool
 import threading as _threading
 import telegram_user
+import prompt_catalog
+import prompt_router
 import verification_adapter
 
 # MODULE GUIDE
@@ -1175,6 +1177,96 @@ def starts_new_task(user_request):
     return bool(_skill_directive(user_request))
 
 
+# ---------------------------
+# PROMPT ROUTING
+# ---------------------------
+MAX_PROMPT_TOKENS = 7800
+_ROUTED = _threading.local()
+
+TOOL_PROTOCOL = (
+    'TOOL CALL PROTOCOL: To call a tool, you MUST output a valid JSON block: '
+    '{"tool": "tool_name", "input": "tool_input"}.\n'
+    'Output ONLY valid JSON. NEVER write tool("arg") or XML.\n'
+    'Call load_skill("local:core_tools") before using a tool whose input '
+    'format you do not know. Do not guess the input format.'
+)
+
+
+def _estimate_prompt_tokens(text):
+    return len(text) // 4
+
+
+def _classify_unmatched_intents(user_request):
+    """Cheap fallback for requests no keyword pattern caught."""
+    groups = []
+    try:
+        if "Stremio" in _skill_directive(user_request):
+            groups.append("stremio")
+    except Exception:
+        pass
+    if re.search(r"\b(?:docx|word|xlsx|spreadsheet|pptx|pdf|python|script)\b",
+                 user_request, re.I):
+        groups.append("python")
+    return groups
+
+
+def _route_prompt(user_request):
+    tools = prompt_catalog.build_tools(frozenset(VALID_TOOLS))
+    routed = prompt_router.build_dynamic_prompt(
+        user_request,
+        tools,
+        count_tokens=_estimate_prompt_tokens,
+        classify_intents=_classify_unmatched_intents,
+        max_tokens=MAX_PROMPT_TOKENS,
+        reserve_tokens=200,
+    )
+    selected = list(routed.tools)
+    prompt = routed.system_prompt.replace(
+        "Use native tool calls, never fabricated XML tool calls.",
+        'To call a tool, output ONLY a JSON object: {"tool": "tool_name", '
+        '"input": "tool_input"}. Never write tool("arg") or XML.',
+    )
+    load_skill = next(tool for tool in tools if tool.name == "load_skill")
+    if not selected:
+        prompt = prompt.replace(
+            "No relevant tools are exposed. Answer without tools when "
+            "possible; otherwise ask for clarification.",
+            "Available tools:",
+        )
+    if load_skill not in selected:
+        selected.append(load_skill)
+        prompt += "\n\n- load_skill: " + load_skill.description
+    return prompt, tuple(selected)
+
+
+def _clear_turn_route():
+    _ROUTED.__dict__.clear()
+
+
+def _tool_allowed(tool):
+    allowed = getattr(_ROUTED, "allowed", None)
+    return allowed is None or tool in allowed
+
+
+def _not_allowed_error(tool):
+    allowed = getattr(_ROUTED, "allowed", None) or VALID_TOOLS
+    return (f"Tool '{tool}' is not available this turn. "
+            f"Use one of: {', '.join(sorted(allowed))}.")
+
+
+def _set_turn_route(user_request):
+    _clear_turn_route()
+    if GROUP_MODE:
+        return
+    try:
+        prompt, selected = _route_prompt(user_request)
+    except Exception as exc:
+        print(f"[router] skipped: {exc}")
+        return
+    _ROUTED.prompt = prompt
+    _ROUTED.allowed = {tool.name for tool in selected} | {"chat", "done"}
+
+
 def _build_plan_prompt(user_request, context, correction=None):
     """Build the exact prompt run_agent_turn's step 1 sends to the LLM.
 
@@ -1246,8 +1338,18 @@ def _build_plan_prompt(user_request, context, correction=None):
     except Exception:
         learned_block = ""
 
-    prompt = f"""{skill_catalog}{skill_directive}{TOOL_DESCRIPTIONS}
-{CORE_RULES}
+    router_prompt = getattr(_ROUTED, "prompt", None)
+    if router_prompt is None and not GROUP_MODE:
+        try:
+            router_prompt, _selected = _route_prompt(user_request)
+        except Exception as exc:
+            print(f"[router] skipped: {exc}")
+    if router_prompt:
+        instructions = f"{router_prompt}\n\n{TOOL_PROTOCOL}\n\n{CORE_RULES}"
+    else:
+        instructions = f"{TOOL_DESCRIPTIONS}\n{CORE_RULES}"
+
+    prompt = f"""{skill_catalog}{skill_directive}{instructions}
 {CORE_PERSONA}{learned_block}{group_block}{time_block}{persona_block}{facts_block}
 Context (recent conversation and tool results):
 {context}
@@ -1368,6 +1470,8 @@ def parse_action(plan_text):
         if tool not in VALID_TOOLS:
             return None, (f"'{tool}' is not a valid tool name. "
                           f"Valid: {', '.join(sorted(VALID_TOOLS))}")
+        if not _tool_allowed(tool):
+            return None, _not_allowed_error(tool)
         first.setdefault('input', '')
 
         # If there are more, queue them on the action
@@ -1377,7 +1481,7 @@ def parse_action(plan_text):
                 a = dict(a)
                 if 'action' in a and 'tool' not in a:
                     a['tool'] = a.pop('action')
-                if a.get('tool') in VALID_TOOLS:
+                if a.get('tool') in VALID_TOOLS and _tool_allowed(a.get('tool')):
                     a.setdefault('input', '')
                     queued.append(a)
             if queued:
@@ -1392,11 +1496,15 @@ def parse_action(plan_text):
         if tool not in VALID_TOOLS:
             return None, (f"'{tool}' is not a valid tool name. "
                           f"Valid: {', '.join(sorted(VALID_TOOLS))}")
+        if not _tool_allowed(tool):
+            return None, _not_allowed_error(tool)
         return dsml, None
 
     # Raw function-call syntax, e.g. load_skill("local:stremio")
     raw_call = _RAW_LOAD_SKILL_RE.search(raw)
     if raw_call:
+        if not _tool_allowed("load_skill"):
+            return None, _not_allowed_error("load_skill")
         return {"tool": "load_skill",
                 "input": raw_call.group("input").strip()}, None
 
@@ -5235,6 +5343,8 @@ def _execute_tool_impl(action):
     tool = action.get('tool')
     inp = action.get('input', '')
     folder = action.get('folder', None)
+    if not _tool_allowed(tool):
+        return f"ERROR: {_not_allowed_error(tool)}"
     from rag_tool import index_documents, search_documents
     if GROUP_MODE and tool not in SAFE_GROUP_TOOLS:
         return (f"ERROR: Tool '{tool}' is disabled in group chats. "
@@ -5457,9 +5567,11 @@ def run_agent_turn(user_input, conversation_history, on_step=None):
     except Exception:
         prompt_for_hash = ""
 
-    step_log = _run_agent_turn_impl(
-        user_input, conversation_history, on_step=on_step)
-
+    try:
+        step_log = _run_agent_turn_impl(
+            user_input, conversation_history, on_step=on_step)
+    finally:
+        _clear_turn_route()
     if _evals is not None:
         try:
             tool_calls = []
@@ -5500,6 +5612,7 @@ def run_agent_turn(user_input, conversation_history, on_step=None):
         except Exception as e:
             print(f"[evals] trace failed: {e}")
 
+    _clear_turn_route()
     return step_log
 
 
@@ -5516,6 +5629,7 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None):
     step_log = _StepLog(on_step)
     last_signature = None
     reset_python_failures()
+    _set_turn_route(user_input)
     try:
         import context_compactor
         conversation_history = context_compactor.compact_history(conversation_history)
@@ -5816,4 +5930,5 @@ Reply:"""
         except Exception as e:
             print(f"[skill-gen] failed: {e}")
 
+    _clear_turn_route()
     return step_log

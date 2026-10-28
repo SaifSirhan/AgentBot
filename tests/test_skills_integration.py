@@ -94,7 +94,7 @@ class SkillIntegrationTests(unittest.TestCase):
 
     def test_prompt_index_points_at_the_core_tools_manual(self):
         prompt = agent._build_plan_prompt("hello", "")
-        self.assertIn("AVAILABLE TOOLS:", prompt)
+        self.assertIn("Available tools:", prompt)
         self.assertIn('load_skill("local:core_tools")', prompt)
         self.assertIn("Do not guess the input format.", prompt)
         self.assertIn(
@@ -125,13 +125,13 @@ class SkillIntegrationTests(unittest.TestCase):
                        "NEVER CLAIM AN ACTION YOU DID NOT TAKE", "10. EXAMPLES"):
             self.assertIn(anchor, manual)
 
-    def test_core_tools_manual_warns_against_zipfile_docx(self):
+    def test_core_tools_manual_requires_safe_docx_tool(self):
         manual = " ".join(agent.load_skill_tool("core_tools").split())
         self.assertIn(
-            "WARNING: If you use zipfile or re to parse a .docx file, you "
-            "will grab the XML formatting tags instead of the text, and your "
-            "script will fail. You MUST use from docx import Document and "
-            "doc.save() to edit Word files.", manual)
+            "NEVER write your own python-docx script. ALWAYS use the "
+            "edit_docx_safe tool to make changes to Word documents. It handles "
+            "locks, atomic saves, and validation.", manual)
+        self.assertNotIn("You MUST use from docx import Document", manual)
 
     def test_progressive_disclosure_prompt_budget(self):
         prompt = agent._build_plan_prompt("hello", "")
