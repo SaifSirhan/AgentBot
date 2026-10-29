@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 import agent
 import experiential_memory as em
+import memory
 
 
 class LessonTestBase(unittest.TestCase):
@@ -58,7 +59,11 @@ class LessonTestBase(unittest.TestCase):
         return path
 
     def read_rules_file(self):
-        return json.loads(em.rules_path().read_text(encoding="utf-8"))
+        return [record["content"] for record in memory.list_memories(
+            include_all=True, kind="lesson")]
+
+    def read_lesson_records(self):
+        return memory.list_memories(include_all=True, kind="lesson")
 
 
 class TraceSelectionTests(LessonTestBase):
@@ -120,6 +125,23 @@ class ExtractLessonsTests(LessonTestBase):
         prompt = llm.call_args.args[0]
         self.assertIn("open Stremio and play Cherry", prompt)
         self.assertIn("JSON array", prompt)
+
+    def test_rules_are_saved_as_scoped_structured_memories(self):
+        self.write_trace("2026-10-27T10-00-00_good")
+        reply = json.dumps(["Wait for the UI to settle after a click."])
+        with mock.patch.object(agent, "_call_llm", return_value=reply):
+            em.extract_lessons()
+
+        records = self.read_lesson_records()
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["scope"], memory.normalize_scope(
+            memory.current_dir()))
+        self.assertEqual(record["kind"], "lesson")
+        self.assertTrue(record["id"])
+        self.assertTrue(record["title"])
+        self.assertTrue(record["keywords"])
+        self.assertTrue(record["created_at"])
 
     def test_repeat_run_deduplicates_without_overwriting(self):
         self.write_trace("2026-10-27T10-00-00_good")
@@ -218,6 +240,34 @@ class LearnedBlockTests(LessonTestBase):
     def test_empty_without_rules(self):
         self.assertEqual(em.learned_lessons_block(), "")
 
+    def test_block_excludes_lessons_from_other_projects(self):
+        other = os.path.join(self.tmp.name, "other_project")
+        memory.add_memory("Other project rule.", scope=other, kind="lesson")
+        memory.add_memory("This project rule.",
+                          scope=memory.current_dir(), kind="lesson")
+
+        block = em.learned_lessons_block()
+
+        self.assertIn("This project rule.", block)
+        self.assertNotIn("Other project rule.", block)
+
+    def test_legacy_rules_migrate_once_into_structured_memories(self):
+        em.rules_path().parent.mkdir(parents=True, exist_ok=True)
+        em.rules_path().write_text(
+            json.dumps(["Legacy rule with enough words."]), encoding="utf-8")
+
+        em.load_rules()
+        records = self.read_lesson_records()
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["content"],
+                         "Legacy rule with enough words.")
+        self.assertEqual(records[0]["kind"], "lesson")
+        self.assertEqual(records[0]["scope"], memory.normalize_scope(
+            memory.current_dir()))
+        self.assertEqual(
+            json.loads(em.rules_path().read_text(encoding="utf-8")), [])
+
     def test_block_lists_rules_under_header(self):
         em.rules_path().parent.mkdir(parents=True, exist_ok=True)
         em.rules_path().write_text(
@@ -247,6 +297,20 @@ class LearnedBlockTests(LessonTestBase):
 
 
 class PromptInjectionTests(LessonTestBase):
+    def test_facts_block_only_injects_global_and_current_project(self):
+        project = os.path.join(self.tmp.name, "project")
+        other = os.path.join(self.tmp.name, "other")
+        memory.add_memory("Global user fact.")
+        memory.add_memory("Current project fact.", scope=project)
+        memory.add_memory("Other project fact.", scope=other)
+
+        with mock.patch.object(memory, "current_dir", return_value=project):
+            prompt = agent._build_plan_prompt("hello", "")
+
+        self.assertIn("Global user fact.", prompt)
+        self.assertIn("Current project fact.", prompt)
+        self.assertNotIn("Other project fact.", prompt)
+
     def test_lessons_are_injected_after_the_tool_index(self):
         block = "[LEARNED LESSONS]\n- Wait for the UI.\n\n"
         with mock.patch.object(em, "learned_lessons_block", return_value=block):

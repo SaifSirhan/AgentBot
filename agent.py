@@ -1324,7 +1324,8 @@ def _build_plan_prompt(user_request, context, correction=None):
                         f"Respond with ONLY a corrected JSON object.") if correction else ""
 
     known_facts = memory.get_facts_block()
-    facts_block = f"\nKnown facts about the user:\n{known_facts}\n" if known_facts else ""
+    facts_block = (f"\nKnown memories (global + current project):\n{known_facts}\n"
+                   if known_facts else "")
 
     # Skills are personal procedures; group chats don't get the catalog, but
     # load_skill stays available for the core_tools manual.
@@ -4518,8 +4519,10 @@ def get_video_links(query):
 def remember_fact(fact):
     if not fact or not fact.strip():
         return "ERROR: No fact given."
-    memory.remember(fact.strip())
-    return f"Remembered: {fact.strip()}"
+    record = memory.remember(fact.strip())
+    if record is None:
+        return f"Already remembered: {fact.strip()}"
+    return f"Remembered (global): {fact.strip()}"
 
 
 def forget_fact(fact):

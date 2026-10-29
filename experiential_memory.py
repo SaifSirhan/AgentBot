@@ -2,11 +2,14 @@
 
 The learner reads the newest successful traces under
 ``AgentMemory/evals/traces``, asks the normal LLM chain for 1-3 general
-rules, and appends them to ``AgentMemory/learned_rules.json``. Existing
-rules are never overwritten or removed; duplicates are ignored.
+rules, and saves them as structured ``kind="lesson"`` memories scoped to the
+current project (see memory.py). Existing lessons are never overwritten or
+removed; duplicates are ignored.
 
-``learned_lessons_block`` renders a small, character-capped block that
-``agent._build_plan_prompt`` puts at the top of every prompt.
+``learned_lessons_block`` renders a small, character-capped block of lessons
+visible to the current project, which ``agent._build_plan_prompt`` puts at
+the top of every prompt. ``learned_rules.json`` is only kept as a cooldown
+marker and as the source for a one-time migration of pre-v2 rules.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from pathlib import Path
 from typing import Any, List
 
 import config
+import memory
 
 MAX_TRACES = 20
 MAX_NEW_RULES = 3
@@ -37,7 +41,7 @@ _FAILURE_FLAGS = (
     "response_accurate",
 )
 
-_RULES_LOCK = threading.Lock()
+_RULES_LOCK = threading.RLock()
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S)
 _BULLET_RE = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s*")
 # Rules come from LLM reading trace text, so a poisoned trace must not be
@@ -207,21 +211,29 @@ def _norm(rule: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", rule.lower())
 
 
-def _merge(existing: List[str], new: List[str]) -> List[str]:
-    merged: List[str] = []
-    seen = set()
-    for rule in list(existing) + list(new):
-        key = _norm(rule)
-        if key and key not in seen:
-            seen.add(key)
-            merged.append(rule)
-    return merged
+def _add_lesson(rule: str, scope: str) -> bool:
+    """Insert a lesson unless the exact text already exists in this scope."""
+    key = _norm(rule)
+    for record in memory.list_memories(include_all=True, kind="lesson"):
+        if record["scope"] == scope and _norm(record["content"]) == key:
+            return False
+    return memory.add_memory(
+        rule, scope=scope, kind="lesson", dedupe=False) is not None
 
 
 # ----------------------------------------------------------------------
 # Storage
 # ----------------------------------------------------------------------
-def load_rules() -> List[str]:
+def project_scope() -> str:
+    """The scope attached to newly learned lessons."""
+    cwd = memory.current_dir()
+    if not cwd:
+        cwd = os.path.dirname(os.path.abspath(__file__))
+    return memory.normalize_scope(cwd)
+
+
+def _legacy_rules() -> List[str]:
+    """Rules stored by the pre-v2 list-of-strings format."""
     try:
         data = json.loads(rules_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -232,13 +244,47 @@ def load_rules() -> List[str]:
             if isinstance(rule, str) and rule.strip()]
 
 
-def _write_rules(rules: List[str]) -> None:
+def _write_state(mtime: float | None = None) -> None:
+    """Advance the 24h cooldown marker; old mtimes can be preserved."""
     path = rules_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(
-        json.dumps(rules, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text("[]", encoding="utf-8")
     os.replace(tmp, path)
+    if mtime is not None:
+        try:
+            os.utime(path, (mtime, mtime))
+        except OSError:
+            pass
+
+
+def _migrate_legacy_rules() -> int:
+    """Move pre-v2 learned rules into the structured memory store once."""
+    with _RULES_LOCK:
+        legacy = _legacy_rules()
+        if not legacy:
+            return 0
+        try:
+            mtime = rules_path().stat().st_mtime
+        except OSError:
+            mtime = None
+
+        added = 0
+        for rule in legacy:
+            if _add_lesson(rule, project_scope()):
+                added += 1
+        _write_state(mtime)
+        return added
+
+
+def load_rules() -> List[str]:
+    """Every stored lesson, regardless of scope (legacy-compatible view)."""
+    try:
+        _migrate_legacy_rules()
+    except OSError:
+        pass
+    return [rule["content"]
+            for rule in memory.list_memories(include_all=True, kind="lesson")]
 
 
 def should_extract(max_age_seconds: int = LESSON_INTERVAL_SECONDS) -> bool:
@@ -270,25 +316,37 @@ def extract_lessons() -> str:
         return "ERROR: lesson extraction failed (no usable reply)."
 
     new_rules = _parse_rules(reply)[:MAX_NEW_RULES]
+    scope = project_scope()
+    added = 0
     with _RULES_LOCK:
-        existing = load_rules()
-        merged = _merge(existing, new_rules)
         try:
+            _migrate_legacy_rules()
+            for rule in new_rules:
+                if _add_lesson(rule, scope):
+                    added += 1
             # Written even when nothing is new so the 24h cooldown advances.
-            _write_rules(merged)
+            _write_state()
         except OSError as exc:
             return f"ERROR: could not save lessons: {exc}"
 
-    added = len(merged) - len(existing)
+    total = len(memory.list_memories(include_all=True, kind="lesson"))
     if added <= 0:
-        return f"No new lessons ({len(merged)} rules kept)."
-    return f"Learned {added} new rule(s); {len(merged)} total."
+        return f"No new lessons ({total} rules kept)."
+    return f"Learned {added} new rule(s); {total} total."
 
 
-def learned_lessons_block(max_chars: int = MAX_INJECT_CHARS) -> str:
-    """Newest rules that fit the cap, or "" when nothing is stored."""
-    rules = load_rules()
-    if not rules or max_chars <= 0:
+def learned_lessons_block(max_chars: int = MAX_INJECT_CHARS,
+                          cwd: str | None = None) -> str:
+    """Newest project-visible lessons that fit the cap, or ""."""
+    if max_chars <= 0:
+        return ""
+    try:
+        _migrate_legacy_rules()
+    except OSError:
+        pass
+    rules = [lesson["content"]
+             for lesson in memory.list_memories(cwd=cwd, kind="lesson")]
+    if not rules:
         return ""
 
     header = "[LEARNED LESSONS]\n"

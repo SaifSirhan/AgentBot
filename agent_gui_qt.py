@@ -103,6 +103,8 @@ try:
 except Exception:
     scheduler = None
 
+import memory
+
 # --------------------------- palette ---------------------------
 # Section 1 terminal theme: black surfaces, mint foreground, dim mint
 # secondary. Kept as constants because a lot of the existing widgets style
@@ -703,6 +705,7 @@ HELP_TEXT = (
     "/continuous on|off → hands-free loop; 60s silence re-arms wake word\n\n"
     "Interface:\n\n"
     "/settings          → open the settings overlay\n"
+    "/memories          → manage saved memories (global + project)\n"
     "/tasks             → scheduled tasks\n"
     "/index             → index a folder for RAG\n"
     "/export            → export the conversation\n"
@@ -775,6 +778,7 @@ HELP_TEXT = (
 SLASH_COMMANDS = (
     "/help",
     "/settings",
+    "/memories",
     "/tasks",
     "/theme",
     "/clear",
@@ -2587,6 +2591,371 @@ class RightPanel(QFrame):
 
 
 # ----------------------------------------------------------------------
+# Memory Manager — structured memories, global and project scoped
+# ----------------------------------------------------------------------
+def _memory_button(text, primary=False, danger=False):
+    b = QPushButton(text)
+    b.setFixedHeight(28)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    if primary:
+        bg, hover, fg = COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_BG
+    elif danger:
+        bg, hover, fg = "transparent", COLOR_HOVER, COLOR_DANGER
+    else:
+        bg, hover, fg = COLOR_RAISED, COLOR_HOVER, COLOR_TEXT_HI
+    b.setStyleSheet(
+        f"""
+        QPushButton {{
+            background: {bg}; border: none; border-radius: 6px;
+            color: {fg}; font-family: "{FONT_UI}"; font-size: 11px;
+            font-weight: bold; padding: 0 12px;
+        }}
+        QPushButton:hover {{ background: {hover}; }}
+        """
+    )
+    return b
+
+
+class MemoryEditDialog(QDialog):
+    """Add/edit form for one structured memory."""
+
+    def __init__(self, parent, record=None):
+        super().__init__(parent)
+        self._values = None
+        self.setWindowTitle("Edit memory" if record else "Add memory")
+        self.setModal(True)
+        self.setMinimumSize(560, 430)
+        self.setStyleSheet(
+            f"""
+            QDialog {{ background: {COLOR_BG}; }}
+            QLabel {{
+                color: {COLOR_TEXT_MID}; font-family: "{FONT_UI}";
+                font-size: 11px; background: transparent;
+            }}
+            QLineEdit, QComboBox, QPlainTextEdit {{
+                background: {COLOR_INPUT_BG}; border: 1px solid {COLOR_BORDER};
+                border-radius: 6px; color: {COLOR_TEXT_HI};
+                padding: 5px 8px; font-family: "{FONT_MONO}"; font-size: 12px;
+            }}
+            QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {{
+                border-color: {COLOR_ACCENT_DIM};
+            }}
+            QComboBox QAbstractItemView {{
+                background: {COLOR_BG_ALT}; color: {COLOR_TEXT_HI};
+                selection-background-color: {COLOR_SELECTED};
+            }}
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(6)
+
+        layout.addWidget(QLabel("Title"))
+        self.title_edit = QLineEdit(record["title"] if record else "")
+        self.title_edit.setPlaceholderText("Optional — generated from the content")
+        layout.addWidget(self.title_edit)
+
+        layout.addWidget(QLabel("Scope"))
+        self.scope_combo = QComboBox()
+        self.scope_combo.setEditable(True)
+        self.scope_combo.addItems(
+            [memory.GLOBAL_SCOPE, memory.current_dir()])
+        if record:
+            self.scope_combo.setCurrentText(record["scope"])
+        layout.addWidget(self.scope_combo)
+        scope_hint = QLabel(
+            "'global' applies everywhere. A folder or file path applies only "
+            "when the agent runs inside that project.")
+        scope_hint.setWordWrap(True)
+        scope_hint.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+            f"font-size: 10px; background: transparent;")
+        layout.addWidget(scope_hint)
+
+        layout.addWidget(QLabel("Keywords"))
+        self.keywords_edit = QLineEdit(
+            ", ".join(record.get("keywords") or []) if record else "")
+        self.keywords_edit.setPlaceholderText(
+            "Optional, comma separated — generated when left empty")
+        layout.addWidget(self.keywords_edit)
+
+        layout.addWidget(QLabel("Content"))
+        self.content_edit = QPlainTextEdit(
+            record["content"] if record else "")
+        self.content_edit.setPlaceholderText("What should the agent remember?")
+        layout.addWidget(self.content_edit, 1)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = _memory_button("Cancel")
+        cancel.clicked.connect(self.reject)
+        save = _memory_button("Save", primary=True)
+        save.clicked.connect(self._accept)
+        row.addWidget(cancel)
+        row.addWidget(save)
+        layout.addLayout(row)
+
+    def _accept(self):
+        content = self.content_edit.toPlainText().strip()
+        if not content:
+            QMessageBox.warning(self, "Memory", "Content cannot be empty.")
+            return
+        keywords = [part.strip() for part in re.split(
+            r"[,;]", self.keywords_edit.text()) if part.strip()]
+        self._values = {
+            "title": self.title_edit.text().strip(),
+            "scope": self.scope_combo.currentText().strip() or memory.GLOBAL_SCOPE,
+            "keywords": keywords,
+            "content": content,
+        }
+        self.accept()
+
+    def values(self):
+        return self._values
+
+
+class MemoryManager(QWidget):
+    """In-window overlay listing every memory, with add/edit/delete."""
+
+    def __init__(self, parent, on_close=None):
+        super().__init__(parent)
+        self._on_close = on_close
+        self.setGeometry(parent.rect())
+        self.setStyleSheet("background: rgba(0, 0, 0, 170);")
+        self.mousePressEvent = lambda e: None
+
+        panel = QFrame(self)
+        panel.setObjectName("memoryPanel")
+        panel.setStyleSheet(
+            f"""
+            QFrame#memoryPanel {{
+                background: {COLOR_BG};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 12px;
+            }}
+            QFrame#memoryCard {{
+                background: {COLOR_BG_ALT};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 9px;
+            }}
+            QScrollArea {{ background: transparent; border: none; }}
+            """
+        )
+        panel.setFixedSize(780, 640)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(panel, 0, Qt.AlignmentFlag.AlignCenter)
+
+        playout = QVBoxLayout(panel)
+        playout.setContentsMargins(0, 0, 0, 0)
+        playout.setSpacing(0)
+
+        bar = QWidget()
+        bar.setFixedHeight(HEADER_H)
+        bar.setStyleSheet(
+            f"background: {COLOR_SIDEBAR}; border-top-left-radius: 12px;"
+            f" border-top-right-radius: 12px;")
+        bar_row = QHBoxLayout(bar)
+        bar_row.setContentsMargins(10, 0, 14, 0)
+        back = _icon_button("back", "Close memory manager")
+        back.clicked.connect(self._close)
+        bar_row.addWidget(back)
+        title = QLabel("Memory Manager")
+        title.setStyleSheet(
+            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_UI}"; '
+            f"font-size: 15px; font-weight: bold; background: transparent;")
+        bar_row.addWidget(title)
+        bar_row.addStretch(1)
+        self._count_label = QLabel("")
+        self._count_label.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+            f"font-size: 10px; background: transparent;")
+        bar_row.addWidget(self._count_label)
+        playout.addWidget(bar)
+
+        toolbar = QWidget()
+        tool_row = QHBoxLayout(toolbar)
+        tool_row.setContentsMargins(14, 10, 14, 6)
+        project = QLabel(f"Current project: {memory.current_dir()}")
+        project.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_MONO}"; '
+            f"font-size: 10px; background: transparent;")
+        project.setToolTip(
+            "Project-scoped memories appear in the prompt when the agent "
+            "runs in this directory.")
+        tool_row.addWidget(project, 1)
+        add = _memory_button("+ Add memory", primary=True)
+        add.clicked.connect(self._add_clicked)
+        tool_row.addWidget(add)
+        playout.addWidget(toolbar)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setStyleSheet("background: transparent; border: none;")
+        self._list_host = QWidget()
+        self._list_host.setStyleSheet("background: transparent;")
+        self._list_layout = QVBoxLayout(self._list_host)
+        self._list_layout.setContentsMargins(14, 4, 14, 14)
+        self._list_layout.setSpacing(8)
+        self._scroll.setWidget(self._list_host)
+        playout.addWidget(self._scroll, 1)
+
+        hint = QLabel(
+            "Global memories are injected in every project. "
+            "Project memories are injected only when their scope matches "
+            "the current working directory.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+            f"font-size: 10px; background: transparent; padding: 0 14px 12px;")
+        playout.addWidget(hint)
+
+        self.refresh()
+
+    def _close(self):
+        if self._on_close is not None:
+            self._on_close()
+
+    def refresh(self):
+        records = memory.list_memories(include_all=True)
+        self._count_label.setText(
+            f"{len(records)} memor{'y' if len(records) == 1 else 'ies'}")
+        while self._list_layout.count():
+            item = self._list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        if not records:
+            empty = QLabel(
+                "No memories yet. Add one, or let the agent learn from "
+                "successful tasks.")
+            empty.setWordWrap(True)
+            empty.setStyleSheet(
+                f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+                f"font-size: 12px; background: transparent; padding: 24px;")
+            self._list_layout.addWidget(empty)
+        else:
+            for record in records:
+                self._list_layout.addWidget(self._memory_card(record))
+        self._list_layout.addStretch(1)
+
+    def _memory_card(self, record):
+        card = QFrame()
+        card.setObjectName("memoryCard")
+        col = QVBoxLayout(card)
+        col.setContentsMargins(14, 10, 14, 12)
+        col.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        title = QLabel(record["title"] or record["content"][:60])
+        title.setWordWrap(True)
+        title.setStyleSheet(
+            f'color: {COLOR_TEXT_HI}; font-family: "{FONT_UI}"; '
+            f"font-size: 13px; font-weight: bold; background: transparent;")
+        head.addWidget(title, 1)
+        col.addLayout(head)
+
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(8)
+        scope = record["scope"]
+        if scope == memory.GLOBAL_SCOPE:
+            scope_text = "global"
+        else:
+            scope_text = os.path.basename(scope.rstrip("\\/")) or scope
+        badge = QLabel(scope_text)
+        badge.setToolTip(scope)
+        badge.setStyleSheet(
+            f'color: {COLOR_ACCENT}; background: {COLOR_ACCENT_DIM}; '
+            f'border-radius: 6px; padding: 2px 7px; font-family: "{FONT_MONO}"; '
+            f"font-size: 10px;")
+        meta_row.addWidget(badge)
+        if record.get("kind") == "lesson":
+            kind = QLabel("lesson")
+            kind.setStyleSheet(
+                f'color: {COLOR_TEXT_MID}; border: 1px solid {COLOR_BORDER}; '
+                f'border-radius: 6px; padding: 2px 7px; font-family: "{FONT_MONO}"; '
+                f"font-size: 10px; background: transparent;")
+            meta_row.addWidget(kind)
+        created = QLabel((record.get("created_at") or "").replace("T", " ")[:16])
+        created.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_MONO}"; '
+            f"font-size: 10px; background: transparent;")
+        meta_row.addWidget(created)
+        meta_row.addStretch(1)
+
+        edit = _memory_button("Edit")
+        edit.clicked.connect(lambda _=False, r=record: self._edit_clicked(r))
+        meta_row.addWidget(edit)
+        delete = _memory_button("Delete", danger=True)
+        delete.clicked.connect(
+            lambda _=False, r=record: self._delete_clicked(r))
+        meta_row.addWidget(delete)
+        col.addLayout(meta_row)
+
+        text = record["content"]
+        if len(text) > 600:
+            text = text[:597].rstrip() + "..."
+        content = QLabel(text)
+        content.setWordWrap(True)
+        content.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        content.setStyleSheet(
+            f'color: {COLOR_TEXT_MID}; font-family: "{FONT_MONO}"; '
+            f"font-size: 11px; background: transparent;")
+        col.addWidget(content)
+
+        keywords = record.get("keywords") or []
+        if keywords:
+            meta = QLabel("keywords: " + ", ".join(keywords))
+            meta.setWordWrap(True)
+            meta.setStyleSheet(
+                f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_MONO}"; '
+                f"font-size: 10px; background: transparent;")
+            col.addWidget(meta)
+        return card
+
+    def _add_clicked(self):
+        dialog = MemoryEditDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values() or {}
+        if memory.add_memory(**values) is None:
+            QMessageBox.information(
+                self, "Memory", "A matching memory already exists.")
+        self.refresh()
+
+    def _edit_clicked(self, record):
+        dialog = MemoryEditDialog(self, record)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values() or {}
+        if not memory.update_memory(record["id"], **values):
+            QMessageBox.warning(self, "Memory", "Could not update this memory.")
+        self.refresh()
+
+    def _delete_clicked(self, record):
+        answer = QMessageBox.question(
+            self, "Delete memory",
+            f"Delete this memory?\n\n{record['title']}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            memory.delete_memory(record["id"])
+            self.refresh()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self._close()
+            return
+        super().keyPressEvent(event)
+
+
+# ----------------------------------------------------------------------
 # Main window
 # ----------------------------------------------------------------------
 class AgentWindow(QMainWindow):
@@ -2620,6 +2989,7 @@ class AgentWindow(QMainWindow):
         # Only agent turns can be cancelled; slash-command jobs cannot.
         self._turn_cancellable = False
         self._settings_overlay = None
+        self._memory_overlay = None
         self._tray_icon = None
         self._tray_menu = None
         self._hotkey_installed = False
@@ -2952,6 +3322,8 @@ class AgentWindow(QMainWindow):
         super().resizeEvent(event)
         if self._settings_overlay is not None:
             self._settings_overlay.setGeometry(self.rect())
+        if self._memory_overlay is not None:
+            self._memory_overlay.setGeometry(self.rect())
         if getattr(self, "_central_widget", None) is not None:
             self._drop_overlay.setGeometry(self._central_widget.rect())
             if self._drop_overlay.isVisible():
@@ -3143,6 +3515,10 @@ class AgentWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         if (event.key() == Qt.Key.Key_Escape
+                and self._memory_overlay is not None):
+            self._close_memory_manager()
+            return
+        if (event.key() == Qt.Key.Key_Escape
                 and self._settings_overlay is not None):
             self._close_settings()
             return
@@ -3226,6 +3602,13 @@ class AgentWindow(QMainWindow):
         text_col.addLayout(text_row)
         text_col.addStretch(1)
         pill_row.addWidget(text_host, 1)
+
+        # Settings is always one click away; /settings still works.
+        self.settings_button = _icon_button(
+            "settings", "Settings", size=INPUT_LINE_H, icon_size=13)
+        self.settings_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.settings_button.clicked.connect(self.open_settings)
+        pill_row.addWidget(self.settings_button, 0, Qt.AlignmentFlag.AlignTop)
 
         # Send doubles as Stop while a turn is running (red square, Esc too).
         self.send_button = _icon_button("send", "Send (Enter)",
@@ -3666,6 +4049,7 @@ class AgentWindow(QMainWindow):
 
         ui_commands = {
             "/settings": self.open_settings,
+            "/memories": self.open_memory_manager,
             "/tasks": self.open_schedule_dialog,
             "/index": self.on_index_documents,
             "/index-docs": self.on_index_documents,
@@ -4038,9 +4422,28 @@ class AgentWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------------
+    # Memory Manager overlay
+    # ------------------------------------------------------------------
+    def open_memory_manager(self):
+        self._close_settings()
+        if self._memory_overlay is not None:
+            self._memory_overlay.deleteLater()
+            self._memory_overlay = None
+        overlay = MemoryManager(self, on_close=self._close_memory_manager)
+        self._memory_overlay = overlay
+        overlay.show()
+        overlay.raise_()
+
+    def _close_memory_manager(self):
+        if self._memory_overlay is not None:
+            self._memory_overlay.deleteLater()
+            self._memory_overlay = None
+
+    # ------------------------------------------------------------------
     # Settings overlay — in-window, dim backdrop, centred panel
     # ------------------------------------------------------------------
     def open_settings(self):
+        self._close_memory_manager()
         try:
             cfgmod = get_config_module()
         except Exception as e:
@@ -4388,7 +4791,10 @@ class AgentWindow(QMainWindow):
         cancel_btn.clicked.connect(self._close_settings)
         default_btn = footer_button("Reset to defaults", danger=True)
         default_btn.clicked.connect(self._reset_settings_defaults)
+        mem_btn = footer_button("Memories")
+        mem_btn.clicked.connect(self.open_memory_manager)
         br.addWidget(default_btn)
+        br.addWidget(mem_btn)
         br.addStretch(1)
         br.addWidget(cancel_btn)
         br.addWidget(save_btn)
