@@ -46,6 +46,8 @@ import verification_adapter
 # PERSISTENT CONVERSATION
 # ---------------------------
 MAX_HISTORY_ENTRIES = 40
+_CONVERSATION_LOCK = _threading.RLock()
+_KEEP_TASK = object()
 
 
 def _conversation_file():
@@ -53,25 +55,45 @@ def _conversation_file():
 
 
 def load_conversation_history():
-    path = _conversation_file()
-    if not os.path.exists(path):
-        return []
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with _CONVERSATION_LOCK, open(_conversation_file(), encoding='utf-8') as f:
             data = json.load(f)
-            return data.get('history', [])[-MAX_HISTORY_ENTRIES:]
-    except (json.JSONDecodeError, OSError):
+        history = data.get('history', [])[-MAX_HISTORY_ENTRIES:]
+        if data.get('active_task') is not None:
+            history.append(_TASK_SNAPSHOT_PREFIX + json.dumps(
+                data['active_task'], ensure_ascii=False, allow_nan=False))
+        return history
+    except (ValueError, OSError, TypeError):
         return []
 
 
-def save_conversation_history(history):
-    try:
-        path = _conversation_file()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump({'history': history[-MAX_HISTORY_ENTRIES:]}, f, indent=2)
-    except Exception as e:
-        print(f"[conversation save error] {e}")
+def save_conversation_history(history, *, active_task=_KEEP_TASK):
+    import tempfile
+    with _CONVERSATION_LOCK:
+        path = Path(_conversation_file())
+        if active_task is _KEEP_TASK:
+            active_task = _latest_task_checkpoint(history)
+            if active_task is None and history and path.exists():
+                try:
+                    with path.open(encoding='utf-8') as f:
+                        active_task = json.load(f).get('active_task')
+                except (ValueError, OSError):
+                    active_task = None
+        visible = [line for line in history if not (
+            isinstance(line, str) and line.startswith(_TASK_SNAPSHOT_PREFIX))]
+        payload = {'history': visible[-MAX_HISTORY_ENTRIES:], 'active_task': active_task}
+        encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(encoded)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 # ---------------------------
@@ -935,23 +957,93 @@ def _dispatch_call(name, prompt, force_json, max_tokens):
         return f"Error: unknown brain '{name}'"
 
 
-def _call_llm(prompt, force_json=False, max_tokens=None, force_provider=None):
+# Admission is serialized for both synchronous and cancellable calls. An
+# abandoned HTTP request keeps this single worker slot until its thread exits.
+_PROVIDER_ADMISSION = _threading.Lock()
+_PROVIDER_WORKER = None
+_PROVIDER_POLL_SECONDS = 0.05
+
+
+def _raise_if_stopped(stop_event=None):
+    event = stop_event if stop_event is not None else _current_stop_event()
+    if event is not None and event.is_set():
+        raise InterruptedError(CANCELLED_MESSAGE)
+
+
+def _dispatch_provider(name, prompt, force_json, max_tokens, stop_event):
+    """Isolate ONLY the provider request, never tools, failover or turn state.
+
+    Cancellation abandons the result, not the transport: the blocking HTTP
+    request can remain alive until its configured timeout. Later callers wait
+    cancellably for the same slot, so repeated stops cannot accumulate workers.
+    Without a stop event, dispatch stays synchronous but shares admission.
+    """
+    global _PROVIDER_WORKER
+    _raise_if_stopped(stop_event)
+    while not _PROVIDER_ADMISSION.acquire(timeout=_PROVIDER_POLL_SECONDS):
+        _raise_if_stopped(stop_event)
+    try:
+        while _PROVIDER_WORKER is not None and _PROVIDER_WORKER.is_alive():
+            _raise_if_stopped(stop_event)
+            _PROVIDER_WORKER.join(_PROVIDER_POLL_SECONDS)
+        _raise_if_stopped(stop_event)
+        _PROVIDER_WORKER = None
+        if stop_event is None:
+            return _dispatch_call(name, prompt, force_json, max_tokens)
+
+        outcome = []
+        dispatch = _dispatch_call
+
+        def request():
+            # Provider prompts already contain the routed catalog. In particular,
+            # _call_openrouter reads no _ROUTED state; do not copy live turn state
+            # (allowlists, autonomous loop, verifiers) into an abandoned worker.
+            _set_stop_event(stop_event)
+            try:
+                _raise_if_stopped(stop_event)
+                result = dispatch(name, prompt, force_json, max_tokens)
+                _raise_if_stopped(stop_event)
+                outcome.append((True, result))
+            except BaseException as exc:
+                if not stop_event.is_set():
+                    outcome.append((False, exc))
+            finally:
+                _clear_stop_event()
+
+        worker = _threading.Thread(target=request, name="provider-request", daemon=True)
+        _PROVIDER_WORKER = worker
+        worker.start()
+        while worker.is_alive():
+            _raise_if_stopped(stop_event)
+            worker.join(_PROVIDER_POLL_SECONDS)
+        _raise_if_stopped(stop_event)
+        _PROVIDER_WORKER = None
+        succeeded, value = outcome.pop()
+        if not succeeded:
+            raise value
+        return value
+    finally:
+        _PROVIDER_ADMISSION.release()
+
+
+def _call_llm(prompt, force_json=False, max_tokens=None, force_provider=None,
+              stop_event=None):
     """Try each brain in priority order until one succeeds.
 
-    force_provider: when set, walk only that provider (no failover). Used by
-    the eval harness to pin a provider; default None preserves the existing
-    full-chain behaviour.
+    force_provider pins a single provider (no failover). stop_event defaults to
+    the caller's thread-local event; cancellation always raises InterruptedError.
+    Only this waiting caller may update brain state or decide to fail over.
     """
     global LAST_BRAIN, _LAST_PROVIDER, _LAST_FAILURE_REASON
+    stop_event = stop_event if stop_event is not None else _current_stop_event()
+    _raise_if_stopped(stop_event)
     tried = []
     now = time.time()
 
     providers_to_try = [force_provider] if force_provider else BRAIN_PRIORITY
 
     for name in providers_to_try:
-        stop_event = _current_stop_event()
-        if stop_event is not None and stop_event.is_set():
-            return CANCELLED_MESSAGE
+        _raise_if_stopped(stop_event)
         with _brain_lock:
             st = _get_brain_state(name)
             if st["dead"]:
@@ -963,15 +1055,17 @@ def _call_llm(prompt, force_json=False, max_tokens=None, force_provider=None):
                 continue
 
         try:
-            result = _dispatch_call(name, prompt, force_json, max_tokens)
+            _raise_if_stopped(stop_event)
+            result = _dispatch_provider(name, prompt, force_json, max_tokens, stop_event)
+        except InterruptedError:
+            raise
         except Exception as e:
             result = f"Error: {e}"
 
-        stop_event = _current_stop_event()
-        if stop_event is not None and stop_event.is_set():
-            return CANCELLED_MESSAGE
+        _raise_if_stopped(stop_event)
         if isinstance(result, str) and result.startswith("Error:"):
             cls = _classify_error(result)
+            _raise_if_stopped(stop_event)
             if cls:
                 cooldown, dead = cls
                 if dead:
@@ -991,12 +1085,14 @@ def _call_llm(prompt, force_json=False, max_tokens=None, force_provider=None):
             tried.append(f"{name}(empty)")
             continue
 
+        _raise_if_stopped(stop_event)
         LAST_BRAIN = name
         _LAST_PROVIDER = name
         _LAST_FAILURE_REASON = None
         print(f"[BRAIN] OK: {name}")
         return result
 
+    _raise_if_stopped(stop_event)
     LAST_BRAIN = None
     return (
         "Error: All brains unavailable. "
@@ -1273,11 +1369,38 @@ def _router_tool_description(name):
     return name.replace("_", " ")
 
 
+def _closest_tool_name(name):
+    """Resolve a misspelling to the canonical catalog name, or None."""
+    candidates = sorted(VALID_TOOLS - {"chat", "done"})
+    folded = name.lower()
+    for candidate in candidates:
+        if candidate.lower() == folded:
+            return candidate
+    tokens = tuple(sorted(part for part in folded.split("_") if part))
+    reordered = [candidate for candidate in candidates
+                 if tuple(sorted(candidate.split("_"))) == tokens]
+    if reordered:
+        return max(reordered, key=lambda candidate: difflib.SequenceMatcher(
+            None, folded, candidate).ratio())
+    matches = difflib.get_close_matches(folded, candidates, n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+
 def _grant_requested_tool(name):
     """Add one valid tool to the current turn allowlist. Fail closed."""
     name = str(name).strip()
-    if name not in VALID_TOOLS or name in ("chat", "done"):
+    if name in ("chat", "done"):
         return False, f"Cannot add unknown tool '{name}'."
+    if name not in VALID_TOOLS:
+        suggested = _closest_tool_name(name)
+        if suggested is None:
+            return False, f"Cannot add unknown tool '{name}'."
+        ok, detail = _grant_requested_tool(suggested)
+        if not ok:
+            return False, (f"ERROR: Tool '{name}' not found. Did you mean "
+                           f"'{suggested}'? {detail}")
+        return True, (f"ERROR: Tool '{name}' not found. Did you mean "
+                      f"'{suggested}'? I have granted it.")
     if GROUP_MODE and name not in SAFE_GROUP_TOOLS:
         return False, f"Tool '{name}' is blocked in group chats."
     loop = getattr(_ROUTED, "autonomous_loop", None)
@@ -1432,8 +1555,9 @@ def ask_ai_for_plan(user_request, context, correction=None):
     return _call_llm(prompt, force_json=False)
 
 
-def ask_llm_direct(prompt, max_tokens=None):
-    return _call_llm(prompt, force_json=False, max_tokens=max_tokens)
+def ask_llm_direct(prompt, max_tokens=None, stop_event=None):
+    return _call_llm(prompt, force_json=False, max_tokens=max_tokens,
+                     stop_event=stop_event)
 
 
 # ---------------------------
@@ -1588,16 +1712,20 @@ def parse_action(plan_text):
 def get_valid_action(user_request, context, max_retries=2):
     correction = None
     for attempt in range(max_retries + 1):
+        _raise_if_stopped()
         plan_text = ask_ai_for_plan(user_request, context, correction=correction)
+        _raise_if_stopped()
         print(f"\nRaw model output (attempt {attempt + 1}):", plan_text[:300])
 
         action, error = parse_action(plan_text)
+        _raise_if_stopped()
         if action is not None:
             return action, None
 
         print(f"Invalid response: {error}")
         correction = error
 
+    _raise_if_stopped()
     return None, f"Model failed after {max_retries + 1} attempts."
 
 
@@ -5733,7 +5861,6 @@ def _autonomous_tool_spec(name):
 
 
 _TASK_SNAPSHOT_PREFIX = "System: Autonomous task snapshot: "
-_TASK_SNAPSHOT_LIMIT = 96000
 
 
 def _explicit_autonomous_tools(goal):
@@ -5763,37 +5890,31 @@ def _bounded_task_memory(entries):
     return tuple(notes)
 
 
-def _task_snapshot(goal, result, followups=()):
-    """Serialize host records, never inferred assistant claims or global memory."""
+def _latest_task_checkpoint(history):
+    for line in reversed(history or ()):
+        if isinstance(line, str) and line.startswith(_TASK_SNAPSHOT_PREFIX):
+            try:
+                payload = json.loads(line[len(_TASK_SNAPSHOT_PREFIX):])
+                return payload if isinstance(payload, dict) else None
+            except (ValueError, TypeError):
+                return None
+    return None
+
+
+def _task_snapshot(goal, result, followups=(), *, protected_user_message='', verifier_state=None):
     from dataclasses import asdict
-    payload = {"version": 1, "goal": goal[:16000], "status": result.status,
-               "history": [], "followups": list(followups),
-               "incomplete": len(goal) > 16000, "resumable": len(goal) <= 16000}
-    for record in result.history:
-        item = asdict(record)
-        item["incomplete"] = False
-        if len(json.dumps(item, ensure_ascii=False)) > 32000:
-            # Incomplete records are context only, never restored as successful receipts.
-            urls = list(dict.fromkeys(re.findall(r'https?://[^\s<>"\']+', record.observation)))
-            item.update(observation=record.observation[:16000], arguments=None,
-                        replay_args=None, incomplete=True, source_urls=[])
-            for url in urls:
-                if len(json.dumps(item["source_urls"] + [url])) > 8000:
-                    break
-                item["source_urls"].append(url)
-            payload["incomplete"] = True
-        payload["history"].append(item)
-    def encode():
-        return json.dumps(payload, ensure_ascii=False, allow_nan=False)
-    while len(encode()) > _TASK_SNAPSHOT_LIMIT - len(_TASK_SNAPSHOT_PREFIX) and payload["history"]:
-        payload["history"].pop()
-        payload["incomplete"] = True
-    if len(encode()) > _TASK_SNAPSHOT_LIMIT - len(_TASK_SNAPSHOT_PREFIX):
-        payload.update(followups=[], incomplete=True, resumable=False)
-    return _TASK_SNAPSHOT_PREFIX + encode()
+    payload = {
+        "version": 2, "goal": goal, "status": result.status,
+        "history": [dict(asdict(record), incomplete=False) for record in result.history],
+        "followups": list(followups), "incomplete": False, "resumable": True,
+        "scratchpad_notes": result.scratchpad_notes,
+        "protected_user_message": protected_user_message,
+        "verifier_state": verifier_state,
+    }
+    return _TASK_SNAPSHOT_PREFIX + json.dumps(payload, ensure_ascii=False, allow_nan=False)
 
 
-def _resume_autonomous_task(user_input, conversation_history):
+def _resume_autonomous_task(user_input, conversation_history, *, explicit=False):
     """Resolve only the latest task in this caller's transcript; prose is not receipts."""
     if not _is_task_continuation(user_input):
         return None
@@ -5811,6 +5932,8 @@ def _resume_autonomous_task(user_input, conversation_history):
                 continue
             # GUI callers may already have appended the current continuation.
             if has_snapshot:
+                if explicit:
+                    continue
                 return None
             goal = re.sub(r"^/(?:task|autonomous)\s+", "", text, flags=re.I)
             if not (goal != text or _explicit_autonomous_tools(goal)
@@ -5818,15 +5941,18 @@ def _resume_autonomous_task(user_input, conversation_history):
                 return None
             return {"goal": goal, "initial_history": (),
                     "memory": _bounded_task_memory(entries[-8:]),
+                    "initial_notes": {}, "protected_user_message": line,
+                    "verifier_state": None,
                     "followups": tuple(reversed(followups)) + (user_input,)}
         if not line.startswith(_TASK_SNAPSHOT_PREFIX):
             continue
         try:
-            if len(line) > _TASK_SNAPSHOT_LIMIT:
-                return None
             snapshot = json.loads(line[len(_TASK_SNAPSHOT_PREFIX):])
-            if (snapshot.get("version") != 1 or snapshot.get("resumable") is not True
-                    or snapshot.get("status") not in {"incomplete", "step_limit", "error"}
+            statuses = {"incomplete", "step_limit", "error", "running"}
+            if explicit:
+                statuses.add("cancelled")
+            if (snapshot.get("version") not in {1, 2} or snapshot.get("resumable") is not True
+                    or snapshot.get("status") not in statuses
                     or not isinstance(snapshot.get("goal"), str) or not snapshot["goal"].strip()
                     or not isinstance(snapshot.get("history"), list)
                     or not isinstance(snapshot.get("followups"), list)
@@ -5849,9 +5975,16 @@ def _resume_autonomous_task(user_input, conversation_history):
                 restored.append(autonomous_engine.RecordedAction(**{
                     key: item.get(key) for key in
                     ("step", "tool", "ok", "observation", "arguments", "replay_args")}))
+            notes = snapshot.get("scratchpad_notes", {})
+            autonomous_engine.Scratchpad().restore_notes(notes)
+            protected = snapshot.get("protected_user_message", "")
+            if not isinstance(protected, str):
+                return None
             constraints = snapshot["followups"] + list(reversed(followups)) + [user_input]
             return {"goal": snapshot["goal"], "initial_history": tuple(restored),
                     "memory": _bounded_task_memory(memory_notes),
+                    "initial_notes": notes, "protected_user_message": protected,
+                    "verifier_state": snapshot.get("verifier_state"),
                     "followups": tuple(dict.fromkeys(constraints))}
         except (ValueError, TypeError, AttributeError, RecursionError):
             return None
@@ -5859,6 +5992,9 @@ def _resume_autonomous_task(user_input, conversation_history):
 
 
 def _autonomous_context_prompt(prompt):
+    protected = getattr(_ROUTED, "protected_user_message", "")
+    if protected:
+        prompt = "USER: Original task specification, preserved verbatim:\n" + protected + "\n\n" + prompt
     followups = getattr(_ROUTED, "task_followups", ())
     if followups:
         return ("SYSTEM: Apply these current user continuation constraints in addition to the "
@@ -5899,12 +6035,13 @@ def _autonomous_judge(goal, history):
     return verifier.verify(history, loop.scratchpad.view() if loop is not None else None)
 
 
-def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_history=None):
+def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_history=None,
+                         *, explicit_resume=False):
     step_log = _StepLog(on_step)
     if GROUP_MODE:
         step_log.append("Action: chat(autonomous) -> Result: AI: Autonomous tasks are blocked in group chats.")
         return step_log
-    resume = _resume_autonomous_task(goal, conversation_history)
+    resume = _resume_autonomous_task(goal, conversation_history, explicit=explicit_resume)
     if _is_task_continuation(goal) and resume is None:
         step_log.append("Action: chat(autonomous) -> Result: AI: No unfinished task in this conversation to continue.")
         return step_log
@@ -5913,10 +6050,38 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_histo
     followups = resume["followups"] if resume else ()
     if resume:
         goal = resume["goal"]
-    _set_turn_route(goal)
+    protected = resume["protected_user_message"] if resume else next((
+        line for line in reversed(conversation_history or ())
+        if isinstance(line, str) and line.startswith("User: ")
+        and re.sub(r"^/(?:task|autonomous)\s+", "", line[6:].strip(), flags=re.I) != goal.strip()
+        and not _is_task_continuation(line[6:])
+    ), "")
+    checkpoint_index = None
+    verifier = None
+
+    def checkpoint(result):
+        nonlocal checkpoint_index
+        if conversation_history is None:
+            return
+        try:
+            snapshot = _task_snapshot(
+                goal, result, followups, protected_user_message=protected,
+                verifier_state=verifier.export_state() if verifier is not None else None)
+            if checkpoint_index is None:
+                checkpoint_index = len(conversation_history)
+                conversation_history.append(snapshot)
+            else:
+                conversation_history[checkpoint_index] = snapshot
+            save_conversation_history(conversation_history)
+        except Exception as e:
+            # A failed checkpoint must not abort authorized task work.
+            print(f"[checkpoint save error] {e}")
+
     stop_event = stop_event or _threading.Event()
     _set_stop_event(stop_event)
     try:
+        _set_turn_route(goal)
+        _ROUTED.protected_user_message = protected
         if getattr(_ROUTED, "allowed", None) is None:
             _ROUTED.allowed = set()
             result = autonomous_engine.LoopResult(
@@ -5927,7 +6092,16 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_histo
             _ROUTED.task_followups = followups
             verifier = AutonomousGoalVerifier(
                 goal, lambda prompt: ask_llm_direct(_autonomous_context_prompt(prompt)),
-                Path(__file__).resolve().parent, required_tools=_explicit_autonomous_tools(goal))
+                Path(__file__).resolve().parent, required_tools=_explicit_autonomous_tools(goal),
+                stop_event=stop_event)
+            if resume and resume["verifier_state"] is not None:
+                try:
+                    verifier.restore_state(resume["verifier_state"])
+                except ValueError:
+                    step_log.append(
+                        "Action: chat(autonomous) -> Result: AI: Cannot resume: "
+                        "the saved verification checkpoint is invalid.")
+                    return step_log
             _ROUTED.goal_verifier = verifier
             allowed = sorted(_ROUTED.allowed - {"chat", "done"})
             descriptions = {name: _autonomous_tool_spec(name) for name in allowed}
@@ -6003,15 +6177,23 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_histo
                 stop_event=stop_event,
             )
             _ROUTED.autonomous_loop = loop
-            result = loop.run(goal, memory=memory_notes, initial_history=tuple(initial_history))
-        if conversation_history is not None:
-            conversation_history.append(_task_snapshot(goal, result, followups))
+            result = loop.run(
+                goal, memory=memory_notes, initial_history=tuple(initial_history),
+                initial_notes=resume["initial_notes"] if resume else None,
+                on_checkpoint=checkpoint)
+        checkpoint(result)
         # Previously recorded actions are context, not newly executed UI activity.
         for record in result.history[len(initial_history):]:
             step_log.append(
                 f"Action: {record.tool}(autonomous) -> Result: {record.observation}")
         final = CANCELLED_MESSAGE if result.status == "cancelled" else result.message
         step_log.append(f"Action: chat(autonomous) -> Result: AI: {final}")
+        return step_log
+    except InterruptedError:
+        result = autonomous_engine.LoopResult("cancelled", 0, CANCELLED_MESSAGE, tuple(initial_history),
+                                             scratchpad_notes=resume["initial_notes"] if resume else {})
+        checkpoint(result)
+        step_log.append(f"Action: chat(cancelled) -> Result: AI: {CANCELLED_MESSAGE}")
         return step_log
     finally:
         _clear_stop_event()
@@ -6131,8 +6313,12 @@ def run_agent_turn(user_input, conversation_history=None, on_step=None,
         return _run_agent_turn_with_trace(
             user_input, [] if conversation_history is None else conversation_history,
             on_step=on_step, stop_event=stop_event)
+    except InterruptedError:
+        return cancelled()
     finally:
         GROUP_MODE = previous_group_mode
+        _clear_stop_event()
+        _clear_turn_route()
         _TURN_LOCK.release()
 
 
@@ -6148,12 +6334,12 @@ def _run_agent_turn_with_trace(user_input, conversation_history, on_step=None,
     lowered = stripped.lower()
     for prefix in ("/task ", "/autonomous "):
         if lowered.startswith(prefix):
-            goal = stripped[len(prefix):].strip()
-            if not goal:
+            goal = user_input.lstrip()[len(prefix):]
+            if not goal.strip():
                 return ["System: /task needs a goal."]
             return _run_autonomous_goal(
                 goal, on_step=on_step, stop_event=stop_event,
-                conversation_history=conversation_history)
+                conversation_history=conversation_history, explicit_resume=True)
     if lowered in ("/task", "/autonomous"):
         return ["System: /task needs a goal."]
 
@@ -6228,28 +6414,48 @@ def _run_agent_turn_with_trace(user_input, conversation_history, on_step=None,
     return step_log
 
 
-def _history_window(conversation_history):
+def _history_window(conversation_history, *, protected_message=None):
+    visible = [line for line in (conversation_history or ()) if not (
+        isinstance(line, str) and line.startswith(_TASK_SNAPSHOT_PREFIX))]
     try:
         import context_compactor
-        return context_compactor.history_window(conversation_history)
+        window = context_compactor.history_window(visible, protected_message=protected_message)
     except Exception:
-        return list(conversation_history or [])[-10:]
+        window = visible[-10:]
+    if protected_message and protected_message not in window:
+        window.insert(0, protected_message)
+    return window
 
 
 def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
                          stop_event=None):
-    # Request setup and bounded tool-call loop.
+    # Request setup and bounded tool-call loop. Cancellation is handled by the
+    # public turn wrapper; do not turn it into a reply or enter recovery here.
+    stop_event = stop_event if stop_event is not None else _current_stop_event()
+    stop_event = stop_event if stop_event is not None else _threading.Event()
+    _raise_if_stopped(stop_event)
+    _set_stop_event(stop_event)
     step_log = _StepLog(on_step)
     last_signature = None
     reset_python_failures()
     _set_turn_route(user_input)
-    stop_event = stop_event or _threading.Event()
-    _set_stop_event(stop_event)
+    _raise_if_stopped(stop_event)
+    checkpoint = _latest_task_checkpoint(conversation_history)
+    task_active = bool(checkpoint and checkpoint.get("status") not in {"success", "completed"})
+    protected_message = checkpoint.get("protected_user_message") if task_active else None
+    if not isinstance(protected_message, str) or not protected_message:
+        protected_message = None
     try:
         import context_compactor
-        conversation_history = context_compactor.compact_history(conversation_history)
+        conversation_history = context_compactor.compact_history(
+            conversation_history, task_active=task_active,
+            protected_user_message=protected_message)
+    except InterruptedError:
+        raise
     except Exception as e:
+        _raise_if_stopped(stop_event)
         print(f"[compactor] skipped: {e}")
+    _raise_if_stopped(stop_event)
     # Force-inject RAG context for content-ish questions
     try:
         from rag_tool import search_documents
@@ -6267,8 +6473,12 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
                     "If the context is irrelevant, ignore it and answer normally.\n\n"
                     f"USER QUESTION: {user_input}"
                 )
+    except InterruptedError:
+        raise
     except Exception as e:
+        _raise_if_stopped(stop_event)
         print(f"[rag auto-inject] skipped: {e}")
+    _raise_if_stopped(stop_event)
     # Detect user pushback — force re-search instead of defending
     pushback_words = (
         "are you sure", "you sure", "really", "wrong", "not right",
@@ -6286,34 +6496,43 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
 
     def _run_queued(action):
         for qa in action.get('_queued_actions', []):
-            if stop_event.is_set():
-                return False
+            _raise_if_stopped(stop_event)
             qtool = qa.get('tool')
             qinp = qa.get('input', '')
             try:
                 qout = execute_tool(qa)
+                _raise_if_stopped(stop_event)
                 if qtool != 'chat':
                     tool_executions_this_turn.append((qtool, qinp, qout))
                 print(f"\n{qout}")
                 step_log.append(f"Action: {qtool}({qinp}) -> Result: {qout}")
+            except InterruptedError:
+                raise
             except Exception as e:
+                _raise_if_stopped(stop_event)
                 step_log.append(f"Action: {qtool}({qinp}) -> ERROR: {e}")
-        return True
-
-    def _log_cancelled():
-        step_log.append(
-            f"Action: chat(cancelled) -> Result: AI: {CANCELLED_MESSAGE}")
+        _raise_if_stopped(stop_event)
 
     def _reply_allowed(reply):
+        _raise_if_stopped(stop_event)
         try:
-            engine = verification_adapter.build_engine(tool_executions_this_turn)
-            return verification_adapter.reply_is_supported(engine, reply)
+            engine = verification_adapter.build_engine(
+                tool_executions_this_turn, stop_event=stop_event)
+            _raise_if_stopped(stop_event)
+            supported = verification_adapter.reply_is_supported(
+                engine, reply, stop_event=stop_event)
+            _raise_if_stopped(stop_event)
+            return supported
+        except InterruptedError:
+            raise
         except Exception:
+            _raise_if_stopped(stop_event)
             traceback.print_exc()
-            return True
+            return False
 
     def _retry_after_rejection():
         nonlocal verification_retries
+        _raise_if_stopped(stop_event)
         if verification_retries < verification_adapter.MAX_RETRIES:
             verification_retries += 1
             step_log.append("System: " + verification_adapter.RETRY_MESSAGE)
@@ -6323,14 +6542,21 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
             + verification_adapter.ERROR_REPLY)
         return False
 
-    for step in range(MAX_STEPS_PER_TURN):
-        if stop_event.is_set():
-            _log_cancelled()
+    work_steps = 0
+    # Grants do not consume work steps, but cannot create an unbounded dialog.
+    decision_limit = max(1, MAX_STEPS_PER_TURN * 3)
+    granted_last = False
+    for decision in range(decision_limit):
+        _raise_if_stopped(stop_event)
+        if work_steps >= MAX_STEPS_PER_TURN:
+            _ran_out_of_steps = True
             break
+        step = work_steps
         step_start = time.time()
-        context = "\n".join(_history_window(conversation_history) + step_log)
+        context = "\n".join(_history_window(
+            conversation_history, protected_message=protected_message) + step_log)
 
-        if step == 0:
+        if decision == 0:
             if is_pushback:
                 next_input = (
                     f"USER IS PUSHING BACK: '{user_input}'.\n"
@@ -6352,11 +6578,17 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
                 f"Only call another tool if you genuinely need more info.\n"
                 f"Reply with plain text (preferred) or a JSON tool call — no 'done' wrapper needed."
             )
+        if granted_last:
+            next_input += (
+                "\nThe requested tool is now available. Continue the original goal "
+                "by performing the needed work; enabling a tool is not completing the task."
+            )
+        granted_last = False
 
+        _raise_if_stopped(stop_event)
         action, error = get_valid_action(next_input, context)
-        if stop_event.is_set():
-            _log_cancelled()
-            break
+        _raise_if_stopped(stop_event)
+        work_steps += 1
         if action is None:
             print(f"\nGiving up this turn: {error}")
             step_log.append(f"System: {error}")
@@ -6383,7 +6615,11 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
             break
 
         if tool == 'request_tool':
-            _ok, message = _grant_requested_tool(inp)
+            _raise_if_stopped(stop_event)
+            granted_last, message = _grant_requested_tool(inp)
+            _raise_if_stopped(stop_event)
+            if granted_last:
+                work_steps -= 1
             print(f"\n[Tool request] {message}")
             step_log.append("System: " + message)
             continue
@@ -6397,10 +6633,9 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
 
         # Special-case: read_screen on step 0 forces a text reply next
         if tool == 'read_screen' and step == 0:
-            if stop_event.is_set():
-                _log_cancelled()
-                break
+            _raise_if_stopped(stop_event)
             output = execute_tool(action)
+            _raise_if_stopped(stop_event)
             tool_executions_this_turn.append((tool, inp, output))
             print(f"\n{output}")
             step_log.append(f"Action: {tool}({inp}) -> Result: {output}")
@@ -6408,13 +6643,9 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
                 f"Original request: '{user_input}'. OCR text of the user's screen is above. "
                 f"Answer the user directly in plain conversational language based on that text."
             )
-            if stop_event.is_set():
-                _log_cancelled()
-                break
+            _raise_if_stopped(stop_event)
             force_action, _ = get_valid_action(force_prompt, "\n".join(step_log))
-            if stop_event.is_set():
-                _log_cancelled()
-                break
+            _raise_if_stopped(stop_event)
             if force_action and force_action.get('tool') == 'chat':
                 final = force_action['input']
                 if not _reply_allowed(final):
@@ -6424,9 +6655,12 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
                 print(f"\nAI: {final}")
                 step_log.append(f"Action: chat(forced) -> Result: AI: {final}")
             else:
+                _raise_if_stopped(stop_event)
                 direct = ask_llm_direct(
-                    f"User asked: {user_input}\n\nScreen text:\n{output}\n\nAnswer:"
+                    f"User asked: {user_input}\n\nScreen text:\n{output}\n\nAnswer:",
+                    stop_event=stop_event,
                 )
+                _raise_if_stopped(stop_event)
                 if not _reply_allowed(direct):
                     if _retry_after_rejection():
                         continue
@@ -6436,13 +6670,10 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
             break
 
         if tool == 'chat':
-            if stop_event.is_set():
-                _log_cancelled()
-                break
+            _raise_if_stopped(stop_event)
             output = execute_tool(action)
-            if not _run_queued(action):
-                _log_cancelled()
-                break
+            _run_queued(action)
+            _raise_if_stopped(stop_event)
             if not _reply_allowed(inp):
                 if _retry_after_rejection():
                     continue
@@ -6451,26 +6682,26 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
             step_log.append(f"Action: chat({inp}) -> Result: {output}")
             break
 
-        if stop_event.is_set():
-            _log_cancelled()
-            break
+        _raise_if_stopped(stop_event)
         output = execute_tool(action)
+        _raise_if_stopped(stop_event)
         tool_executions_this_turn.append((tool, inp, output))
         print(f"\n{output}")
         step_log.append(f"Action: {tool}({inp}) -> Result: {output}")
         print(f"  [step {step+1} took {time.time()-step_start:.1f}s]")
 
         # Run any extra tool calls the LLM packed into the same response
-        if not _run_queued(action):
-            _log_cancelled()
-            break
+        _run_queued(action)
+        _raise_if_stopped(stop_event)
 
         # Otherwise: loop back, feed the tool result to the LLM,
         # let it decide next (usually: wrap the result in a natural reply).
     else:
-        # The for-loop ran to completion without a break: MAX_STEPS_PER_TURN
-        # was exhausted. Flag it so the skill auto-gen hook below fires.
+        # The decision loop ran to completion without a break.
         _ran_out_of_steps = True
+        step_log.append(
+            "System: Decision limit reached without completing the request "
+            "(tool grants and invalid replies are capped per turn).")
 
     # Response-integrity checks: prevent unsupported action claims.
     tool_ran = any(
@@ -6507,7 +6738,8 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
     )
 
     if not has_reply:
-        synthesis_context = "\n".join(_history_window(conversation_history) + step_log)
+        synthesis_context = "\n".join(_history_window(
+            conversation_history, protected_message=protected_message) + step_log)
         fallback_prompt = f"""User asked: "{user_input}"
 
 You got stuck before replying. Using ONLY the real info gathered below — do not invent anything — give the best honest answer you can, in plain text.

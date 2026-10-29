@@ -102,7 +102,27 @@ def _ask_llm(prompt):
     return reply.strip() if _valid(reply) else None
 
 
-def compact_history(history, budget=None):
+def compact_history(history, budget=None, *, task_active=False, protected_user_message=None):
+    """Compact old context, never rewriting an active task's verbatim suffix."""
+    if not task_active or not isinstance(history, list):
+        return _compact_history(history, budget)
+    boundary = None
+    if protected_user_message is not None:
+        boundary = next((i for i in range(len(history) - 1, -1, -1)
+                         if history[i] == protected_user_message), None)
+    if boundary is None:
+        boundary = next((i for i in range(len(history) - 1, -1, -1)
+                         if str(history[i]).startswith("User:")), None)
+    if boundary is None:
+        # Without a task boundary, none of this evidence is safe to summarize.
+        return history
+    prefix, protected = history[:boundary], history[boundary:]
+    _compact_history(prefix, budget)
+    history[:] = prefix + protected
+    return history
+
+
+def _compact_history(history, budget=None):
     """Summarize the oldest 5-10 messages in place; returns the same list."""
     if not isinstance(history, list) or len(history) <= KEEP_RECENT:
         return history
@@ -133,8 +153,17 @@ def compact_history(history, budget=None):
     return history
 
 
-def history_window(history, limit=CONTEXT_WINDOW):
-    """Messages to render in the prompt, keeping the summary in view."""
+def history_window(history, limit=CONTEXT_WINDOW, *, protected_message=None):
+    """Keep the summary and protected suffix, even when they exceed the limit."""
+    if isinstance(history, list) and protected_message is not None:
+        boundary = next((i for i in range(len(history) - 1, -1, -1)
+                         if history[i] == protected_message), None)
+        if boundary is not None:
+            suffix = history[boundary:]
+            if len(suffix) >= limit:
+                if boundary and str(history[0]).startswith(SUMMARY_PREFIX):
+                    return [history[0]] + suffix
+                return suffix
     if not isinstance(history, list) or len(history) <= limit:
         return list(history or [])
     if str(history[0]).startswith(SUMMARY_PREFIX):

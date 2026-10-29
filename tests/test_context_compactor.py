@@ -127,6 +127,42 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(window, history[-20:])
 
 
+class ActiveTaskTests(unittest.TestCase):
+    def test_active_suffix_is_verbatim_and_never_sent_to_summarizer(self):
+        prefix = messages(15)
+        suffix = ["User: current goal EXACT  "] + [f"Agent: evidence {i}" for i in range(30)]
+        history = prefix + suffix
+        with mock.patch.object(cc, "_ask_llm", return_value="old brief") as ask:
+            out = cc.compact_history(history, budget=10, task_active=True)
+        self.assertIs(out, history)
+        self.assertEqual(history[-len(suffix):], suffix)
+        self.assertTrue(history[0].startswith(cc.SUMMARY_PREFIX))
+        self.assertNotIn("current goal EXACT", str(ask.call_args_list))
+        window = cc.history_window(history, limit=5, protected_message=suffix[0])
+        self.assertEqual(window[-len(suffix):], suffix)
+        self.assertEqual(window[0], history[0])
+
+    def test_active_without_user_boundary_fails_safe(self):
+        history = ["Agent: evidence " + "x" * 500] * 20
+        original = list(history)
+        with mock.patch.object(cc, "_ask_llm") as ask:
+            cc.compact_history(history, budget=10, task_active=True)
+        self.assertEqual(history, original)
+        ask.assert_not_called()
+
+    def test_last_user_boundary_not_first_is_protected(self):
+        history = messages(15) + ["User: active", "Agent: result"]
+        with mock.patch.object(cc, "_ask_llm", return_value="brief"):
+            cc.compact_history(history, budget=10, task_active=True)
+        self.assertEqual(history[-2:], ["User: active", "Agent: result"])
+        self.assertLess(len(history), 17)
+
+    def test_protected_window_uses_last_matching_boundary(self):
+        history = ["User: repeated", "Agent: old", "User: repeated"] + ["Agent: new"] * 8
+        self.assertEqual(cc.history_window(history, limit=3, protected_message="User: repeated"),
+                         history[2:])
+
+
 class SummarizerRoutingTests(unittest.TestCase):
     def test_fast_provider_is_preferred(self):
         import agent

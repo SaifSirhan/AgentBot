@@ -5,6 +5,7 @@ Run: python -m unittest tests.test_request_tool -v
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -95,6 +96,57 @@ class RequestToolTests(unittest.TestCase):
                 ({"tool": "chat", "input": "ok"}, None),
             ])
         self.assertIn("blocked in group chats", "\n".join(step_log))
+
+    def test_misspelled_tool_is_granted_with_the_canonical_name(self):
+        agent._ROUTED.allowed = {"chat", "done"}
+        ok, message = agent._grant_requested_tool("web_search")
+        self.assertTrue(ok, message)
+        self.assertEqual(
+            message,
+            "ERROR: Tool 'web_search' not found. "
+            "Did you mean 'search_web'? I have granted it.")
+        self.assertTrue(agent._tool_allowed("search_web"))
+        self.assertFalse(agent._tool_allowed("web_search"))
+
+    def test_typo_and_module_names_map_to_real_catalog_names(self):
+        for requested, canonical in (("type_txt", "type_text"),
+                                     ("serach_web", "search_web"),
+                                     ("weather_news", "weather")):
+            with self.subTest(requested=requested):
+                agent._clear_turn_route()
+                agent._ROUTED.allowed = {"chat", "done"}
+                ok, message = agent._grant_requested_tool(requested)
+                self.assertTrue(ok, message)
+                self.assertIn(f"Did you mean '{canonical}'?", message)
+                self.assertTrue(agent._tool_allowed(canonical))
+
+    def test_blocked_suggestion_does_not_claim_a_grant(self):
+        with mock.patch.object(agent, "GROUP_MODE", True):
+            agent._ROUTED.allowed = {"chat", "done"}
+            ok, message = agent._grant_requested_tool("execute_pythn")
+        self.assertFalse(ok, message)
+        self.assertIn("blocked in group chats", message)
+        self.assertNotIn("I have granted it", message)
+        self.assertFalse(agent._tool_allowed("execute_python"))
+
+    def test_misspelled_request_continues_the_turn_with_the_real_tool(self):
+        step_log, observed = self.run_turn([
+            ({"tool": "request_tool", "input": "web_search"}, None),
+            ({"tool": "chat", "input": "ok"}, None),
+        ])
+        log = "\n".join(step_log)
+        self.assertIn("Did you mean 'search_web'? I have granted it.", log)
+        self.assertIn("search_web", observed["allowed"])
+        self.assertNotIn("web_search", observed["allowed"])
+        self.assertIn("- search_web:", observed["prompt"])
+
+    def test_misspelled_grant_updates_the_autonomous_catalog(self):
+        agent._ROUTED.allowed = {"chat", "done"}
+        agent._ROUTED.autonomous_loop = SimpleNamespace(tools={})
+        ok, message = agent._grant_requested_tool("web_search")
+        self.assertTrue(ok, message)
+        self.assertIn("search_web", agent._ROUTED.autonomous_loop.tools)
+        self.assertNotIn("web_search", agent._ROUTED.autonomous_loop.tools)
 
     def test_granted_tool_is_then_parseable(self):
         agent._set_turn_route("watch a movie")

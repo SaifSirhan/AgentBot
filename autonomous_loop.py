@@ -7,7 +7,7 @@ import os
 import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock
 from typing import Any, Callable, Collection, Mapping, Sequence
@@ -45,6 +45,20 @@ class Scratchpad:
             raise ValueError("Scratchpad holds at most 16 notes; update an existing note")
         self._notes[key] = text
         return "Stored unverified note: " + key
+
+    def export_notes(self):
+        """Return detached, unverified notes suitable for a task checkpoint."""
+        return dict(self._notes)
+
+    def restore_notes(self, notes):
+        """Replace notes atomically, applying the same bounds as writes."""
+        restored = Scratchpad()
+        if notes is not None:
+            if not isinstance(notes, Mapping):
+                raise ValueError("Scratchpad notes must be a mapping")
+            for key, text in notes.items():
+                restored.write(key, text)
+        self._notes = restored.export_notes()
 
     def read(self, id, offset=0, limit=8000):
         if not isinstance(id, str) or not id.startswith("obs-"):
@@ -107,6 +121,7 @@ class LoopResult:
     message: str
     history: tuple[RecordedAction, ...]
     learning_future: Future[Path | None] | None = None
+    scratchpad_notes: dict[str, str] = field(default_factory=dict)
 
 
 class AutonomousLoop:
@@ -167,6 +182,8 @@ class AutonomousLoop:
         *,
         memory: Sequence[str] = (),
         initial_history: Sequence[RecordedAction] = (),
+        initial_notes: Mapping[str, str] | None = None,
+        on_checkpoint: Callable[[LoopResult], None] | None = None,
     ) -> LoopResult:
         history = [
             replace(deepcopy(action), step=index)
@@ -175,11 +192,18 @@ class AutonomousLoop:
         history_offset = len(history)
         self.tools = dict(self._initial_tools)
         self.scratchpad = Scratchpad()
+        self.scratchpad.restore_notes(initial_notes)
         for action in history:
             self.scratchpad.record(action)
         sticky_tools = dict(self.tools)
-        repair_step = None
+        repair_pending = False
+        repair_consumed = False
         repair_history_start = None
+        work_turns = 0
+        step = 0
+        # Grants get separate headroom, but cannot cause an unbounded model loop.
+        max_model_turns = 2 * self.max_steps + 3
+        grant_pending = False
 
         instructions = (
             'Choose exactly one next action: '
@@ -239,12 +263,18 @@ class AutonomousLoop:
             steps: int,
             reason: str,
         ) -> LoopResult:
-            return LoopResult(
+            result = LoopResult(
                 status=status,
                 steps=steps,
                 message=f"{reason}\nCurrent state: {last}",
                 history=tuple(deepcopy(history)),
+                scratchpad_notes=self.scratchpad.export_notes(),
             )
+            if on_checkpoint is not None:
+                on_checkpoint(deepcopy(result))
+            return result
+
+        finish("running", 0, "Task initialized.")
 
         def observe(text: str) -> None:
             nonlocal last
@@ -278,39 +308,44 @@ class AutonomousLoop:
                 return finish("success", step, "Execution and goal checks passed.")
             return None
 
-        for step in range(1, self.max_steps + 3):
+        while True:
             if self.stop_event.is_set():
-                return finish(
-                    "cancelled",
-                    step - 1,
-                    "Stopped by cancellation.",
-                )
+                return finish("cancelled", step, "Stopped by cancellation.")
 
-            if repair_step is not None and step > repair_step:
+            if repair_pending and repair_consumed:
                 if (has_substantive_success(history[repair_history_start:])
                         and not delegation_pending):
-                    checked = check_goal(step - 1)
+                    checked = check_goal(step)
                     if checked is not None:
                         return checked
-                return finish("incomplete", step - 1,
+                return finish("incomplete", step,
                               "Goal remains unmet after one repair step.")
 
-            if step > self.max_steps and repair_step is None:
+            if work_turns >= self.max_steps and not repair_pending:
                 if (not has_substantive_success(history) or delegation_pending
                         or history[-1].tool in CONTROL_TOOLS):
                     break
-                checked = check_goal(step - 1)
+                checked = check_goal(step)
                 if checked is not None:
                     return checked
-                repair_step = step
+                repair_pending = True
                 repair_history_start = len(history)
+
+            if step >= max_model_turns:
+                break
+            step += 1
+            # Invalid replies, DONE, and scratchpad turns retain their old cost.
+            # Only a parsed request_tool action refunds this decision's budget.
+            work_turns += 1
+            if repair_pending:
+                repair_consumed = True
 
             messages.append(
                 {
                     "role": "user",
                     "content": (
                         f"You are at step {step}. "
-                        + ("This is your single repair step. " if step == repair_step else "") +
+                        + ("This is your single repair step. " if repair_pending else "") +
                         f"Your goal is {goal}. "
                         f"Here are the results of your last action: "
                         f"{last}\n"
@@ -337,6 +372,17 @@ class AutonomousLoop:
                     + json.dumps(list(memory), ensure_ascii=False),
                 })
             prompt_messages.extend(messages[max(1, len(messages) - 6):])
+            if grant_pending:
+                prompt_messages.append({
+                    "role": "system",
+                    "content": (
+                        "Tool grant succeeded. The refreshed catalog above is current. "
+                        "Continue the task now: execute the enabled task tool, then "
+                        "continue toward the goal. The grant is not completion and "
+                        "did not consume your work or single repair budget."
+                    ),
+                })
+                grant_pending = False
             try:
                 reply = self.llm(deepcopy(prompt_messages))
 
@@ -393,12 +439,13 @@ class AutonomousLoop:
                         "Execute a task tool successfully before DONE."
                     )
                     continue
-                if repair_step is not None:
+                if repair_pending:
                     continue
                 checked = check_goal(step)
                 if checked is not None:
                     return checked
-                repair_step = step + 1
+                repair_pending = True
+                repair_consumed = False
                 repair_history_start = len(history)
                 continue
 
@@ -424,6 +471,10 @@ class AutonomousLoop:
 
             tool = request["tool"].strip()
             args = request["args"]
+            if tool == "request_tool":
+                work_turns -= 1
+                if repair_pending:
+                    repair_consumed = False
 
             if tool not in self.tools:
                 error = f"Tool '{tool}' is not available this turn."
@@ -562,6 +613,7 @@ class AutonomousLoop:
                         "error, fix the prompt and delegate again."
                     )
             observe(observation_text)
+            finish("running", step, "Action recorded.")
 
             if self.stop_event.is_set():
                 return finish(
@@ -573,13 +625,14 @@ class AutonomousLoop:
             if tool == "request_tool":
                 if not outcome.ok:
                     return finish("error", step, "Tool request failed.")
+                grant_pending = True
                 continue
 
         return finish(
             "step_limit",
-            self.max_steps,
-            f"Stopped after {self.max_steps} steps "
-            "without verified DONE.",
+            step,
+            f"Stopped after {step} model turns "
+            "without verified DONE (work or total-turn limit reached).",
         )
 
 

@@ -45,8 +45,9 @@ class StopSignalTests(unittest.TestCase):
     def test_preset_stop_skips_the_llm_and_returns_the_error(self):
         event = threading.Event()
         event.set()
-        with mock.patch.object(agent, "get_valid_action") as planner:
-            step_log = agent._run_agent_turn_impl("hello", [], stop_event=event)
+        with mock.patch.object(agent, "get_valid_action") as planner, \
+                mock.patch("rag_tool.search_documents", return_value=""):
+            step_log = agent.run_agent_turn("hello", [], stop_event=event)
         planner.assert_not_called()
         self.assertEqual(final_message(step_log), CANCELLED)
 
@@ -58,8 +59,9 @@ class StopSignalTests(unittest.TestCase):
             return {"tool": "read_file", "input": "notes.txt"}, None
 
         with mock.patch.object(agent, "get_valid_action", side_effect=planner), \
+                mock.patch("rag_tool.search_documents", return_value=""), \
                 mock.patch.object(agent, "execute_tool") as execute:
-            step_log = agent._run_agent_turn_impl("hello", [], stop_event=event)
+            step_log = agent.run_agent_turn("hello", [], stop_event=event)
         execute.assert_not_called()
         self.assertEqual(final_message(step_log), CANCELLED)
 
@@ -78,7 +80,7 @@ class StopSignalTests(unittest.TestCase):
             self.assertEqual(agent.run_agent_turn("/task do it", [], stop_event=event),
                              ["ok"])
         run.assert_called_once_with("do it", on_step=None, stop_event=event,
-                                    conversation_history=[])
+                                    conversation_history=[], explicit_resume=True)
 
     def test_autonomous_preset_stop_returns_the_error(self):
         event = threading.Event()

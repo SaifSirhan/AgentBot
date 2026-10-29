@@ -86,7 +86,7 @@ class AutonomousStateTests(unittest.TestCase):
         ):
             with self.subTest(reply=reply):
                 loop = self.loop([
-                    '{"tool":"search_web","args":{}}', "DONE", reply,
+                    '{"tool":"search_web","args":{}}', "DONE", reply, "DONE",
                 ], execute=lambda tool, args, stop: ToolResult(
                     tool != "execute_python", "source or failure"),
                     verify=lambda *args: Verification(False, "Missing document"),
@@ -191,11 +191,12 @@ class AutonomousStateTests(unittest.TestCase):
 
         loop = self.loop([
             '{"tool":"request_tool","args":{"input":"private_tool"}}',
-            "DONE",
+            "DONE", "DONE",
         ], execute=execute, max_steps=1)
         loop.run("First task")
+        second_run_start = len(self.prompts)
         loop.run("Unrelated second task")
-        self.assertNotIn("private_tool", self.prompts[1][0]["content"])
+        self.assertNotIn("private_tool", self.prompts[second_run_start][0]["content"])
 
     def test_scratchpad_write_cannot_overwrite_observations(self):
         loop = self.loop([
@@ -222,6 +223,7 @@ class AutonomousStateTests(unittest.TestCase):
         loop = self.loop([
             '{"tool":"search_web","args":{}}',
             '{"tool":"request_tool","args":{"input":"execute_python"}}',
+            "DONE",  # Grant is free; a completion proposal still costs a turn.
         ], max_steps=2)
         result = loop.run("Search and write")
         self.assertEqual(result.status, "step_limit")

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import traceback
 from collections.abc import Iterable
+from threading import Event
 
 from verification_engine import (
     ERROR_REPLY,
@@ -16,6 +17,7 @@ from verification_engine import (
     ToolSpec,
     VerificationEngine,
     _COMPLETION,
+    _check_cancelled,
 )
 
 RETRY_MESSAGE = (
@@ -148,10 +150,13 @@ def _tool_succeeded(tool, text):
     return bool(text.strip()) and not text.lstrip().lower().startswith("error:")
 
 
-def build_engine(executions: Iterable[tuple[str, object, object]]) -> VerificationEngine:
+def build_engine(executions: Iterable[tuple[str, object, object]],
+                 stop_event: Event | None = None) -> VerificationEngine:
+    _check_cancelled(stop_event)
     tools = {}
     pending = []
     for index, (tool, tool_input, output) in enumerate(executions):
+        _check_cancelled(stop_event)
         actions = _actions_for(tool, _text(tool_input))
         if not actions:
             continue
@@ -167,30 +172,49 @@ def build_engine(executions: Iterable[tuple[str, object, object]]) -> Verificati
             verifiers={action: _verified for action in actions},
         )
         pending.append((key, _text(tool_input)))
-    engine = VerificationEngine(tools)
+    engine = VerificationEngine(tools, stop_event=stop_event)
     for key, tool_input in pending:
+        _check_cancelled(stop_event)
         engine.execute_tool(key, {"tool_input": tool_input})
+    _check_cancelled(stop_event)
     return engine
 
 
-def reply_is_supported(engine: VerificationEngine, reply: str) -> bool:
-    """True when the reply may be sent. Engine faults fail open."""
+def reply_is_supported(engine: VerificationEngine, reply: str,
+                       stop_event: Event | None = None) -> bool:
+    """True when the reply may be sent; faults fail closed, cancellation propagates."""
+    def check():
+        _check_cancelled(stop_event)
+        engine.check_cancelled()
+
     try:
+        check()
         if not isinstance(reply, str):
-            return True
-        if engine.filter_reply(reply) == reply:
+            return False
+        filtered = engine.filter_reply(reply)
+        check()
+        if filtered == reply:
             return True
         claimed = engine.claimed_actions(reply)
-        evidenced = frozenset(
-            action
-            for execution in engine.executions
-            if execution.success and execution.has_output
-            for action in execution.verified_actions
-        )
+        evidenced = set()
+        for execution in engine.executions:
+            check()
+            if execution.success and execution.has_output:
+                evidenced.update(execution.verified_actions)
         enforced = claimed & ENFORCED_ACTIONS
+        check()
         if _COMPLETION.search(VerificationEngine._normalize(reply)):
             return bool(evidenced) and enforced <= evidenced
         return enforced <= evidenced
+    except InterruptedError:
+        raise
     except Exception:
+        # Cancellation wins even when a callback reports a different failure.
+        try:
+            check()
+        except InterruptedError:
+            raise
+        except Exception:
+            pass
         traceback.print_exc()
-        return True
+        return False

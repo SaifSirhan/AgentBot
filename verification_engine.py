@@ -5,6 +5,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from threading import Event
 from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
@@ -168,6 +169,11 @@ class ToolExecution:
     verification_errors: tuple[str, ...]
 
 
+def _check_cancelled(stop_event: Event | None) -> None:
+    if stop_event is not None and stop_event.is_set():
+        raise InterruptedError("Verification cancelled")
+
+
 def _has_output(value: Any) -> bool:
     if value is None or value is False:
         return False
@@ -200,11 +206,15 @@ class VerificationEngine:
         tools: Mapping[str, ToolSpec],
         *,
         expected_actions: Iterable[str] = (),
+        stop_event: Event | None = None,
     ) -> None:
+        self._stop_event = stop_event
+        self.check_cancelled()
         self._turn_id = uuid4().hex
         self._expected_actions = _check_actions(expected_actions)
         copied_tools = {}
         for name, spec in tools.items():
+            self.check_cancelled()
             _check_actions(spec.verifiers)
             copied_tools[name] = ToolSpec(spec.run, MappingProxyType(dict(spec.verifiers)))
         self._tools = MappingProxyType(copied_tools)
@@ -218,7 +228,11 @@ class VerificationEngine:
     def executions(self) -> tuple[ToolExecution, ...]:
         return tuple(self._executions)
 
+    def check_cancelled(self) -> None:
+        _check_cancelled(self._stop_event)
+
     def execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
+        self.check_cancelled()
         arguments_json = "null"
         output_json = "null"
         verified_actions: set[str] = set()
@@ -230,7 +244,9 @@ class VerificationEngine:
                 raise TypeError("Tool arguments must be a JSON object")
             arguments_json = _json_snapshot(arguments)
             spec = self._tools[tool_name]
+            self.check_cancelled()
             result = spec.run(json.loads(arguments_json))
+            self.check_cancelled()
             if not isinstance(result, ToolResult):
                 raise TypeError("Tool adapter must return ToolResult")
             if type(result.success) is not bool:
@@ -241,20 +257,30 @@ class VerificationEngine:
             success = result.success is True and result.error is None
             if success and has_output:
                 for action, verify in spec.verifiers.items():
+                    self.check_cancelled()
                     try:
                         snapshot = ToolResult(True, json.loads(output_json))
-                        if verify(json.loads(arguments_json), snapshot) is True:
+                        verified = verify(json.loads(arguments_json), snapshot)
+                        self.check_cancelled()
+                        if verified is True:
                             verified_actions.add(action)
                         else:
                             verification_errors.append(f"{action}: postcondition not verified")
+                    except InterruptedError:
+                        raise
                     except Exception as exc:
+                        self.check_cancelled()
                         verification_errors.append(f"{action}: {type(exc).__name__}: {exc}")
+        except InterruptedError:
+            raise
         except Exception as exc:
+            self.check_cancelled()
             result = ToolResult(False, None, f"{type(exc).__name__}: {exc}")
             success = False
             has_output = False
             verified_actions.clear()
 
+        self.check_cancelled()
         self._executions.append(ToolExecution(
             turn_id=self._turn_id,
             call_id=uuid4().hex,
@@ -270,6 +296,7 @@ class VerificationEngine:
         return result
 
     def claimed_actions(self, reply: str) -> frozenset[str]:
+        self.check_cancelled()
         text = self._normalize(reply)
         actions = {
             action for action, pattern in _ACTION_PATTERNS.items() if pattern.search(text)
@@ -282,6 +309,7 @@ class VerificationEngine:
         return frozenset(actions)
 
     def filter_reply(self, reply: str) -> str:
+        self.check_cancelled()
         if not isinstance(reply, str):
             return ERROR_REPLY
         actions = self.claimed_actions(reply)
@@ -295,14 +323,13 @@ class VerificationEngine:
         if not required:
             return ERROR_REPLY
 
-        evidenced = frozenset(
-            action
-            for execution in self._executions
-            if execution.turn_id == self._turn_id
-            and execution.success
-            and execution.has_output
-            for action in execution.verified_actions
-        )
+        evidenced = set()
+        for execution in self._executions:
+            self.check_cancelled()
+            if (execution.turn_id == self._turn_id and execution.success
+                    and execution.has_output):
+                evidenced.update(execution.verified_actions)
+        self.check_cancelled()
         return reply if required.issubset(evidenced) else ERROR_REPLY
 
     @staticmethod

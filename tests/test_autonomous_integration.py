@@ -30,7 +30,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
                                return_value=["ok"]) as run:
             self.assertEqual(agent.run_agent_turn("/task save hello", []), ["ok"])
         run.assert_called_once_with("save hello", on_step=None, stop_event=None,
-                                    conversation_history=[])
+                                    conversation_history=[], explicit_resume=True)
 
     def test_task_prefix_forwards_the_stop_event(self):
         import threading
@@ -39,7 +39,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
                                return_value=["ok"]) as run:
             agent.run_agent_turn("/task save hello", [], stop_event=event)
         run.assert_called_once_with("save hello", on_step=None, stop_event=event,
-                                    conversation_history=[])
+                                    conversation_history=[], explicit_resume=True)
 
     def test_empty_task_goal_is_rejected(self):
         result = agent.run_agent_turn("/task", [])
@@ -457,6 +457,7 @@ class AutoRoutingTests(unittest.TestCase):
                     return_value=["FAST"]) as fast:
             result = agent.run_agent_turn("install the adb driver")
         self.assertEqual(result, ["AUTO"])
+        # Auto-routing keeps its legacy strict resume rule; only /task is explicit.
         auto.assert_called_once_with(
             "install the adb driver", on_step=None, stop_event=None,
             conversation_history=[])
@@ -481,7 +482,7 @@ class AutoRoutingTests(unittest.TestCase):
         self.assertEqual(result, ["AUTO"])
         auto.assert_called_once_with(
             "install the adb driver", on_step=None, stop_event=None,
-            conversation_history=[])
+            conversation_history=[], explicit_resume=True)
 
     def test_group_mode_kwarg_skips_auto_routing(self):
         with mock.patch.dict(sys.modules, {"evals": mock.Mock()}), \

@@ -60,8 +60,7 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         self.real_python = self.a.execute_python
         self.stack.enter_context(mock.patch.object(self.a, "note_tool_result"))
         self.stack.enter_context(mock.patch.object(self.a, "_run_agent_turn_impl", return_value=["normal"]))
-        for name in ("save_conversation_history", "load_conversation_history",
-                     "_generate_skill_from_turn", "save_mood"):
+        for name in ("_generate_skill_from_turn", "save_mood"):
             self.stack.enter_context(mock.patch.object(
                 self.a, name, side_effect=AssertionError("Unexpected side effect: " + name)))
         self.stack.enter_context(mock.patch.object(self.a, "MAX_STEPS_PER_TURN", 5))
@@ -89,7 +88,7 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         return [json.loads(line[len(PREFIX):]) for line in history if line.startswith(PREFIX)]
 
     def catalogs(self):
-        return [json.loads(p.split("\n\nUSER:", 1)[0].split("Allowed tools: ", 1)[1])
+        return [json.JSONDecoder().raw_decode(p.split("Allowed tools: ", 1)[1])[0]
                 for p in self.prompts if "Allowed tools: " in p]
 
     def unfinished(self):
@@ -340,13 +339,13 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         self.assertNotIn(SUCCESS, "\n".join(log))
         self.assertEqual(self.snapshots(history)[-1]["history"], [])
 
-    def test_snapshot_is_bounded_and_marks_truncated_evidence(self):
+    def test_snapshot_preserves_full_evidence_without_truncation(self):
         self.search.return_value = "x" * 130000 + SOURCE
         history = ["User: Use search_web to find event"]
         self.run_task("Use search_web to find event", [action("search_web", "event"), "DONE", "DONE"], history)
         snapshot = self.snapshots(history)[-1]
-        self.assertLess(len(history[-1]), 100000)
-        self.assertTrue(snapshot["incomplete"])
+        self.assertEqual(snapshot["history"][0]["observation"], self.search.return_value)
+        self.assertFalse(snapshot["incomplete"])
         self.assertIn("https://example.org/events/um?source=official", history[-1])
 
     def test_router_failure_stops_without_opening_tools(self):
@@ -439,9 +438,13 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         self.screen.assert_called_once()
 
     def test_truncated_snapshot_is_not_restored_as_successful_receipt(self):
-        self.search.return_value = "x" * 130000 + SOURCE
-        history = ["User: Use search_web to find event"]
-        self.run_task("Use search_web to find event", [action("search_web", "event"), "DONE"], history)
+        history = [PREFIX + json.dumps({
+            "version": 1, "goal": "Use search_web to find event", "status": "incomplete",
+            "resumable": True, "incomplete": True, "followups": [],
+            "history": [{"step": 1, "tool": "search_web", "ok": True,
+                         "observation": SOURCE, "arguments": None, "replay_args": None,
+                         "incomplete": True}],
+        })]
         self.prompts.clear()
         self.responses = iter(["DONE"])
         log = self.a.run_agent_turn("continue", history)
@@ -478,6 +481,70 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         self.assertNotIn("screenshot_background", self.catalogs()[1])
         self.assertIn("screenshot_background", self.catalogs()[2])
         self.screen.assert_called_once()
+
+    def test_disk_checkpoint_restores_large_goal_notes_and_full_observations(self):
+        goal = "Use search_web to research this exact table: " + "row|value\n" * 2400
+        output = "evidence:" + "x" * 40000
+        self.search.return_value = output
+        history = ["User: " + goal]
+        with mock.patch.object(self.a, "MAX_STEPS_PER_TURN", 2):
+            self.run_task(goal, [
+                '{"tool":"scratchpad_write","args":{"key":"layout","text":"All rows required"}}',
+                action("search_web", "event"), "DONE"], history)
+        path = Path(self.a._conversation_file())
+        self.assertTrue(path.exists(), "Task exit must checkpoint without a GUI save")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        task = payload["active_task"]
+        self.assertEqual(task["goal"], goal)
+        self.assertEqual(task["scratchpad_notes"], {"layout": "All rows required"})
+        self.assertEqual(task["history"][1]["observation"], output)
+        history.extend(["System: activity"] * 70)
+        self.a.save_conversation_history(history)
+        restored = self.a.load_conversation_history()
+        self.prompts.clear()
+        self.responses = iter(["DONE"])
+        self.a.run_agent_turn("/task continue", restored)
+        self.assertIn(goal, self.prompts[0])
+        self.assertIn("All rows required", self.prompts[0])
+        self.assertIn("obs-2", self.prompts[0])
+
+    def test_running_checkpoint_exists_before_next_model_call(self):
+        history = ["User: Use search_web to find event"]
+        def inspect_checkpoint():
+            payload = json.loads(Path(self.a._conversation_file()).read_text(encoding="utf-8"))
+            self.assertEqual(payload["active_task"]["status"], "running")
+            self.assertEqual(payload["active_task"]["history"][0]["observation"], SOURCE)
+            return "DONE"
+        log = self.run_task("Use search_web to find event", [action("search_web", "event"), inspect_checkpoint], history)
+        self.assertIn(SUCCESS, "\n".join(log))
+
+    def test_explicit_continue_survives_intervening_chat(self):
+        goal, history = self.unfinished()
+        history.append("User: what is the weather?")
+        self.prompts.clear()
+        self.responses = iter([action("execute_python", "print(1)"), "DONE"])
+        self.python.return_value = "Executed successfully."
+        self.a.run_agent_turn("/task continue", history)
+        self.assertTrue(self.prompts)
+        self.assertIn(goal, self.prompts[0])
+
+    def test_previous_spec_is_pinned_across_restart(self):
+        spec = "User: EXACT TABLE: " + "column|value\n" * 2000
+        goal = "Use search_web to build the table I described"
+        history = [spec, "Assistant: Ready", "User: " + goal]
+        self.run_task(goal, [action("search_web", "event"), "DONE"], history)
+        task = self.snapshots(history)[-1]
+        self.assertEqual(task["protected_user_message"], spec)
+        self.assertIn(spec, self.prompts[0])
+        audit = next(p for p in self.prompts if "EVIDENCE_JSON:" in p)
+        self.assertIn(spec, audit)
+
+    def test_empty_conversation_clears_persisted_task(self):
+        self.unfinished()
+        self.a.save_conversation_history([])
+        payload = json.loads(Path(self.a._conversation_file()).read_text(encoding="utf-8"))
+        self.assertIsNone(payload["active_task"])
+        self.assertEqual(self.a.load_conversation_history(), [])
 
 
 if __name__ == "__main__":

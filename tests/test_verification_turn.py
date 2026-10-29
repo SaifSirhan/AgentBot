@@ -99,13 +99,16 @@ class VerificationTurnTests(unittest.TestCase):
         self.assertIn("System: " + agent.verification_adapter.RETRY_MESSAGE, step_log)
         self.assertEqual(final_message(step_log), "The save failed.")
 
-    def test_adapter_fault_fails_open(self):
+    def test_adapter_fault_fails_closed(self):
         with mock.patch.object(agent.verification_adapter, "build_engine",
                                side_effect=RuntimeError("boom")),                 mock.patch.object(agent.traceback, "print_exc"):
-            step_log, _ = self.run_turn([
+            step_log, calls = self.run_turn([
                 ({"tool": "chat", "input": "I saved the file."}, None),
+                ({"tool": "chat", "input": "I couldn't verify the save."}, None),
             ])
-        self.assertEqual(final_message(step_log), "I saved the file.")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("I saved the file.", "\n".join(step_log))
+        self.assertEqual(final_message(step_log), agent.verification_adapter.ERROR_REPLY)
 
     def test_done_tool_claim_is_also_verified(self):
         step_log, calls = self.run_turn([

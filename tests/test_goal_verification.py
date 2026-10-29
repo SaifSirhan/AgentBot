@@ -81,6 +81,132 @@ class GoalVerificationTests(unittest.TestCase):
         self.assertTrue(result.evidence.strip())
         self.assertEqual(self.prompts, [])
 
+    def test_cancellation_at_entry_and_after_auditor(self):
+        from threading import Event
+        stop = Event()
+        verifier = self.verifier("Find the date", stop_event=stop)
+        stop.set()
+        with self.assertRaises(InterruptedError):
+            verifier.verify(())
+        self.assertEqual(self.prompts, [])
+        stop.clear()
+        def audit(prompt):
+            stop.set()
+            return self.reply
+        verifier._call_llm = audit
+        with self.assertRaises(InterruptedError):
+            verifier.verify((action("search_web", "date found"),))
+
+    def test_interruption_during_baseline_and_artifact_reads_propagates(self):
+        verifier = self.verifier()
+        with mock.patch.object(verifier, "_read_file", side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError):
+                self.before_save(verifier)
+        self.before_save(verifier)
+        with mock.patch.object(verifier, "_read_file", side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError):
+                verifier.verify((action(),))
+        self.assertEqual(self.prompts, [])
+
+    def test_resume_preserves_original_hash_and_rechecks_current_docx(self):
+        path = self.workspace / "report.docx"
+        write_docx(path, "Original")
+        verifier = self.verifier()
+        self.before_save(verifier)
+        state = json.loads(json.dumps(verifier.export_state()))
+        write_docx(path, "Updated evidence")
+        resumed = self.verifier()
+        with mock.patch.object(resumed, "_read_file", side_effect=AssertionError("restore must not read")):
+            resumed.restore_state(state)
+        self.before_save(resumed)
+        self.assertEqual(resumed.export_state()["baselines"], state["baselines"])
+        self.assertTrue(resumed.verify((action(),)).achieved)
+        path.write_bytes(b"not a docx")
+        self.assertFalse(resumed.verify((action(),)).achieved)
+
+    def test_restore_rejects_unauthorized_paths_and_retains_baseline_errors(self):
+        verifier = self.verifier()
+        with mock.patch.object(verifier, "_read_file", side_effect=OSError("unreadable")):
+            self.before_save(verifier)
+        state = verifier.export_state()
+        resumed = self.verifier()
+        resumed.restore_state(state)
+        write_docx(self.workspace / "report.docx")
+        self.assertFalse(resumed.verify((action(),)).achieved)
+        state["baselines"][0]["path"] = str(self.root / "outside.docx")
+        with self.assertRaises(ValueError):
+            self.verifier().restore_state(state)
+
+    def test_file_read_and_docx_members_check_cancellation(self):
+        from threading import Event
+        from goal_verification import _inspect_docx
+        stop = Event()
+        verifier = self.verifier(stop_event=stop)
+        path = self.workspace / "report.docx"
+        write_docx(path)
+        data = path.read_bytes()
+        stop.set()
+        with self.assertRaises(InterruptedError):
+            verifier._read_file(path)
+        with self.assertRaises(InterruptedError):
+            _inspect_docx(data, path, stop_event=stop)
+        stop.clear()
+        original = zipfile.ZipExtFile.read
+        def cancel_read(handle, *args, **kwargs):
+            value = original(handle, *args, **kwargs)
+            stop.set()
+            return value
+        with mock.patch.object(zipfile.ZipExtFile, "read", cancel_read):
+            with self.assertRaises(InterruptedError):
+                _inspect_docx(data, path, stop_event=stop)
+
+    def test_cancelled_auditor_error_and_receipt_interruption_propagate(self):
+        from threading import Event
+        stop = Event()
+        verifier = self.verifier("Find the date", stop_event=stop)
+        def audit(prompt):
+            stop.set()
+            raise OSError("transport stopped")
+        verifier._call_llm = audit
+        with self.assertRaises(InterruptedError):
+            verifier.verify((action("search_web", "date found"),))
+        stop.clear()
+        with mock.patch("goal_verification.build_engine", side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError):
+                verifier.verify((action("search_web", "date found"),))
+
+    def test_restored_unchanged_and_missing_baselines(self):
+        path = self.workspace / "report.docx"
+        for existed in (False, True):
+            with self.subTest(existed=existed):
+                path.unlink(missing_ok=True)
+                if existed:
+                    write_docx(path, "Original")
+                verifier = self.verifier()
+                self.before_save(verifier)
+                state = json.loads(json.dumps(verifier.export_state()))
+                resumed = self.verifier()
+                resumed.restore_state(state)
+                self.assertEqual(resumed.export_state(), state)
+                self.assertFalse(resumed.verify((action(),)).achieved)
+                write_docx(path, "New content")
+                self.assertTrue(resumed.verify((action(),)).achieved)
+
+    def test_invalid_restore_is_atomic_and_fails_closed(self):
+        verifier = self.verifier()
+        self.before_save(verifier)
+        original = verifier.export_state()
+        for change in (
+            {"sha256": "not a hash"}, {"error": 5}, {"path": "relative.docx"},
+        ):
+            state = json.loads(json.dumps(original))
+            state["baselines"][0].update(change)
+            with self.assertRaises(ValueError):
+                verifier.restore_state(state)
+            self.assertEqual(verifier.export_state()["baselines"], original["baselines"])
+            self.assertFalse(verifier.verify((action(),)).achieved)
+        self.assertEqual(self.prompts, [])
+
     def test_read_only_goal_uses_auditor_without_mutation_receipts(self):
         result = self.verifier("Find the event date").verify((action(
             "search_web", "https://example.org/event: November 10"),))

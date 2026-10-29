@@ -280,8 +280,8 @@ class EventTurnTests(unittest.TestCase):
             with mock.patch.object(a, "BRAIN_PRIORITY", ["first", "fallback"]), \
                     mock.patch.object(a, "_dispatch_call", return_value="late") as dispatch:
                 for forced in (None, "first"):
-                    self.assertEqual(a._call_llm("event", force_provider=forced),
-                                     a.CANCELLED_MESSAGE)
+                    with self.assertRaises(InterruptedError):
+                        a._call_llm("event", force_provider=forced)
                 dispatch.assert_not_called()
         finally:
             a._clear_stop_event()
@@ -307,8 +307,8 @@ class EventTurnTests(unittest.TestCase):
                     with mock.patch.object(a, "BRAIN_PRIORITY", ["first", "fallback"]), \
                             mock.patch.object(a, "_brain_state", {}), \
                             mock.patch.object(a, "_dispatch_call", side_effect=dispatch):
-                        result = a._call_llm("event")
-                    self.assertEqual(result, a.CANCELLED_MESSAGE)
+                        with self.assertRaises(InterruptedError):
+                            a._call_llm("event")
                     self.assertEqual(calls, ["first"])
                     self.assertEqual(a.LAST_BRAIN, "previous")
                     self.assertEqual(a._LAST_PROVIDER, "previous")
@@ -327,7 +327,7 @@ class EventTurnTests(unittest.TestCase):
         with mock.patch.object(a, "_run_autonomous_goal", return_value=["ok"]) as task:
             self.assertEqual(a.run_agent_turn("/task goal", [], callback, stop), ["ok"])
         task.assert_called_once_with("goal", on_step=callback, stop_event=stop,
-                                     conversation_history=[])
+                                     conversation_history=[], explicit_resume=True)
 
     def test_group_context_restored_on_exception_and_nested_turn(self):
         a = self.agent

@@ -105,19 +105,68 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(self.allowed(
             [("watch_folder", "downloads", "Watching")], "I started watching it."))
 
-    def test_engine_fault_fails_open(self):
-        with mock.patch.object(self.adapter.traceback, "print_exc"):
-            return self._assert_fault_opens()
+    def test_engine_fault_fails_closed_and_interruption_propagates(self):
+        for error in (RuntimeError("boom"), OSError("boom"), InterruptedError("stop")):
+            engine = mock.Mock()
+            engine.filter_reply.side_effect = error
+            with mock.patch.object(self.adapter.traceback, "print_exc"):
+                if isinstance(error, InterruptedError):
+                    with self.assertRaises(InterruptedError):
+                        self.adapter.reply_is_supported(engine, "I saved it.")
+                else:
+                    self.assertFalse(self.adapter.reply_is_supported(engine, "I saved it."))
 
-    def _assert_fault_opens(self):
-        class BrokenEngine:
-            def filter_reply(self, reply):
-                raise RuntimeError("boom")
+    def test_shared_event_cancels_build_and_reply(self):
+        from threading import Event
+        stop = Event()
+        engine = self.adapter.build_engine([], stop_event=stop)
+        stop.set()
+        with self.assertRaises(InterruptedError):
+            self.adapter.build_engine([], stop_event=stop)
+        with self.assertRaises(InterruptedError):
+            self.adapter.reply_is_supported(engine, "Hello")
+        with self.assertRaises(InterruptedError):
+            self.adapter.reply_is_supported(mock.Mock(), "Hello", stop_event=stop)
 
-            def claimed_actions(self, reply):
-                raise RuntimeError("boom")
+    def test_engine_event_cancellation_wins_over_filter_fault(self):
+        from threading import Event
+        stop = Event()
+        engine = self.adapter.build_engine([], stop_event=stop)
+        def fail(reply):
+            stop.set()
+            raise OSError("cancelled filter")
+        with mock.patch.object(engine, "filter_reply", side_effect=fail), \
+                mock.patch.object(self.adapter.traceback, "print_exc"):
+            with self.assertRaises(InterruptedError):
+                self.adapter.reply_is_supported(engine, "Hello")
 
-        self.assertTrue(self.adapter.reply_is_supported(BrokenEngine(), "I saved it."))
+    def test_cancel_between_replayed_executions(self):
+        from threading import Event
+        stop = Event()
+        def executions():
+            yield ("write_file", "one", "ok")
+            stop.set()
+            yield ("write_file", "two", "ok")
+        with self.assertRaises(InterruptedError):
+            self.adapter.build_engine(executions(), stop_event=stop)
+
+    def test_engine_propagates_interruptions_without_success_receipt(self):
+        from verification_engine import VerificationEngine, ToolSpec, ToolResult
+        from threading import Event
+        for phase in ("run", "verify", "set_event"):
+            stop = Event()
+            def interrupt(*args):
+                raise InterruptedError("stop")
+            def verify(*args):
+                stop.set()
+                return True
+            engine = VerificationEngine({"write": ToolSpec(
+                interrupt if phase == "run" else lambda args: ToolResult(True, "ok"),
+                {"save": verify if phase == "set_event" else interrupt},
+            )}, stop_event=stop)
+            with self.assertRaises(InterruptedError):
+                engine.execute_tool("write", {})
+            self.assertEqual(engine.executions, ())
 
     def test_rejection_message_is_the_requested_text(self):
         self.assertEqual(
