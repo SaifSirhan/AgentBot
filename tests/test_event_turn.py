@@ -326,7 +326,8 @@ class EventTurnTests(unittest.TestCase):
         normal.assert_called_once_with("hello", history, on_step=callback, stop_event=stop)
         with mock.patch.object(a, "_run_autonomous_goal", return_value=["ok"]) as task:
             self.assertEqual(a.run_agent_turn("/task goal", [], callback, stop), ["ok"])
-        task.assert_called_once_with("goal", on_step=callback, stop_event=stop)
+        task.assert_called_once_with("goal", on_step=callback, stop_event=stop,
+                                     conversation_history=[])
 
     def test_group_context_restored_on_exception_and_nested_turn(self):
         a = self.agent

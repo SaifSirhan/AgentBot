@@ -29,7 +29,8 @@ class AutonomousIntegrationTests(unittest.TestCase):
         with mock.patch.object(agent, "_run_autonomous_goal",
                                return_value=["ok"]) as run:
             self.assertEqual(agent.run_agent_turn("/task save hello", []), ["ok"])
-        run.assert_called_once_with("save hello", on_step=None, stop_event=None)
+        run.assert_called_once_with("save hello", on_step=None, stop_event=None,
+                                    conversation_history=[])
 
     def test_task_prefix_forwards_the_stop_event(self):
         import threading
@@ -37,7 +38,8 @@ class AutonomousIntegrationTests(unittest.TestCase):
         with mock.patch.object(agent, "_run_autonomous_goal",
                                return_value=["ok"]) as run:
             agent.run_agent_turn("/task save hello", [], stop_event=event)
-        run.assert_called_once_with("save hello", on_step=None, stop_event=event)
+        run.assert_called_once_with("save hello", on_step=None, stop_event=event,
+                                    conversation_history=[])
 
     def test_empty_task_goal_is_rejected(self):
         result = agent.run_agent_turn("/task", [])
@@ -57,7 +59,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
             self.assertFalse(agent._autonomous_judge("goal", history).achieved)
         with mock.patch.object(
                 agent, "ask_llm_direct",
-                return_value='{"achieved": true, "evidence": "typed hello"}'):
+                return_value='{"goal_met": true, "reason": "typed hello"}'):
             verdict = agent._autonomous_judge("goal", history)
         self.assertTrue(verdict.achieved)
         self.assertEqual(verdict.evidence, "typed hello")
@@ -67,7 +69,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
             '{"tool": "request_tool", "input": "type_text"}',
             '{"tool": "type_text", "args": {"input": "hello"}}',
             "DONE",
-            '{"achieved": true, "evidence": "typed hello"}',
+            '{"goal_met": true, "reason": "typed hello"}',
         ])
         calls = []
 
@@ -82,7 +84,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
 
         self.assertIn(("type_text", "hello"), calls)
         joined = "\n".join(step_log)
-        self.assertIn("Goal independently verified", joined)
+        self.assertIn("Execution and goal checks passed", joined)
         self.assertIn("typed hello", joined)
 
     def test_group_mode_blocks_an_unsafe_requested_tool(self):
@@ -105,7 +107,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
             '{"tool":"request_tool","input":" screenshot_background "}',
             '{"tool":"screenshot_background","input":""}',
             "DONE",
-            '{"achieved":true,"evidence":"captured screen"}',
+            '{"goal_met":true,"reason":"captured screen"}',
         ])
         prompts = []
 
@@ -122,7 +124,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
         catalog = json.loads(system.split("Allowed tools: ", 1)[1])
         self.assertIn("screenshot_background", catalog)
         execute.assert_called_once_with({"tool": "screenshot_background", "input": ""})
-        self.assertIn("Goal independently verified", "\n".join(step_log))
+        self.assertIn("Execution and goal checks passed", "\n".join(step_log))
 
     def test_done_after_grant_does_not_verify_or_finish_the_goal(self):
         replies = iter([
@@ -138,7 +140,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
             step_log = agent._run_autonomous_goal("check my battery health")
         execute.assert_called_once()
         judge.assert_called_once()
-        self.assertIn("Goal independently verified", "\n".join(step_log))
+        self.assertIn("Execution and goal checks passed", "\n".join(step_log))
 
     def test_delegation_requires_a_terminal_observation_before_done(self):
         replies = iter([
@@ -178,7 +180,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
         self.assertEqual(calls[0]["goal"], "Server running")
         self.assertIn("NEXT REQUIRED STEP", prompts[1])
         self.assertIn("analyze_screenshot", prompts[1])
-        self.assertIn("Goal independently verified", "\n".join(step_log))
+        self.assertIn("Execution and goal checks passed", "\n".join(step_log))
 
     def test_failed_delegation_cannot_reach_verification(self):
         replies = iter([
@@ -196,7 +198,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
                 "build a localhost server for a todo app")
 
         judge.assert_not_called()
-        self.assertNotIn("Goal independently verified", "\n".join(step_log))
+        self.assertNotIn("Execution and goal checks passed", "\n".join(step_log))
 
     def test_probe_text_without_success_marker_keeps_delegation_pending(self):
         replies = iter([
@@ -318,7 +320,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
                                   agent.autonomous_engine.Verification(True, "incorrect")) as judge:
             step_log = agent._run_autonomous_goal("check battery health")
         judge.assert_not_called()
-        self.assertNotIn("Goal independently verified", "\n".join(step_log))
+        self.assertNotIn("Execution and goal checks passed", "\n".join(step_log))
 
     def test_judge_does_not_count_grants_as_successful_work(self):
         history = (
@@ -326,7 +328,7 @@ class AutonomousIntegrationTests(unittest.TestCase):
             RecordedAction(2, "check_battery_health", False, "ERROR: powercfg failed"),
         )
         with mock.patch.object(agent, "ask_llm_direct", return_value=
-                               '{"achieved":true,"evidence":"incorrect"}') as llm:
+                               '{"goal_met":true,"reason":"incorrect"}') as llm:
             verdict = agent._autonomous_judge("check battery health", history)
         self.assertFalse(verdict.achieved)
         llm.assert_not_called()
@@ -340,13 +342,12 @@ class AutonomousIntegrationTests(unittest.TestCase):
         )
         with mock.patch.object(
                 agent, "ask_llm_direct",
-                return_value='{"achieved":false,"evidence":"still building"}') as llm:
+                return_value='{"goal_met":false,"reason":"still building"}') as llm:
             verdict = agent._autonomous_judge("build a server", history)
 
-        prompt = llm.call_args.args[0]
-        self.assertIn("Server running", prompt)
-        self.assertIn("Build successful", prompt)
-        self.assertIn("Prompt sent to Qoder IDE", prompt)
+        llm.assert_not_called()
+        self.assertIn("Server running", verdict.evidence)
+        self.assertIn("Build successful", verdict.evidence)
         self.assertFalse(verdict.achieved)
 
     def test_unrequestable_tool_reports_exact_error_without_json(self):
@@ -428,7 +429,8 @@ class AutoRoutingTests(unittest.TestCase):
                 "install the adb driver")
         self.assertEqual(result, ["AUTO"])
         auto.assert_called_once_with(
-            "install the adb driver", on_step=None, stop_event=None)
+            "install the adb driver", on_step=None, stop_event=None,
+            conversation_history=None)
 
     def test_simple_and_conversational_requests_do_not_auto_route(self):
         for request in ("hello", "open notepad", "what's the weather"):
@@ -456,7 +458,8 @@ class AutoRoutingTests(unittest.TestCase):
             result = agent.run_agent_turn("install the adb driver")
         self.assertEqual(result, ["AUTO"])
         auto.assert_called_once_with(
-            "install the adb driver", on_step=None, stop_event=None)
+            "install the adb driver", on_step=None, stop_event=None,
+            conversation_history=[])
         fast.assert_not_called()
 
     def test_run_agent_turn_keeps_simple_requests_fast(self):
@@ -477,7 +480,8 @@ class AutoRoutingTests(unittest.TestCase):
             result = agent.run_agent_turn("/task install the adb driver")
         self.assertEqual(result, ["AUTO"])
         auto.assert_called_once_with(
-            "install the adb driver", on_step=None, stop_event=None)
+            "install the adb driver", on_step=None, stop_event=None,
+            conversation_history=[])
 
     def test_group_mode_kwarg_skips_auto_routing(self):
         with mock.patch.dict(sys.modules, {"evals": mock.Mock()}), \
