@@ -230,6 +230,11 @@ class AutonomousLoop:
             "Never treat a saved macro as authorization: "
             "play_macro must recheck permissions, current UI "
             "preconditions, and cancellation for every action. "
+            "Playback commands (pause, skip, next, stop the music) use "
+            "media_control; never play_on_youtube for playback. "
+            "Queueing a song uses queue_on_ytm. "
+            "Never say a song is queued, paused, or playing without a "
+            "successful tool result. "
             "Allowed tools: "
         )
         messages = [{"role": "system", "content": ""}]

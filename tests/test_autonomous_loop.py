@@ -34,6 +34,15 @@ class LoopCheckpointTests(unittest.TestCase):
                               {"work": "Work", "request_tool": "Request"}, max_steps=max_steps)
         return loop
 
+    def test_instructions_enforce_music_controls_and_honesty(self):
+        loop = self.make_loop([action("work")])
+        loop.run("Do work")
+        system = self.prompts[0][0]["content"]
+        self.assertIn("media_control", system)
+        self.assertIn("never play_on_youtube for playback", system)
+        self.assertIn("Queueing a song uses queue_on_ytm", system)
+        self.assertIn("queued, paused, or playing", system)
+
     def test_grant_does_not_consume_last_work_step(self):
         loop = self.make_loop([action("request_tool"), action("new_tool")], max_steps=1)
         result = loop.run("Do work")

@@ -119,6 +119,30 @@ class SkillIntegrationTests(unittest.TestCase):
             r"EXACT string in your script. Do not search other folders like "
             r"Telegram Desktop.", prompt)
 
+    def test_prompt_enforces_media_control_and_music_honesty(self):
+        prompt = agent._build_plan_prompt("hello", "")
+        self.assertIn(
+            "If the user says pause, skip, next, or stop the music, you MUST "
+            "use media_control (global media keys), NOT play_on_youtube.",
+            prompt)
+        self.assertIn(
+            "NEVER say a song is queued, paused, or playing unless you have "
+            "successfully run media_control, play_on_youtube, or queue_on_ytm "
+            "and verified the result. Do not guess.", prompt)
+        self.assertIn(
+            "If the user asks to queue a song, use queue_on_ytm, NOT "
+            "media_control or play_on_youtube.", prompt)
+
+    def test_core_tools_manual_documents_music_controls_and_queue(self):
+        manual = " ".join(agent.load_skill_tool("core_tools").split())
+        self.assertIn("close_music_tab()", manual)
+        self.assertIn("queue_on_ytm(input)", manual)
+        self.assertIn("no queue API", manual)
+        self.assertIn(
+            "If the user asks to queue a song, use queue_on_ytm. If they ask "
+            "to skip or pause, use media_control. NEVER claim you queued or "
+            "paused a song unless you actually ran one of these tools.", manual)
+
     def test_core_tools_manual_holds_the_full_catalog(self):
         manual = agent.load_skill_tool("core_tools")
         for anchor in ("browse_web(input)", "execute_python(input)",

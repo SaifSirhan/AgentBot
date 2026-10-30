@@ -4553,6 +4553,18 @@ def _cdp_playwright():
     return sync_playwright
 
 
+def _music_tab(browser):
+    """Return the first live music.youtube.com page, or None."""
+    for context in browser.contexts:
+        for page in context.pages:
+            try:
+                if "music.youtube.com" in page.url:
+                    return page
+            except Exception:
+                continue
+    return None
+
+
 def _play_in_music_tab(url):
     """Hand ``url`` to an existing music.youtube.com tab over CDP.
 
@@ -4564,20 +4576,8 @@ def _play_in_music_tab(url):
         with _cdp_playwright()() as p:
             browser = p.chromium.connect_over_cdp(
                 OPERA_CDP_ENDPOINT, timeout=5000)
-
-            page = None
             contexts = list(browser.contexts)
-            for context in contexts:
-                for candidate in context.pages:
-                    try:
-                        candidate_url = candidate.url
-                    except Exception:
-                        continue
-                    if "music.youtube.com" in candidate_url:
-                        page = candidate
-                        break
-                if page is not None:
-                    break
+            page = _music_tab(browser)
 
             status = "reused"
             if page is None:
@@ -4628,9 +4628,68 @@ def play_on_youtube(query):
     play_url = f"https://music.youtube.com/watch?v={video_id}&autoplay=1"
     status = _play_in_music_tab(play_url)
     if status is None:
-        return _open_in_new_tab(play_url, label=f"Playing: {query}")
+        return _open_in_new_tab(play_url, label=f"Requested playback: {query}")
     where = "existing" if status == "reused" else "new"
-    return f"Playing in {where} YouTube Music tab: {query}"
+    return f"Requested playback in the {where} YouTube Music tab: {query}"
+
+
+def close_music_tab():
+    """Close one music.youtube.com tab over CDP; never guess a window title."""
+    try:
+        with _cdp_playwright()() as p:
+            browser = p.chromium.connect_over_cdp(
+                OPERA_CDP_ENDPOINT, timeout=5000)
+            page = _music_tab(browser)
+            if page is None:
+                return "ERROR: No music.youtube.com tab is open in Opera."
+            page.close()
+            if not page.is_closed():
+                return "ERROR: The music.youtube.com tab did not close."
+            return "Closed the music.youtube.com tab."
+    except Exception as e:
+        return f"ERROR: Could not close the YouTube Music tab: {e}"
+
+
+def queue_on_ytm(song_name):
+    """Queue the first YouTube Music search result through the Opera UI."""
+    import urllib.parse
+    query = (song_name or "").strip()
+    if not query:
+        return "ERROR: queue_on_ytm needs a song name."
+    stage = "connect to Opera"
+    try:
+        with _cdp_playwright()() as p:
+            browser = p.chromium.connect_over_cdp(
+                OPERA_CDP_ENDPOINT, timeout=5000)
+            page = _music_tab(browser)
+            if page is None:
+                contexts = list(browser.contexts)
+                page = (contexts[0].new_page() if contexts
+                        else browser.new_context().new_page())
+            stage = "open the YouTube Music search"
+            page.goto(
+                "https://music.youtube.com/search?q="
+                + urllib.parse.quote_plus(query),
+                wait_until="domcontentloaded", timeout=15000)
+            page.bring_to_front()
+            stage = "find the first search result"
+            row = page.locator("ytmusic-responsive-list-item-renderer").first
+            if row.count() == 0:
+                row = page.locator("ytmusic-two-row-item-renderer").first
+            row.wait_for(state="visible", timeout=10000)
+            stage = "open the three-dot menu"
+            row.locator("ytmusic-menu-renderer").first.click(timeout=5000)
+            stage = "click Add to queue"
+            page.locator("ytmusic-menu-popup-renderer").get_by_text(
+                "Add to queue", exact=True).first.click(timeout=5000)
+            stage = "confirm the queue update"
+            page.get_by_text(
+                "Added to queue", exact=True).first.wait_for(
+                    state="visible", timeout=5000)
+            return f"Queued '{query}' on YouTube Music."
+    except Exception as e:
+        return (f"ERROR: queue_on_ytm failed while trying to {stage}: "
+                f"{type(e).__name__}: {e}")
 
 
 def get_video_links(query):
@@ -5058,7 +5117,11 @@ Humor is seasoning, not the meal: 90% of replies are just replies.
 # production (claimed a translation that never ran; lost the user's exact path).
 CORE_RULES = r"""NEVER tell the user a task is Done, Saved, Translated, or Opened unless you have just received a successful tool result confirming it. If you haven't run execute_python and seen the result, you haven't done the task.
 
-When a user provides an exact absolute file path (e.g., C:\Users\USER\Downloads\Log Intern.docx), you must use that EXACT string in your script. Do not search other folders like Telegram Desktop."""
+When a user provides an exact absolute file path (e.g., C:\Users\USER\Downloads\Log Intern.docx), you must use that EXACT string in your script. Do not search other folders like Telegram Desktop.
+
+If the user says pause, skip, next, or stop the music, you MUST use media_control (global media keys), NOT play_on_youtube.
+If the user asks to queue a song, use queue_on_ytm, NOT media_control or play_on_youtube.
+NEVER say a song is queued, paused, or playing unless you have successfully run media_control, play_on_youtube, or queue_on_ytm and verified the result. Do not guess."""
 
 # ---------------------------
 # TOOL REGISTRY
@@ -5066,7 +5129,7 @@ When a user provides an exact absolute file path (e.g., C:\Users\USER\Downloads\
 VALID_TOOLS = {
     "chat", "search_web", "serp_search", "show_last_result", "read_and_summarize",
     "google_search_and_open", "youtube_search", "get_video_links",
-    "play_on_youtube", "stream_media",
+    "play_on_youtube", "queue_on_ytm", "close_music_tab", "stream_media",
     "open_app", "open_website", "run_command", "execute_python", "make_folder",
     "find_and_open_folder", "write_file", "read_file",
     "set_reminder", "remember", "forget", "read_screen",
@@ -5750,6 +5813,8 @@ def _execute_tool_impl(action):
     elif tool == 'youtube_search':         return youtube_search(inp)
     elif tool == 'get_video_links':        return get_video_links(inp)
     elif tool == 'play_on_youtube':        return play_on_youtube(inp)
+    elif tool == 'queue_on_ytm':           return queue_on_ytm(inp)
+    elif tool == 'close_music_tab':        return close_music_tab()
     elif tool == 'stream_media':           return stream_media(inp)
     elif tool == 'set_reminder':           return set_reminder(inp)
     elif tool == 'set_reminder_at':        return set_reminder_at(inp)
