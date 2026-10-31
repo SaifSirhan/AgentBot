@@ -27,6 +27,7 @@ import watcher
 import gmail_tool
 import scheduler
 import memory
+from tool_registry import InputValidationError, ToolRegistry, ToolSpec
 import screen
 import security_tools
 import air_quality as air_quality_tool
@@ -5696,6 +5697,186 @@ def edit_docx_safe(input_value):
     return office_editor.safe_edit_docx(filepath, action, data)
 
 
+def _input_string(min_length=0, max_length=None, pattern=None):
+    schema = {"type": "string"}
+    if min_length:
+        schema["minLength"] = min_length
+    if max_length is not None:
+        schema["maxLength"] = max_length
+    if pattern:
+        schema["pattern"] = pattern
+    return schema
+
+
+def _write_file_tool(input_str, folder=None):
+    if '|' in input_str:
+        filename, content = input_str.split('|', 1)
+    else:
+        filename, content = input_str, ""
+    return write_file(filename, content, folder)
+
+
+def _current_time_tool(_input=""):
+    return current_time()
+
+
+def _build_tool_registry():
+    """Register the migrated core tools. Everything else stays legacy."""
+    registry = ToolRegistry()
+    specs = (
+        ToolSpec(
+            name="execute_python",
+            description=(
+                "Run a Python script in a fresh interpreter and return "
+                "its output."),
+            input_schema=_input_string(min_length=1),
+            effect_class="system_control",
+            timeout=120,
+            func=execute_python,
+        ),
+        ToolSpec(
+            name="open_app",
+            description="Launch a desktop app or a known web app by name.",
+            input_schema=_input_string(min_length=1),
+            effect_class="system_control",
+            timeout=20,
+            func=open_app,
+        ),
+        ToolSpec(
+            name="search_web",
+            description="Search the live web and return real result URLs.",
+            input_schema=_input_string(min_length=1),
+            effect_class="read_only",
+            timeout=45,
+            func=search_web,
+        ),
+        ToolSpec(
+            name="read_file",
+            description="Read a text file from an exact path.",
+            input_schema=_input_string(min_length=1),
+            effect_class="read_only",
+            timeout=15,
+            func=read_file,
+        ),
+        ToolSpec(
+            name="write_file",
+            description=(
+                "Create or overwrite a file; input is 'filename|content'."),
+            input_schema=_input_string(min_length=1),
+            effect_class="write",
+            timeout=15,
+            func=_write_file_tool,
+        ),
+        ToolSpec(
+            name="click_coordinates",
+            description=(
+                "Hide the GUI, focus the target window, and click at 'x,y'."),
+            input_schema=_input_string(
+                min_length=1,
+                pattern=(
+                    r"^\s*-?\d+\s*(?:,|\s)\s*-?\d+"
+                    r"\s*(?:\|.*)?$")),
+            effect_class="system_control",
+            timeout=20,
+            func=click_coordinates,
+        ),
+        ToolSpec(
+            name="type_text",
+            description=(
+                "Type text into the focused window; append '{enter}' "
+                "to submit."),
+            input_schema=_input_string(min_length=1),
+            effect_class="system_control",
+            timeout=30,
+            func=type_text,
+        ),
+        ToolSpec(
+            name="screenshot_background",
+            description=(
+                "Hide the GUI, focus an optional window, and describe "
+                "a screenshot."),
+            input_schema=_input_string(),
+            effect_class="system_control",
+            timeout=90,
+            func=screenshot_background,
+        ),
+        ToolSpec(
+            name="find_files",
+            description=(
+                "Find files by name with 'folder|pattern1,pattern2'."),
+            input_schema=_input_string(min_length=1),
+            effect_class="read_only",
+            timeout=30,
+            func=find_files,
+        ),
+        ToolSpec(
+            name="patch_file",
+            description=(
+                "Surgical SEARCH/REPLACE edit: "
+                "'path|||old_text|||new_text'."),
+            input_schema=_input_string(
+                min_length=1, pattern=r"\|{3}[\s\S]*\|{3}"),
+            effect_class="write",
+            timeout=20,
+            func=patch_file,
+        ),
+        ToolSpec(
+            name="weather",
+            description="Current weather and forecast for a location.",
+            input_schema=_input_string(),
+            effect_class="read_only",
+            timeout=20,
+            func=weather,
+        ),
+        ToolSpec(
+            name="news",
+            description="Current headlines, optionally 'category|count'.",
+            input_schema=_input_string(),
+            effect_class="read_only",
+            timeout=20,
+            func=news,
+        ),
+        ToolSpec(
+            name="current_time",
+            description="Return the real current date and time.",
+            input_schema=_input_string(max_length=0),
+            effect_class="read_only",
+            timeout=5,
+            func=_current_time_tool,
+        ),
+        ToolSpec(
+            name="remember",
+            description="Save a lasting personal fact.",
+            input_schema=_input_string(min_length=1),
+            effect_class="write",
+            timeout=10,
+            func=remember_fact,
+        ),
+        ToolSpec(
+            name="telegram_user_send",
+            description=(
+                "Send a Telegram message as the user: 'Contact|message'."),
+            input_schema=_input_string(
+                min_length=3, pattern=r"^[^|]+\|[\s\S]+$"),
+            effect_class="system_control",
+            timeout=20,
+            func=telegram_user_send,
+        ),
+    )
+    for spec in specs:
+        registry.register(spec)
+    return registry
+
+
+TOOL_REGISTRY = _build_tool_registry()
+
+
+def _live_tool_func(func):
+    """Resolve through module globals so monkeypatching still takes effect."""
+    live = globals().get(getattr(func, "__name__", ""))
+    return live if callable(live) else func
+
+
 def _execute_tool_impl(action):
     tool = action.get('tool')
     inp = action.get('input', '')
@@ -5710,6 +5891,17 @@ def _execute_tool_impl(action):
         return (f"ERROR: Tool '{tool}' is disabled in group chats. "
                 f"You can only use: {', '.join(sorted(SAFE_GROUP_TOOLS))}. "
                 f"If the user wants PC control, tell them to DM the bot directly.")
+
+    spec = TOOL_REGISTRY.get(tool)
+    if spec is not None:
+        try:
+            spec.validate(inp)
+        except InputValidationError:
+            expected = json.dumps(spec.input_schema, sort_keys=True)
+            return f"ERROR: Invalid input for {tool}. Expected {expected}."
+        if tool == "write_file":
+            return _live_tool_func(spec.func)(inp, folder)
+        return _live_tool_func(spec.func)(inp)
 
     if tool == 'chat':                     return f"AI: {inp}"
     elif tool == 'google_search_and_open': return google_search_and_open(inp)
