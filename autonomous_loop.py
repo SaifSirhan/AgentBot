@@ -193,7 +193,8 @@ class AutonomousLoop:
         self.wall_clock_timeout = float(wall_clock_timeout)
         self.loop_guard = LoopGuard(
             registry=tool_registry,
-            polling_tools=frozenset(CONTROL_TOOLS) | probes | polling,
+            polling_tools=probes | polling,
+            exempt_tools=CONTROL_TOOLS,
         )
 
     def run(

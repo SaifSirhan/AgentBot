@@ -42,12 +42,12 @@ class LoopGuardTests(unittest.TestCase):
             guard.record("flaky", "same input", "same error")
         self.assertEqual(guard.check("flaky", "same input"), "BLOCK")
 
-    def test_three_outcomes_that_differ_warn_instead_of_blocking(self):
+    def test_three_identical_inputs_block_even_when_outputs_differ(self):
         guard = LoopGuard()
         for index in range(3):
             self.assertEqual(guard.check("flaky", "same input"), "PASS")
             guard.record("flaky", "same input", f"error {index}")
-        self.assertEqual(guard.check("flaky", "same input"), "WARN")
+        self.assertEqual(guard.check("flaky", "same input"), "BLOCK")
 
     def test_different_inputs_do_not_count_together(self):
         guard = LoopGuard()
@@ -56,12 +56,33 @@ class LoopGuardTests(unittest.TestCase):
             guard.record("flaky", value, "same error")
         self.assertEqual(guard.check("flaky", "d"), "PASS")
 
-    def test_polling_tools_always_pass(self):
+    def test_alternating_pairs_block_the_proposed_sixth_action(self):
+        guard = LoopGuard()
+        for tool, value in (
+                ("alpha", "1"), ("beta", "2"),
+                ("alpha", "1"), ("beta", "2"),
+                ("alpha", "1")):
+            self.assertEqual(guard.check(tool, value), "PASS")
+            guard.record(tool, value, "ok")
+
+        self.assertEqual(guard.check("beta", "2"), "BLOCK")
+        self.assertEqual(guard.check("gamma", "3"), "PASS")
+
+    def test_five_consecutive_polling_calls_pass_and_the_sixth_blocks(self):
         registry = polling_registry("poll_tool")
         guard = LoopGuard(registry=registry)
         for _ in range(5):
             self.assertEqual(guard.check("poll_tool", "now"), "PASS")
             guard.record("poll_tool", "now", "same state")
+        self.assertEqual(guard.check("poll_tool", "now"), "BLOCK")
+
+    def test_other_work_resets_the_polling_streak(self):
+        registry = polling_registry("poll_tool")
+        guard = LoopGuard(registry=registry)
+        for _ in range(5):
+            guard.record("poll_tool", "now", "same state")
+        guard.record("work", "1", "done")
+        self.assertEqual(guard.check("poll_tool", "now"), "PASS")
 
     def test_identical_actions_leave_the_window_after_enough_other_work(self):
         guard = LoopGuard()
