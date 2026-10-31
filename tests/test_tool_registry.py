@@ -198,5 +198,51 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
         self.assertEqual(result, "now")
 
 
+class PromptCatalogIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import agent
+        import prompt_catalog
+        import prompt_router
+
+        cls.agent = agent
+        cls.prompt_router = prompt_router
+        cls.tools = prompt_catalog.build_tools(frozenset(agent.VALID_TOOLS))
+
+    def route(self, request):
+        return self.prompt_router.build_dynamic_prompt(
+            request,
+            self.tools,
+            count_tokens=lambda text: len(text) // 4,
+            max_tokens=20000,
+            tool_registry=self.agent.TOOL_REGISTRY,
+        )
+
+    def line_for(self, prompt, name):
+        return next(
+            line for line in prompt.splitlines()
+            if line.startswith(f"- {name}:"))
+
+    def test_execute_python_prompt_line_includes_the_registry_schema(self):
+        result = self.route("use execute_python to run this")
+        line = self.line_for(result.system_prompt, "execute_python")
+        self.assertIn('"minLength": 1', line)
+        self.assertIn('"type": "string"', line)
+
+    def test_unregistered_tools_keep_their_old_description(self):
+        result = self.route("use make_folder to create a folder")
+        line = self.line_for(result.system_prompt, "make_folder")
+        self.assertNotIn("input:", line)
+        self.assertIn("Create a folder.", line)
+
+    def test_agent_route_prompt_uses_the_registry_and_stays_in_budget(self):
+        prompt, _selected = self.agent._route_prompt(
+            "use execute_python to write a python script")
+        self.assertIn("- execute_python:", prompt)
+        self.assertIn('"type": "string"', prompt)
+        self.assertLessEqual(
+            len(prompt) // 4, self.agent.MAX_PROMPT_TOKENS)
+
+
 if __name__ == "__main__":
     unittest.main()

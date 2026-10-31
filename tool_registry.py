@@ -181,6 +181,12 @@ class ToolSpec:
     def validate(self, value: Any) -> None:
         validate_input(self.input_schema, value)
 
+    def catalog_description(self) -> str:
+        """Schema-bearing description shared by the prompt and catalog."""
+        schema = json.dumps(self.input_schema, sort_keys=True)
+        return (f"[{self.effect_class}, {self.timeout}s] "
+                f"{self.description} input: {schema}")
+
 
 class ToolRegistry:
     """Name-keyed ToolSpec collection with prompt-catalog generation."""
@@ -198,6 +204,10 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolSpec | None:
         return self._specs.get(name)
+
+    def describe(self, name: str) -> str | None:
+        spec = self.get(name)
+        return spec.catalog_description() if spec is not None else None
 
     def __contains__(self, name: str) -> bool:
         return name in self._specs
@@ -217,8 +227,5 @@ class ToolRegistry:
         """Prompt-ready catalog, one bullet per migrated tool."""
         lines = []
         for spec in self.specs:
-            schema = json.dumps(spec.input_schema, sort_keys=True)
-            lines.append(
-                f"- {spec.name} [{spec.effect_class}, {spec.timeout}s]: "
-                f"{spec.description} input: {schema}")
+            lines.append(f"- {spec.name} {spec.catalog_description()}")
         return "\n".join(lines)

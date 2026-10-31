@@ -1324,6 +1324,8 @@ def _route_prompt(user_request):
         max_tokens=MAX_PROMPT_TOKENS,
         reserve_tokens=200,
         fallback_tools=prompt_catalog.FALLBACK_TOOLS,
+        # Built later in this module; looked up when routing runs.
+        tool_registry=TOOL_REGISTRY,
     )
     selected = list(routed.tools)
     prompt = routed.system_prompt.replace(
