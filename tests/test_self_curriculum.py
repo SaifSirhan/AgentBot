@@ -81,6 +81,21 @@ class CurriculumTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.quarantine = Path(self.tmp.name) / "quarantine"
 
+    def write_solved_entry(self, name, *, challenge=None, skill_name=None):
+        entry = self.quarantine / name
+        entry.mkdir(parents=True)
+        if challenge is not None:
+            (entry / "metadata.json").write_text(
+                json.dumps({"challenge": challenge}), encoding="utf-8")
+        if skill_name is not None:
+            (entry / "SKILL.md").write_text(
+                "---\n"
+                f"name: {skill_name}\n"
+                "description: A previously solved challenge.\n"
+                "---\n\n## Steps\n\n1. Solved it.\n",
+                encoding="utf-8")
+        return entry
+
     def test_catalog_is_deterministic_and_has_expected_values(self):
         for challenge_id in curriculum.CATALOG:
             first = curriculum.build_challenge(challenge_id, seed=7)
@@ -90,6 +105,97 @@ class CurriculumTests(unittest.TestCase):
             self.assertIn("/workspace/", first.goal)
         with self.assertRaises(curriculum.CurriculumError):
             curriculum.build_challenge("unknown", seed=1)
+
+    def test_solved_challenges_are_read_from_metadata_or_skill_name(self):
+        self.write_solved_entry("run-a", challenge="local_http_service")
+        self.write_solved_entry("run-b", skill_name="loopback-health-service")
+        self.write_solved_entry("run-c", challenge="csv_summary")
+        self.assertEqual(
+            curriculum.solved_challenge_ids(self.quarantine),
+            {"local_http_service", "csv_summary"})
+        self.assertEqual(
+            sorted(curriculum.available_challenges(self.quarantine)),
+            ["log_report"])
+
+    def test_solved_challenges_are_not_offered_or_accepted(self):
+        self.write_solved_entry("run-a", challenge="csv_summary")
+        llm = ScriptedLLM(challenge="csv_summary")
+        sandbox = FakeSandbox([])
+        with self.assertRaises(curriculum.CurriculumError):
+            curriculum.run_curriculum(
+                llm=llm, sandbox=sandbox,
+                quarantine_root=self.quarantine, seed=1)
+        self.assertEqual(sandbox.started, 0)
+        prompt = llm.prompts[-1]
+        self.assertNotIn("csv_summary", prompt)
+        self.assertIn("log_report", prompt)
+        self.assertIn("local_http_service", prompt)
+
+    def test_explicit_solved_challenge_is_refused(self):
+        self.write_solved_entry("run-a", challenge="csv_summary")
+        sandbox = FakeSandbox([])
+        with self.assertRaisesRegex(curriculum.CurriculumError, "already quarantined"):
+            curriculum.run_curriculum(
+                llm=ScriptedLLM(), sandbox=sandbox,
+                quarantine_root=self.quarantine, seed=1,
+                challenge_id="csv_summary")
+        self.assertEqual(sandbox.started, 0)
+
+    def test_empty_catalog_generates_harder_challenges_then_escalates(self):
+        solved = set(curriculum.CATALOG)
+        first = curriculum.generate_challenge(solved, seed=7)
+        self.assertEqual(first.challenge_id, "json_to_csv")
+        self.assertEqual(first, curriculum.generate_challenge(solved, seed=7))
+        self.assertTrue(first.fixtures)
+        self.assertIn("/workspace/", first.goal)
+
+        solved.add(first.challenge_id)
+        second = curriculum.generate_challenge(solved, seed=7)
+        self.assertEqual(second.challenge_id, "word_frequencies")
+
+        solved.add(second.challenge_id)
+        escalation = curriculum.generate_challenge(solved, seed=7)
+        self.assertEqual(escalation.challenge_id, "escalation_1")
+        solved.add(escalation.challenge_id)
+        harder = curriculum.generate_challenge(solved, seed=7)
+        self.assertEqual(harder.challenge_id, "escalation_2")
+        self.assertNotEqual(harder, escalation)
+        self.assertNotEqual(harder.fixtures, escalation.fixtures)
+        self.assertNotEqual(
+            harder.verifier["expected"], escalation.verifier["expected"])
+
+    def test_run_curriculum_skips_selection_when_catalog_is_solved(self):
+        for challenge_id in curriculum.CATALOG:
+            self.write_solved_entry(
+                f"solved-{challenge_id}", challenge=challenge_id)
+        llm = ScriptedLLM()
+        sandbox = FakeSandbox([Verification(True, "verified")])
+        result = curriculum.run_curriculum(
+            llm=llm, sandbox=sandbox, quarantine_root=self.quarantine, seed=7,
+            loop_factory=lambda *_: FakeLoop(
+                [LoopResult("success", 1, "verified", ())], []))
+        self.assertEqual(result["status"], "quarantined")
+        self.assertEqual(result["challenge"], "json_to_csv")
+        self.assertNotIn("CHALLENGE IDS", "\n".join(llm.prompts))
+        metadata = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in self.quarantine.glob("*/metadata.json")
+        ]
+        self.assertIn("json_to_csv", {entry["challenge"] for entry in metadata})
+
+    def test_csv_verifier_checks_header_and_rows(self):
+        challenge = curriculum.build_challenge("json_to_csv", seed=3)
+        workspace = Path(self.tmp.name) / "workspace"
+        workspace.mkdir()
+        sandbox = curriculum.DockerSandbox(run_dir=workspace)
+        header = ",".join(challenge.verifier["header"])
+        body = "".join(
+            ",".join(row) + "\n" for row in challenge.verifier["rows"])
+        (workspace / "orders.csv").write_text(
+            header + "\n" + body, encoding="utf-8")
+        self.assertTrue(sandbox.verify(challenge).achieved)
+        (workspace / "orders.csv").write_text(header + "\n", encoding="utf-8")
+        self.assertFalse(sandbox.verify(challenge).achieved)
 
     def test_invalid_challenge_selection_fails_closed(self):
         sandbox = FakeSandbox([])

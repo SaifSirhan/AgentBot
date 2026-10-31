@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +45,13 @@ CATALOG = {
     "log_report": "count seeded log levels into a checked JSON artifact",
     "local_http_service": "build and start a checked loopback health service",
 }
+
+ADVANCED_CATALOG = {
+    "json_to_csv": "flatten a nested JSON order file into a checked CSV artifact",
+    "word_frequencies": "count seeded text words into a checked JSON artifact",
+}
+
+ALL_CHALLENGES = {**CATALOG, **ADVANCED_CATALOG}
 
 TOOL_DESCRIPTIONS = {
     "sandbox_write": (
@@ -82,7 +91,8 @@ class Challenge:
     verifier: Mapping[str, Any]
 
 
-def _challenge_prompt() -> str:
+def _challenge_prompt(available: Mapping[str, str] | None = None) -> str:
+    choices = dict(available if available is not None else CATALOG)
     return (
         "You are an autonomous agent testing your own capabilities. Look at your "
         "available tools. Generate a complex, multi-step task you have never done "
@@ -91,14 +101,14 @@ def _challenge_prompt() -> str:
         "You are confined to an isolated Linux sandbox with only these tools: "
         + json.dumps(TOOL_DESCRIPTIONS, ensure_ascii=False)
         + "\n\nCHALLENGE IDS:\n"
-        + "\n".join(f"- {key}: {value}" for key, value in CATALOG.items())
+        + "\n".join(f"- {key}: {value}" for key, value in choices.items())
         + "\n\nChoose exactly one challenge id from that list. Do not invent an "
         "unverified task. Reply with ONLY JSON: {\"challenge\": \"<id>\"}."
     )
 
 
 def build_challenge(challenge_id: str, seed: int = 0) -> Challenge:
-    if challenge_id not in CATALOG:
+    if challenge_id not in ALL_CHALLENGES:
         raise CurriculumError(f"Unknown challenge: {challenge_id!r}.")
     rng = random.Random(f"{challenge_id}:{seed}")
     if challenge_id == "csv_summary":
@@ -144,6 +154,72 @@ def build_challenge(challenge_id: str, seed: int = 0) -> Challenge:
             {"app.log": "\n".join(lines) + "\n"},
             {"type": "json", "path": "report.json", "expected": expected},
         )
+    if challenge_id == "json_to_csv":
+        customers = ["alpha", "beta", "gamma", "delta"][: rng.randint(2, 4)]
+        orders = []
+        totals: dict[str, list[float]] = {name: [0, 0.0] for name in customers}
+        for index, customer in enumerate(customers):
+            items = [
+                {
+                    "sku": f"S{rng.randint(100, 999)}",
+                    "qty": rng.randint(1, 4),
+                    "price": rng.randint(250, 2000) / 100,
+                }
+                for _ in range(rng.randint(1, 3))
+            ]
+            orders.append({"id": index + 1, "customer": customer, "items": items})
+            totals[customer][0] += sum(item["qty"] for item in items)
+            totals[customer][1] += sum(
+                item["qty"] * item["price"] for item in items)
+        rows = [
+            [name, str(totals[name][0]), f"{totals[name][1]:.2f}"]
+            for name in sorted(totals)
+        ]
+        return Challenge(
+            challenge_id,
+            "Nested JSON to CSV",
+            "Read /workspace/orders.json, which contains an orders list where each "
+            "order has a customer and an items list (sku, qty, price). Write "
+            "/workspace/orders.csv with header customer,total_items,total_value and "
+            "one row per customer, sorted by customer name. total_items is the sum "
+            "of qty and total_value is the sum of qty × price formatted with exactly "
+            "two decimals. Do not modify orders.json.",
+            {"orders.json": json.dumps({"orders": orders}, indent=2) + "\n"},
+            {
+                "type": "csv",
+                "path": "orders.csv",
+                "header": ["customer", "total_items", "total_value"],
+                "rows": rows,
+            },
+        )
+    if challenge_id == "word_frequencies":
+        vocabulary = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+        lines = []
+        tokens: list[str] = []
+        for _ in range(rng.randint(3, 5)):
+            line_words = []
+            for _ in range(rng.randint(4, 8)):
+                word = rng.choice(vocabulary)
+                if rng.random() < 0.3:
+                    word = word.capitalize()
+                if rng.random() < 0.15:
+                    word += rng.choice([",", ".", "!"])
+                line_words.append(word)
+                token = re.sub(r"[^a-z]", "", word.lower())
+                if token:
+                    tokens.append(token)
+            lines.append(" ".join(line_words))
+        expected = dict(sorted(Counter(tokens).items()))
+        return Challenge(
+            challenge_id,
+            "Word frequencies",
+            "Read /workspace/notes.txt. Count every lowercase word, ignoring case "
+            "and stripping punctuation (commas, periods, and exclamation marks). "
+            "Write /workspace/frequencies.json with exactly one key per distinct "
+            "word and its integer count. Do not modify notes.txt.",
+            {"notes.txt": "\n".join(lines) + "\n"},
+            {"type": "json", "path": "frequencies.json", "expected": expected},
+        )
     return Challenge(
         challenge_id,
         "Loopback health service",
@@ -160,8 +236,13 @@ def build_challenge(challenge_id: str, seed: int = 0) -> Challenge:
     )
 
 
-def choose_challenge(llm: Callable[[str], str], seed: int) -> Challenge:
-    reply = llm(_challenge_prompt())
+def choose_challenge(
+    llm: Callable[[str], str],
+    seed: int,
+    available: Mapping[str, str] | None = None,
+) -> Challenge:
+    choices = dict(available if available is not None else CATALOG)
+    reply = llm(_challenge_prompt(choices))
     match = re.search(r"\{.*\}", reply or "", re.S)
     if not match:
         raise CurriculumError("Challenge selection was not JSON.")
@@ -172,9 +253,126 @@ def choose_challenge(llm: Callable[[str], str], seed: int) -> Challenge:
     if not isinstance(data, dict) or set(data) != {"challenge"} or not isinstance(
             data["challenge"], str):
         raise CurriculumError("Challenge selection must contain exactly one challenge id.")
-    if data["challenge"] not in CATALOG:
-        raise CurriculumError(f"Unknown challenge: {data['challenge']!r}.")
+    if data["challenge"] not in choices:
+        raise CurriculumError(
+            f"Challenge {data['challenge']!r} is not in the available pool.")
     return build_challenge(data["challenge"], seed)
+
+
+def _slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+
+
+def _challenge_aliases() -> dict[str, set[str]]:
+    return {
+        challenge_id: {
+            challenge_id,
+            challenge_id.replace("_", "-"),
+            _slugify(build_challenge(challenge_id, 0).title),
+        }
+        for challenge_id in ALL_CHALLENGES
+    }
+
+
+def _skill_name(skill_path: Path) -> str | None:
+    try:
+        frontmatter, _ = _parse_frontmatter(skill_path.read_text(encoding="utf-8"))
+    except (OSError, CurriculumError):
+        return None
+    return frontmatter.get("name", "").strip().lower() or None
+
+
+def solved_challenge_ids(quarantine_root: Path) -> set[str]:
+    root = Path(quarantine_root)
+    if not root.is_dir():
+        return set()
+    aliases = _challenge_aliases()
+    solved: set[str] = set()
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        challenge_id = None
+        metadata_path = entry / "metadata.json"
+        if metadata_path.is_file():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                metadata = None
+            if isinstance(metadata, dict) and isinstance(metadata.get("challenge"), str):
+                challenge_id = metadata["challenge"]
+        if challenge_id is None:
+            name = _skill_name(entry / "SKILL.md")
+            if name:
+                challenge_id = next(
+                    (candidate for candidate, names in aliases.items() if name in names),
+                    None)
+        if challenge_id:
+            solved.add(challenge_id)
+    return solved
+
+
+def available_challenges(quarantine_root: Path) -> dict[str, str]:
+    solved = solved_challenge_ids(quarantine_root)
+    return {
+        challenge_id: description
+        for challenge_id, description in CATALOG.items()
+        if challenge_id not in solved
+    }
+
+
+def _build_escalation(tier: int, seed: int) -> Challenge:
+    challenge_id = f"escalation_{tier}"
+    rng = random.Random(f"{challenge_id}:{seed}")
+    regions = ["north", "south", "east", "west"]
+    vocabulary = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "theta"]
+    units = [
+        {
+            "region": rng.choice(regions),
+            "count": rng.randint(2, 20),
+            "price": rng.randint(100, 5000) / 100,
+        }
+        for _ in range(4 + tier * 2)
+    ]
+    journal_lines = [
+        " ".join(rng.choice(vocabulary) for _ in range(4 + tier))
+        for _ in range(3 + tier)
+    ]
+    words = [word for line in journal_lines for word in line.split()]
+    expected = {
+        "entries": len(units),
+        "total_count": sum(unit["count"] for unit in units),
+        "total_value": round(
+            sum(unit["count"] * unit["price"] for unit in units), 2),
+        "journal_lines": len(journal_lines),
+        "journal_words": len(words),
+        "distinct_words": len(set(words)),
+    }
+    return Challenge(
+        challenge_id,
+        f"Escalated data pipeline tier {tier}",
+        "Read /workspace/metrics.json (a JSON object with a units list of region, "
+        "count, and price objects) and /workspace/journal.txt. Write "
+        "/workspace/combined.json with exactly these keys: entries (units count), "
+        "total_count (sum of count), total_value (sum of count × price rounded to "
+        "two decimals), journal_lines (non-empty journal lines), journal_words "
+        "(whitespace-separated words), and distinct_words (unique lowercase words). "
+        "Do not modify the input files.",
+        {
+            "metrics.json": json.dumps({"units": units}, indent=2) + "\n",
+            "journal.txt": "\n".join(journal_lines) + "\n",
+        },
+        {"type": "json", "path": "combined.json", "expected": expected},
+    )
+
+
+def generate_challenge(solved: set[str], seed: int) -> Challenge:
+    for challenge_id in ADVANCED_CATALOG:
+        if challenge_id not in solved:
+            return build_challenge(challenge_id, seed)
+    tier = 1
+    while f"escalation_{tier}" in solved:
+        tier += 1
+    return _build_escalation(tier, seed)
 
 
 def resolve_workspace_path(root: Path, relative: str, *, allow_root: bool = False) -> Path:
@@ -484,6 +682,20 @@ class DockerSandbox:
                 return engine.Verification(
                     False, f"/workspace/{path} mismatch: " + "; ".join(differences))
             return engine.Verification(True, f"/workspace/{path} matches expected values.")
+        if verifier["type"] == "csv":
+            path = verifier["path"]
+            try:
+                raw = self.read_workspace_file(path)
+            except CurriculumError as exc:
+                return engine.Verification(False, str(exc))
+            actual_rows = [row for row in csv.reader(raw.splitlines()) if row]
+            expected_rows = [list(verifier["header"])] + [
+                list(row) for row in verifier["rows"]]
+            if actual_rows != expected_rows:
+                return engine.Verification(
+                    False,
+                    f"/workspace/{path} rows do not match the expected header and values.")
+            return engine.Verification(True, f"/workspace/{path} matches the expected CSV.")
         if verifier["type"] == "http":
             last = "service did not respond"
             for _ in range(12):
@@ -656,10 +868,23 @@ def run_curriculum(
             "run-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             + "-" + uuid.uuid4().hex[:8])
         sandbox = DockerSandbox(run_dir=run_dir, image=image)
-    challenge = (
-        build_challenge(challenge_id, seed) if challenge_id is not None
-        else choose_challenge(call, seed)
-    )
+    solved = solved_challenge_ids(quarantine_root)
+    if challenge_id is not None:
+        if challenge_id in solved:
+            raise CurriculumError(
+                f"Challenge {challenge_id!r} is already quarantined in "
+                f"{Path(quarantine_root)}; refusing to re-test a solved challenge.")
+        challenge = build_challenge(challenge_id, seed)
+    else:
+        available = {
+            key: description
+            for key, description in CATALOG.items()
+            if key not in solved
+        }
+        challenge = (
+            choose_challenge(call, seed, available) if available
+            else generate_challenge(solved, seed)
+        )
     evidence = "No verifier evidence was produced."
     attempts = 0
     history: tuple[engine.RecordedAction, ...] = ()
