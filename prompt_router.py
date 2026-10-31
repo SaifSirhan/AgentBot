@@ -24,6 +24,14 @@ RULES = {
         "Research: gather evidence from multiple sources before answering; "
         "use search_web and serp_search for live results and cite real URLs."
     ),
+    "weather": (
+        "Weather: use the weather tool for live conditions, temperature, rain, "
+        "or forecast questions; never guess current readings."
+    ),
+    "air_quality": (
+        "Air quality: use the air_quality tool for AQI, pollution, or smog "
+        "questions; never guess current readings."
+    ),
 }
 
 DOCUMENT_WRITE_VERBS = r"write|create|make|generate|draft|save|export|edit|modify|update|rewrite|produce"
@@ -49,6 +57,15 @@ INTENT_PATTERNS = {
     "research": (
         r"\bresearch\b",
         r"\bsearch\s+(?:(?:the\s+)?(?:web|internet)|for)\b",
+    ),
+    "weather": (
+        r"\b(?:weather|forecast|temperature|rain|raining|rainy|snow|"
+        r"snowing|sunny|cloudy|humidity|wind|windy|degrees)\b",
+        r"\b(?:hot|cold|warm|chilly|freezing)\b",
+    ),
+    "air_quality": (
+        r"\bair\s+(?:quality|pollution)\b",
+        r"\b(?:aqi|smog|pm2\.?5)\b",
     ),
 }
 

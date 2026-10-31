@@ -45,6 +45,7 @@ class ReactorHud(QWidget):
         self._paint_tick = 0
         self._last_tick = time.monotonic()
         self._tick_cache = None
+        self._tick_cache_size = (self.SIZE, self.SIZE)
         self._build_tick_cache()
 
         self._timer = QTimer(self)
@@ -78,6 +79,11 @@ class ReactorHud(QWidget):
     def hideEvent(self, event):
         self._timer.stop()
         super().hideEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if (self.width(), self.height()) != self._tick_cache_size:
+            self._build_tick_cache()
 
     def _tick(self):
         now = time.monotonic()
@@ -116,14 +122,15 @@ class ReactorHud(QWidget):
         )
 
     def _build_tick_cache(self):
-        pixmap = QPixmap(self.SIZE, self.SIZE)
+        width, height = max(1, self.width()), max(1, self.height())
+        pixmap = QPixmap(width, height)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         if not painter.isActive():
             return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        cx = cy = self.SIZE / 2.0
-        radius = self.SIZE * 0.38
+        cx, cy = width / 2.0, height / 2.0
+        radius = min(width, height) * 0.38
         major, minor = [], []
         for index in range(72):
             angle = math.radians(index * 5.0)
@@ -142,6 +149,7 @@ class ReactorHud(QWidget):
         painter.drawLines(minor)
         painter.end()
         self._tick_cache = pixmap
+        self._tick_cache_size = (width, height)
 
     # -- painting -------------------------------------------------------
     def paintEvent(self, event):

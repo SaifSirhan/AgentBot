@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import prompt_catalog as pc
 import prompt_router as pr
 
 
@@ -539,6 +540,45 @@ class ReactLoopClassificationTests(unittest.TestCase):
         self.assertTrue(pr.requires_react_loop("install the news app"))
 
 
+class WeatherRoutingTests(unittest.TestCase):
+    def setUp(self):
+        self.tools = pc.build_tools(frozenset({
+            "weather", "air_quality", "open_app", "read_file",
+            "search_web", "serp_search",
+        }))
+
+    def route(self, request):
+        return pr.build_dynamic_prompt(
+            request, self.tools, count_tokens=words, max_tokens=2000)
+
+    def test_weather_questions_expose_the_weather_tool(self):
+        for request in (
+            "will it rain tomorrow",
+            "what's the temperature in Paris",
+            "give me the forecast for Friday",
+            "is it hot outside",
+            "how cold will it be tonight",
+        ):
+            with self.subTest(request=request):
+                result = self.route(request)
+                self.assertIn(
+                    "weather", [tool.name for tool in result.tools], request)
+                self.assertIn(pr.RULES["weather"], result.system_prompt, request)
+
+    def test_air_quality_questions_expose_the_air_quality_tool(self):
+        for request in (
+            "what is the air quality in Berlin",
+            "show me the aqi for today",
+            "is there smog outside",
+        ):
+            with self.subTest(request=request):
+                result = self.route(request)
+                self.assertIn(
+                    "air_quality", [tool.name for tool in result.tools], request)
+                self.assertIn(
+                    pr.RULES["air_quality"], result.system_prompt, request)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -612,6 +652,12 @@ class AgentRoutingTests(unittest.TestCase):
         self.assertIn(pr.RULES["os"], prompt)
         self.assertIn(pr.RULES["python"], prompt)
         self.assertNotIn(pr.RULES["stremio"], prompt)
+
+    def test_weather_request_exposes_the_weather_tool(self):
+        self.agent._clear_turn_route()
+        prompt = self.agent._build_plan_prompt("will it rain tomorrow", "")
+        self.assertIn("- weather:", prompt)
+        self.assertIn(pr.RULES["weather"], prompt)
 
     def test_turn_allowlist_blocks_unrelated_tools(self):
         self.agent._set_turn_route("watch a movie")

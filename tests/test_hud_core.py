@@ -1,4 +1,4 @@
-"""ReactorHud and CORE-card wiring tests (offscreen Qt).
+"""ReactorHud and chat-background wiring tests (offscreen Qt).
 
 Run: python -m unittest tests.test_hud_core -v
 """
@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QSizePolicy  # noqa: E402
 
 from audio_bus import AudioBus  # noqa: E402
 from hud_core import ReactorHud  # noqa: E402
@@ -70,16 +70,39 @@ class CoreCardIntegrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_right_panel_puts_core_first_and_contains_hud(self):
+    def test_right_panel_keeps_core_first_without_an_inline_hud(self):
         import agent_gui_qt as gui
 
         panel = gui.RightPanel()
         try:
             self.assertEqual(panel.CARD_TITLES[0], "CORE")
             self.assertIn("CORE", panel.cards)
-            self.assertIsInstance(panel.hud, ReactorHud)
+            self.assertFalse(panel.cards["CORE"].findChildren(ReactorHud))
+            self.assertGreaterEqual(panel.minimumWidth(), 250)
+            for card in panel.cards.values():
+                self.assertEqual(
+                    card.sizePolicy().horizontalPolicy(),
+                    QSizePolicy.Policy.Ignored)
         finally:
             panel.deleteLater()
+            self.app.processEvents()
+
+    def test_chat_has_a_centered_large_translucent_background_hud(self):
+        import agent_gui_qt as gui
+
+        window = gui.AgentWindow()
+        try:
+            hud = window.chat.background_hud
+            self.assertIsInstance(hud, ReactorHud)
+            self.assertEqual((hud.width(), hud.height()), (800, 800))
+            self.assertIsNotNone(hud.graphicsEffect())
+            self.assertAlmostEqual(
+                hud.graphicsEffect().opacity(), 0.15, places=3)
+            self.assertGreaterEqual(
+                window.right_panel.minimumWidth(), 250)
+        finally:
+            window.close()
+            window.deleteLater()
             self.app.processEvents()
 
     def test_agent_status_maps_to_hud_states(self):
@@ -87,7 +110,7 @@ class CoreCardIntegrationTests(unittest.TestCase):
 
         window = gui.AgentWindow()
         try:
-            hud = window.panel.hud
+            hud = window.chat.background_hud
 
             window.set_status("Thinking…", busy=True)
             self.assertEqual(hud.state, "THINKING")

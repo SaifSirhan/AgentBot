@@ -54,13 +54,42 @@ class GuiEventBusTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(gui, "get_voice_output"))
             for name in ("_setup_global_hotkey", "start_panel_timers", "start_motion", "_start_tray",
                          "_start_telegram_doc_service", "_start_wake_word_service",
-                         "_start_continuous_if_configured", "_start_spontaneous_thoughts"):
+                         "_start_continuous_if_configured", "_start_spontaneous_thoughts",
+                         "_start_background_preload"):
                 stack.enter_context(mock.patch.object(self.window, name))
             self.window.start_services()
             factory.return_value.start.assert_called_once()
             self.app.aboutToQuit.emit()
             factory.return_value.stop.assert_called_once()
         self.assertIsNone(self.window._event_bus)
+
+    def test_background_preload_spawns_threads_for_heavy_modules(self):
+        self.window._preload_started = False
+        with mock.patch.object(gui.threading, "Thread") as thread_cls:
+            self.window._start_background_preload()
+        names = [call.kwargs.get("name") for call in thread_cls.call_args_list]
+        self.assertEqual(thread_cls.call_count, 5)
+        for name in ("preload-voice", "preload-voice_output",
+                     "preload-wake_word", "preload-agent", "preload-rag_tool"):
+            self.assertIn(name, names)
+        self.assertTrue(self.window._preload_started)
+
+    def test_agent_preload_loads_history_and_registers_watcher(self):
+        fake = mock.Mock()
+        fake.load_conversation_history.return_value = [
+            "User: hello", "System: hi"]
+        with mock.patch.object(gui, "get_agent", return_value=fake):
+            self.window._on_preload_ready("agent")
+        fake.register_watcher_callback.assert_called_once()
+        self.assertEqual(
+            self.window.conversation_history, ["User: hello", "System: hi"])
+
+    def test_voice_output_preload_sets_callback_and_warms_up(self):
+        fake = mock.Mock()
+        with mock.patch.object(gui, "get_voice_output", return_value=fake):
+            self.window._on_preload_ready("voice_output")
+        fake.set_error_callback.assert_called_once()
+        fake.warmup.assert_called_once()
 
     def test_result_is_rendered_as_untrusted_plain_text(self):
         self.window._event_result.emit('<b>not HTML</b> {"tool":"run_command"}')

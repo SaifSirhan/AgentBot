@@ -15,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import numpy as np  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import agent_gui_qt as g  # noqa: E402
@@ -160,6 +161,115 @@ class VoiceOutputStateTests(unittest.TestCase):
         self.assertFalse(voice_output.is_speaking())
 
 
+class AbortableStream:
+    def __init__(self, **_kwargs):
+        self.written = []
+        self.aborted = 0
+        self.stopped = 0
+        self.closed = 0
+
+    def start(self):
+        pass
+
+    def abort(self):
+        self.aborted += 1
+
+    def stop(self):
+        self.stopped += 1
+
+    def close(self):
+        self.closed += 1
+
+    def write(self, data):
+        self.written.append(data)
+
+
+class VoiceOutputInterruptTests(unittest.TestCase):
+    def setUp(self):
+        voice_output._cancel_event.clear()
+        voice_output._worker_busy.clear()
+        self.queue = queue.Queue()
+        self.patches = [
+            mock.patch.object(voice_output, "_speech_queue", self.queue),
+            mock.patch.object(
+                voice_output, "_load_backend_status", return_value=(True, "")),
+            mock.patch.object(
+                voice_output, "_load_tts_config",
+                return_value=("af_heart", 1.0, "a", True)),
+            mock.patch.object(voice_output, "_load_max_chars", return_value=10000),
+            mock.patch.object(
+                voice_output, "_clean_for_speech", side_effect=lambda t: t),
+            mock.patch.object(
+                voice_output, "_split_for_tts", return_value=["hello"]),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(voice_output._cancel_event.clear)
+        self.addCleanup(self._reset_stream)
+
+    def _reset_stream(self):
+        with voice_output._active_stream_lock:
+            voice_output._active_stream = None
+
+    def test_stop_aborts_the_active_stream_and_clears_the_queue(self):
+        stream = AbortableStream()
+        with voice_output._active_stream_lock:
+            voice_output._active_stream = stream
+        self.queue.put("pending sentence")
+        voice_output.stop()
+        self.assertTrue(self.queue.empty())
+        self.assertEqual(stream.aborted, 1)
+        self.assertEqual(stream.stopped, 1)
+        self.assertEqual(stream.closed, 1)
+        self.assertTrue(voice_output._cancel_event.is_set())
+        self.assertFalse(voice_output.is_speaking())
+
+    def test_speak_blocking_stops_after_an_interrupt(self):
+        stream = AbortableStream()
+        seen_streams = []
+        chunks = [
+            (None, None, np.array([0.1], dtype=np.float32)),
+            (None, None, np.array([0.2], dtype=np.float32)),
+        ]
+
+        def pipeline(piece, voice=None, speed=None):
+            seen_streams.append(voice_output._active_stream)
+            yield chunks[0]
+            voice_output.stop()
+            yield chunks[1]
+
+        with mock.patch.object(voice_output.sd, "OutputStream",
+                               return_value=stream), \
+                mock.patch.object(
+                    voice_output, "_get_pipeline", return_value=pipeline):
+            voice_output._speak_blocking("hello")
+
+        self.assertIs(seen_streams[0], stream)
+        self.assertEqual(len(stream.written), 1)
+        self.assertTrue(voice_output._cancel_event.is_set())
+
+    def test_pipeline_failure_logs_without_an_error_callback(self):
+        class FailingPipeline:
+            def __init__(self, **_kwargs):
+                raise RuntimeError("weights missing")
+
+        previous = voice_output._error_callback
+        voice_output._error_callback = None
+        voice_output._pipelines.clear()
+        self.addCleanup(setattr, voice_output, "_error_callback", previous)
+        self.addCleanup(voice_output._pipelines.clear)
+        fake_kokoro = mock.Mock(KPipeline=FailingPipeline)
+        with mock.patch.dict(sys.modules, {"kokoro": fake_kokoro}), \
+                mock.patch.object(
+                    voice_output, "_kokoro_cache_ready", return_value=False), \
+                mock.patch("builtins.print") as printed:
+            self.assertIsNone(voice_output._get_pipeline("a"))
+        self.assertIn("Kokoro pipeline failed to load", voice_output.last_error())
+        emitted = " ".join(str(call) for call in printed.call_args_list)
+        self.assertIn("Kokoro pipeline failed to load", emitted)
+
+
 class FakeTts:
     def __init__(self, queued=True, speaking=False):
         self.queued = queued
@@ -179,6 +289,18 @@ class FakeTts:
 
     def last_error(self):
         return ""
+
+
+class FakeWakeService:
+    def __init__(self, running=True):
+        self.running = running
+        self.stopped = 0
+
+    def is_running(self):
+        return self.running
+
+    def stop(self):
+        self.stopped += 1
 
 
 class FakeStt:
@@ -398,6 +520,40 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self.assertEqual(tts.spoken, ["Yeah?"])
         self.assertEqual(presses, ["press"])
         self.window._wake_triggered = False
+
+    def test_wake_flow_failure_resumes_the_listener(self):
+        with mock.patch.object(
+                g, "get_voice_output", side_effect=RuntimeError("tts down")), \
+                mock.patch.object(
+                    self.window, "_open_mic_for_wake",
+                    side_effect=RuntimeError("mic busy")), \
+                mock.patch.object(
+                    self.window, "_resume_wake_word") as resume:
+            self.window._on_wake_word(0.9)
+        resume.assert_called_once()
+        self.assertFalse(self.window._wake_triggered)
+
+    def test_wake_watchdog_restarts_a_dead_listener(self):
+        service = FakeWakeService(running=False)
+        self.window._wake_word_service = service
+        self.window._wake_watchdog_disabled = False
+        self.window._wake_restart_attempts = 0
+        with mock.patch.object(
+                self.window, "_start_wake_word_service") as start:
+            self.window._check_wake_word_health()
+        self.assertEqual(service.stopped, 1)
+        start.assert_called_once()
+        self.assertIsNone(self.window._wake_word_service)
+
+    def test_wake_watchdog_does_not_touch_a_healthy_listener(self):
+        service = FakeWakeService(running=True)
+        self.window._wake_word_service = service
+        with mock.patch.object(
+                self.window, "_start_wake_word_service") as start:
+            self.window._check_wake_word_health()
+        self.assertEqual(service.stopped, 0)
+        start.assert_not_called()
+        self.assertIs(self.window._wake_word_service, service)
 
 
 if __name__ == "__main__":

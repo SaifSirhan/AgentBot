@@ -28,6 +28,7 @@ import concurrent.futures
 import contextlib
 import datetime
 import html
+import importlib
 import io
 import json
 import os
@@ -152,7 +153,7 @@ HEADER_H = 48
 # above HIDE_BELOW that the hidden->shown transition has hysteresis (a resize
 # just under 1100 then a fragment back above cannot flap the panel).
 RIGHT_PANEL_W = 320
-MIN_RIGHT_PANEL_W = 240
+MIN_RIGHT_PANEL_W = 250
 HIDE_PANEL_BELOW = 1100
 SHOW_PANEL_AT = 1180
 CARD_PAD = 10
@@ -2009,10 +2010,44 @@ class ChatView(QScrollArea):
         self.chat_log = []  # (kind, text) record for Copy all / Export
 
         self.setWidget(self._body)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.viewport().setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._body.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.viewport().setAutoFillBackground(False)
+        self._body.setAutoFillBackground(False)
+        self.setStyleSheet(
+            "QScrollArea#chatScroll, QWidget#chatViewport, QWidget#chatContent, "
+            "QWidget#chatContent QWidget, QWidget#chatContent QLabel "
+            "{ background: transparent; }")
+        self.background_hud = ReactorHud(parent=self.viewport())
+        self.background_hud.setFixedSize(800, 800)
+        self.background_hud.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        hud_effect = QGraphicsOpacityEffect(self.background_hud)
+        hud_effect.setOpacity(0.15)
+        self.background_hud.setGraphicsEffect(hud_effect)
+        self._body.raise_()
+        self._center_background_hud()
 
         self._pinned = True  # follow new content while at the bottom
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self.verticalScrollBar().rangeChanged.connect(self._on_range_changed)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._center_background_hud()
+
+    def _center_background_hud(self):
+        hud = getattr(self, "background_hud", None)
+        if hud is None:
+            return
+        viewport = self.viewport()
+        hud.move(
+            (viewport.width() - hud.width()) // 2,
+            (viewport.height() - hud.height()) // 2,
+        )
 
     # -- scroll-lock ----------------------------------------------------
     def _at_bottom(self) -> bool:
@@ -2115,6 +2150,9 @@ class InfoCard(QFrame):
         self.title = title
         self.setObjectName(object_name)
         self.setProperty("panel", True)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(CARD_PAD, CARD_PAD, CARD_PAD, CARD_PAD)
         outer.setSpacing(8)
@@ -2263,7 +2301,7 @@ class RightPanel(QFrame):
     def __init__(self):
         super().__init__()
         self.setObjectName("rightPanel")
-        self.setMinimumWidth(200)
+        self.setMinimumWidth(MIN_RIGHT_PANEL_W)
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         # Phase 6c: set by AgentWindow; gates the per-entry fade-in.
@@ -2298,11 +2336,6 @@ class RightPanel(QFrame):
             self.cards[title] = card
             self.cards_layout.addWidget(card)
 
-        self.hud = ReactorHud()
-        core_card = self.cards["CORE"]
-        core_card.placeholder.setVisible(False)
-        core_card.body_layout.insertWidget(
-            0, self.hud, 0, Qt.AlignmentFlag.AlignHCenter)
         self.cards_layout.addStretch(1)
 
         # ACTIVITY shows at most ACTIVITY_MAX_LINES single-line steps, so cap it
@@ -2990,6 +3023,7 @@ class AgentWindow(QMainWindow):
     _tts_error = Signal(str)              # speech engine error (TTS thread)
     _spontaneous_message = Signal(str)    # proactive observation (worker thread)
     _spontaneous_finished = Signal()      # worker done; clear the busy flag
+    _preload_ready = Signal(str)          # a heavy module finished importing
 
     def __init__(self):
         super().__init__()
@@ -3049,6 +3083,9 @@ class AgentWindow(QMainWindow):
         # Option 3 — wake-word listener (started in start_services).
         self._wake_word_service = None
         self._wake_word_error_shown = False
+        self._wake_watchdog = None
+        self._wake_restart_attempts = 0
+        self._wake_watchdog_disabled = False
         self._wake_triggered = False
         self._wake_record_ms = 3500
         self._wake_ack_started = 0.0
@@ -3082,13 +3119,12 @@ class AgentWindow(QMainWindow):
         self._tts_error.connect(self._on_tts_error)
         self._spontaneous_message.connect(self._on_spontaneous_message)
         self._spontaneous_finished.connect(self._on_spontaneous_finished)
+        self._preload_ready.connect(self._on_preload_ready)
+        self._preload_started = False
 
-        # Conversation history shared with agent.run_agent_turn, loaded once.
+        # Conversation history is filled after agent.py imports in the
+        # background; an empty list keeps the window usable until then.
         self.conversation_history = []
-        try:
-            self.conversation_history = get_agent().load_conversation_history()
-        except Exception:
-            self.conversation_history = []
 
         central = QWidget()
         central.setObjectName("central")
@@ -3795,7 +3831,7 @@ class AgentWindow(QMainWindow):
         self._sync_hud_state()
 
     def _sync_hud_state(self):
-        hud = getattr(getattr(self, "panel", None), "hud", None)
+        hud = getattr(getattr(self, "chat", None), "background_hud", None)
         if hud is None:
             return
         if time.monotonic() < getattr(self, "_hud_error_until", 0.0):
@@ -3937,6 +3973,8 @@ class AgentWindow(QMainWindow):
             pass
 
     def _reset_task_context_if_new(self, text):
+        if "agent" not in sys.modules:
+            return  # still preloading; there is no loaded task context to reset
         try:
             import agent as _agent
             if not _agent.starts_new_task(text):
@@ -4034,9 +4072,11 @@ class AgentWindow(QMainWindow):
         if not auto_speak:
             return
         try:
-            queued = get_voice_output().speak(message)
+            voice = get_voice_output()
+            voice.set_error_callback(self._tts_error.emit)
+            queued = voice.speak(message)
             if not queued:
-                error = get_voice_output().last_error()
+                error = voice.last_error()
                 if error:
                     self._on_tts_error(error)
         except Exception as e:
@@ -5339,7 +5379,9 @@ class AgentWindow(QMainWindow):
             if isinstance(enabled, str):
                 enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
             if not enabled:
+                self._wake_watchdog_disabled = True
                 return
+            self._ensure_wake_watchdog()
 
             model = str(cfg.get("WAKE_WORD_MODEL") or "agent")
             threshold = float(cfg.get("WAKE_WORD_THRESHOLD", 0.5))
@@ -5358,16 +5400,70 @@ class AgentWindow(QMainWindow):
             )
             service.start()
             self._wake_word_service = service
+            self._wake_restart_attempts = 0
+            self._ensure_wake_watchdog()
             print(
                 f"[wake] listening ({service.model_spec}, "
                 f"{service.inference_framework})")
         except Exception as e:
             self._wake_word_service = None
             print(f"[wake] failed to start: {e}")
-            self.chat.add_message(AssistantMessage(f"Wake word disabled: {e}"))
+            if not self._wake_word_error_shown:
+                self._wake_word_error_shown = True
+                self.chat.add_message(AssistantMessage(f"Wake word disabled: {e}"))
+
+    def _ensure_wake_watchdog(self):
+        if self._wake_watchdog is not None:
+            return
+        timer = QTimer(self)
+        timer.setInterval(15000)
+        timer.timeout.connect(self._check_wake_word_health)
+        timer.start()
+        self._wake_watchdog = timer
+
+    def _check_wake_word_health(self):
+        """Restart the listener if it stopped without a deliberate shutdown."""
+        if self._wake_watchdog_disabled:
+            return
+        service = self._wake_word_service
+        if service is None:
+            if self._wake_restart_attempts >= 3:
+                self._wake_watchdog_disabled = True
+                return
+            self._wake_restart_attempts += 1
+            self._start_wake_word_service()
+            return
+        try:
+            running = bool(service.is_running())
+        except Exception:
+            running = False
+        if running:
+            self._wake_restart_attempts = 0
+            return
+        print("[wake] listener stopped unexpectedly; restarting")
+        self._wake_word_service = None
+        try:
+            service.stop()
+        except Exception:
+            pass
+        if self._wake_restart_attempts >= 3:
+            self._wake_watchdog_disabled = True
+            self._on_wake_word_error(
+                "listener stopped repeatedly; wake word disabled")
+            return
+        self._wake_restart_attempts += 1
+        self._start_wake_word_service()
 
     def _on_wake_word(self, score):
         """GUI-thread slot: acknowledge, open the mic, auto-stop after a window."""
+        try:
+            self._handle_wake_word(score)
+        except Exception as exc:
+            print(f"[wake] wake flow failed: {exc}")
+            self._wake_triggered = False
+            self._resume_wake_word()
+
+    def _handle_wake_word(self, score):
         if self._processing or self._recording:
             self._resume_wake_word()
             return
@@ -5416,15 +5512,24 @@ class AgentWindow(QMainWindow):
     def _open_mic_for_wake(self):
         if not self._wake_triggered:
             return
-        self._hotkey_press()
-        # The wake path has no physical key release, so stop it ourselves.
-        QTimer.singleShot(self._wake_record_ms, self._wake_word_auto_stop)
+        try:
+            self._hotkey_press()
+            # The wake path has no physical key release, so stop it ourselves.
+            QTimer.singleShot(self._wake_record_ms, self._wake_word_auto_stop)
+        except Exception as exc:
+            print(f"[wake] could not open mic: {exc}")
+            self._wake_triggered = False
+            self._resume_wake_word()
 
     def _wake_word_auto_stop(self):
         if not self._wake_triggered:
             return
         self._wake_triggered = False
-        self._hotkey_release()
+        try:
+            self._hotkey_release()
+        except Exception as exc:
+            print(f"[wake] could not close mic: {exc}")
+            self._resume_wake_word()
 
     def _on_wake_word_error(self, message):
         print(f"[wake] {message}")
@@ -5632,7 +5737,7 @@ class AgentWindow(QMainWindow):
     # Background services — tray, hotkey, scheduler
     # ------------------------------------------------------------------
     def start_services(self):
-        """Wire tray, hotkey, scheduler, watchers and TTS warmup. Call after
+        """Wire tray, hotkey, scheduler and background preloads. Call after
         the window is shown.
 
         The scheduler and watcher callbacks fire on their own daemon threads,
@@ -5648,13 +5753,8 @@ class AgentWindow(QMainWindow):
         else:
             print("[scheduler] module unavailable; skipped")
 
-        # Proactive watchers reuse the same handler as the scheduler, exactly
-        # as the old GUI does (agent_gui.py:459).
-        try:
-            get_agent().register_watcher_callback(self._scheduled_triggered.emit)
-        except Exception as e:
-            print(f"[watcher] registration failed: {e}")
-
+        # Proactive watchers reuse the same handler as the scheduler; this is
+        # wired after agent.py finishes importing in the background preloader.
         self._start_event_bus()
         self._setup_global_hotkey()
 
@@ -5674,25 +5774,14 @@ class AgentWindow(QMainWindow):
         # Native Qt tray: no pystray thread and no cross-thread timer hop.
         self._start_tray()
 
-        # Warm up TTS so the first spoken reply is instant. warmup() starts its
-        # own daemon thread and returns immediately, so this never blocks the
-        # window; failures are logged, not fatal.
-        try:
-            voice = get_voice_output()
-            voice.set_error_callback(self._tts_error.emit)
-            voice.warmup()
-            print("[tts] warmup requested")
-        except Exception as e:
-            print(f"[tts] warmup skipped: {e}")
+        # Voice, Kokoro, wake word, agent and RAG import in background threads
+        # after the window is painted. Each reports back through a signal.
+        self._start_background_preload()
 
         # Section 2 — Telegram document listener. Opt-in via config; config
         # and authorisation problems surface in the transcript, not as a
         # startup exception.
         self._start_telegram_doc_service()
-
-        # Option 3 — wake word listener. Opt-in via config; missing models or
-        # dependencies surface in the transcript, never as a startup crash.
-        self._start_wake_word_service()
 
         # Hands-free loop when CONTINUOUS_LISTENING is on at launch.
         self._start_continuous_if_configured()
@@ -5700,6 +5789,61 @@ class AgentWindow(QMainWindow):
         # Option A — proactive thoughts. Off by default (screenshots leave the
         # machine); a missing vision key simply produces no messages.
         self._start_spontaneous_thoughts()
+
+    # -- Background preload (boot time) ---------------------------------
+    def _start_background_preload(self):
+        """Import the heavy modules off the GUI thread after first paint."""
+        if self._preload_started:
+            return
+        self._preload_started = True
+        for name, delay in (
+            ("voice", 0.0),
+            ("voice_output", 0.0),
+            ("wake_word", 0.0),
+            ("agent", 0.0),
+            ("rag_tool", 3.0),
+        ):
+            threading.Thread(
+                target=self._preload_module,
+                args=(name, delay),
+                daemon=True,
+                name=f"preload-{name}",
+            ).start()
+
+    def _preload_module(self, name, delay):
+        if delay:
+            time.sleep(delay)
+        try:
+            importlib.import_module(name)
+            print(f"[preload] {name} ready")
+            self._preload_ready.emit(name)
+        except Exception as exc:
+            print(f"[preload] {name} failed: {exc}")
+
+    def _on_preload_ready(self, name):
+        """GUI-thread slot: finish wiring that needs an imported module."""
+        if name == "voice_output":
+            try:
+                voice = get_voice_output()
+                voice.set_error_callback(self._tts_error.emit)
+                voice.warmup()
+                print("[tts] warmup requested")
+            except Exception as exc:
+                print(f"[tts] warmup skipped: {exc}")
+        elif name == "agent":
+            try:
+                agent = get_agent()
+                agent.register_watcher_callback(
+                    self._scheduled_triggered.emit)
+                history = agent.load_conversation_history()
+                if history and not self.conversation_history:
+                    self.conversation_history.extend(history)
+                    self.chat.add_message(SystemMessage(
+                        f"Resumed — {len(history)} messages from last session."))
+            except Exception as exc:
+                print(f"[agent] background init failed: {exc}")
+        elif name == "wake_word":
+            self._start_wake_word_service()
 
     # -- Telegram document listener (Section 2) -------------------------
     def _start_event_bus(self):
@@ -6173,7 +6317,8 @@ def main():
     window = AgentWindow()
     window.show_greeting()
     window.show()
-    window.start_services()
+    # Let Qt paint the window before services/imports can touch the main thread.
+    QTimer.singleShot(0, window.start_services)
     sys.exit(app.exec())
 
 

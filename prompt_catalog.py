@@ -33,6 +33,9 @@ STREMIO_TOOLS = frozenset({
     "analyze_screenshot", "click_coordinates",
 })
 
+WEATHER_TOOLS = frozenset({"weather"})
+AIR_QUALITY_TOOLS = frozenset({"air_quality"})
+
 # Fallback when a request matches no intent or keyword: desktop control plus
 # file/Python access, so the turn is never left without a way to act.
 FALLBACK_TOOLS = (
@@ -185,6 +188,10 @@ def build_tools(valid_tools: frozenset[str]) -> tuple[prompt_router.Tool, ...]:
         groups = []
         if name in STREMIO_TOOLS:
             groups = ["stremio", "os"]
+        elif name in WEATHER_TOOLS:
+            groups = ["weather"]
+        elif name in AIR_QUALITY_TOOLS:
+            groups = ["air_quality"]
         elif name in FILE_TOOLS:
             groups = ["python"]
         elif name in OS_TOOLS:

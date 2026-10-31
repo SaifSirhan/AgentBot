@@ -332,6 +332,11 @@ def _get_pipeline(lang_code):
             # not mute speech for the rest of the session.
             _pipelines.pop(lang_code, None)
             _report_error(f"Kokoro pipeline failed to load: {e}")
+            try:
+                import traceback
+                traceback.print_exc()
+            except Exception:
+                pass
             return None
 
 
@@ -342,6 +347,9 @@ _speech_queue = queue.Queue()
 _worker_started = False
 _worker_lock = threading.Lock()
 _worker_busy = threading.Event()
+_active_stream = None
+_active_stream_lock = threading.Lock()
+_cancel_event = threading.Event()
 
 
 def _worker_loop():
@@ -368,6 +376,8 @@ def _worker_loop():
 
 def _speak_blocking(text):
     """Stream audio: play each chunk as it's generated."""
+    global _active_stream
+    _cancel_event.clear()
     usable, backend_error = _load_backend_status()
     if not usable:
         if backend_error:
@@ -408,10 +418,20 @@ def _speak_blocking(text):
         _report_error(f"could not open audio output: {e}")
         return
 
+    with _active_stream_lock:
+        _active_stream = stream
+
     chunk_count = 0
+    cancelled = False
     try:
         for piece in _split_for_tts(cleaned):
+            if _cancel_event.is_set():
+                cancelled = True
+                break
             for chunk in pipeline(piece, voice=voice, speed=speed):
+                if _cancel_event.is_set():
+                    cancelled = True
+                    break
                 try:
                     audio = chunk[2]
                 except (IndexError, TypeError):
@@ -424,12 +444,29 @@ def _speak_blocking(text):
                 if audio.size == 0:
                     continue
                 audio_bus.publish(audio, "tts")
-                stream.write(audio)
+                try:
+                    stream.write(audio)
+                except Exception:
+                    if _cancel_event.is_set():
+                        cancelled = True
+                        break
+                    raise
                 chunk_count += 1
-        print(f"[tts] done ({chunk_count} chunks played)")
+            if cancelled:
+                break
+        if cancelled:
+            print(f"[tts] interrupted ({chunk_count} chunks played)")
+        else:
+            print(f"[tts] done ({chunk_count} chunks played)")
     finally:
+        with _active_stream_lock:
+            if _active_stream is stream:
+                _active_stream = None
         try:
             stream.stop()
+        except Exception:
+            pass
+        try:
             stream.close()
         except Exception:
             pass
@@ -482,16 +519,38 @@ def speak(text):
 
 def stop():
     """Interrupt current speech and clear the queue."""
+    global _active_stream
+    _cancel_event.set()
+    with _active_stream_lock:
+        stream = _active_stream
+        _active_stream = None
+    if stream is not None:
+        abort = getattr(stream, "abort", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                pass
+        try:
+            stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
+    else:
+        try:
+            sd.stop()
+        except Exception:
+            pass
     try:
         while True:
             _speech_queue.get_nowait()
             _speech_queue.task_done()
     except queue.Empty:
         pass
-    try:
-        sd.stop()
-    except Exception:
-        pass
+    _worker_busy.clear()
 
 
 def is_speaking():
