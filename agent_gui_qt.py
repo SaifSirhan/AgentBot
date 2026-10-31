@@ -27,6 +27,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import datetime
+import faulthandler
 import html
 import importlib
 import io
@@ -36,6 +37,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -860,7 +862,8 @@ class AgentWorker(QObject):
         self._stop_event = stop_event
 
     def start(self):
-        threading.Thread(target=self._run, daemon=True).start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def _run(self):
         log_capture = io.StringIO()
@@ -2021,13 +2024,9 @@ class ChatView(QScrollArea):
             "QScrollArea#chatScroll, QWidget#chatViewport, QWidget#chatContent, "
             "QWidget#chatContent QWidget, QWidget#chatContent QLabel "
             "{ background: transparent; }")
-        self.background_hud = ReactorHud(parent=self.viewport())
+        self.background_hud = ReactorHud(
+            parent=self.viewport(), opacity=0.15)
         self.background_hud.setFixedSize(800, 800)
-        self.background_hud.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        hud_effect = QGraphicsOpacityEffect(self.background_hud)
-        hud_effect.setOpacity(0.15)
-        self.background_hud.setGraphicsEffect(hud_effect)
         self._body.raise_()
         self._center_background_hud()
 
@@ -2102,13 +2101,34 @@ class ChatView(QScrollArea):
             anim.setStartValue(0.0)
             anim.setEndValue(1.0)
             anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            anim.finished.connect(lambda: widget.setGraphicsEffect(None))
+
+            def finish_fade(w=widget, a=anim):
+                try:
+                    a.stop()
+                    w.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+                if getattr(w, "_fade_anim", None) is a:
+                    w._fade_anim = None
+                a.deleteLater()
+
+            anim.finished.connect(finish_fade)
             anim.start()
             widget._fade_anim = anim  # keep a reference alive
 
         if was_pinned:
             self._pinned = True
             QTimer.singleShot(0, self._scroll_to_bottom)
+
+    @staticmethod
+    def _discard_fade(widget: QWidget):
+        anim = getattr(widget, "_fade_anim", None)
+        if anim is not None:
+            try:
+                anim.stop()
+            except RuntimeError:
+                pass
+            widget._fade_anim = None
 
     def remove_message(self, widget: QWidget):
         """Drop a transient widget (e.g. the [SYSTEM] Thinking… line)."""
@@ -2118,6 +2138,7 @@ class ChatView(QScrollArea):
         if gap is not None:
             self._layout.removeItem(gap)
         self._layout.removeWidget(widget)
+        self._discard_fade(widget)
         widget.setParent(None)
         widget.deleteLater()
 
@@ -2127,6 +2148,7 @@ class ChatView(QScrollArea):
             item = self._layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                self._discard_fade(w)
                 w.setParent(None)
                 w.deleteLater()
         self._gap_items.clear()
@@ -3046,6 +3068,18 @@ class AgentWindow(QMainWindow):
         self._tray_menu = None
         self._hotkey_installed = False
         self._recording = False
+        self._voice_ready = False
+        self._voice_failed = False
+        self._wake_ready = False
+        self._wake_failed = False
+        self._tts_ready = False
+        self._agent_ready = False
+        self._voice_loading_notice_shown = False
+        self._f9_held = False
+        self._pending_f9_start = False
+        self._voice_start_event = threading.Event()
+        self._retired_workers = []
+        self._shutting_down = False
         self._scheduled_queue = []
         self.attachments = []
         self._log_panel = None
@@ -3108,7 +3142,7 @@ class AgentWindow(QMainWindow):
         self._command_done.connect(self._on_command_done)
         self._scheduled_triggered.connect(self._on_scheduled_trigger)
         self._event_result.connect(self._show_event_result)
-        QApplication.instance().aboutToQuit.connect(self._stop_event_bus)
+        QApplication.instance().aboutToQuit.connect(self._on_about_to_quit)
         self._reminder_result.connect(self._reminder_done)
         self._hotkey_changed.connect(self._on_hotkey_changed)
         self._voice_event.connect(self._on_voice_event)
@@ -3957,6 +3991,8 @@ class AgentWindow(QMainWindow):
 
     def _interrupt_speech(self):
         """Cut off TTS immediately; a missing backend is not fatal."""
+        if not self._tts_ready:
+            return
         try:
             get_voice_output().stop()
         except Exception as e:
@@ -3973,8 +4009,8 @@ class AgentWindow(QMainWindow):
             pass
 
     def _reset_task_context_if_new(self, text):
-        if "agent" not in sys.modules:
-            return  # still preloading; there is no loaded task context to reset
+        if not self._agent_ready:
+            return  # still preloading; there is no loaded task context yet
         try:
             import agent as _agent
             if not _agent.starts_new_task(text):
@@ -4027,7 +4063,19 @@ class AgentWindow(QMainWindow):
         self._processing = False
         self._turn_cancellable = False
         self._stop_requested = False
+        worker = self._worker
         self._worker = None
+        if worker is not None:
+            # Keep the emitter alive while its thread is still unwinding; a
+            # queued signal must never outlive its QObject.
+            thread = getattr(worker, "_thread", None)
+            if thread is not None and thread.is_alive():
+                self._retired_workers.append(worker)
+        self._retired_workers = [
+            item for item in self._retired_workers
+            if getattr(item, "_thread", None) is not None
+            and item._thread.is_alive()
+        ]
         self._update_send_button()
         self.input_field.setEnabled(True)
         self.input_field.setFocus()
@@ -4070,6 +4118,8 @@ class AgentWindow(QMainWindow):
         except Exception:
             auto_speak = True
         if not auto_speak:
+            return
+        if not self._tts_ready:
             return
         try:
             voice = get_voice_output()
@@ -5366,6 +5416,11 @@ class AgentWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _start_wake_word_service(self):
         """Start the openWakeWord listener when WAKE_WORD_ENABLED is true."""
+        if not self._wake_ready:
+            self.set_status(
+                "Wake word unavailable" if self._wake_failed
+                else "Voice loading…", busy=False)
+            return
         if self._wake_word_service is not None:
             return
         try:
@@ -5488,6 +5543,8 @@ class AgentWindow(QMainWindow):
 
     def _speak_wake_ack(self) -> bool:
         """Queue a short spoken acknowledgement. False when TTS is silent."""
+        if not self._tts_ready:
+            return False
         try:
             voice = get_voice_output()
             voice.stop()  # the acknowledgement starts immediately
@@ -5620,12 +5677,19 @@ class AgentWindow(QMainWindow):
             return
         if self._processing or self._recording:
             return
-        try:
-            if get_voice_output().is_speaking():
-                self._schedule_continuous_listen(300)
+        if not self._voice_ready:
+            if self._voice_failed:
                 return
-        except Exception:
-            pass
+            self._show_voice_loading()
+            self._schedule_continuous_listen(500)
+            return
+        if self._tts_ready:
+            try:
+                if get_voice_output().is_speaking():
+                    self._schedule_continuous_listen(300)
+                    return
+            except Exception:
+                pass
         self._start_recording(continuous=True)
 
     def _cancel_continuous_listening(self, resume_wake=True):
@@ -5796,6 +5860,8 @@ class AgentWindow(QMainWindow):
         if self._preload_started:
             return
         self._preload_started = True
+        if not self._processing and not self._recording:
+            self.set_status("Voice loading…", busy=False)
         for name, delay in (
             ("voice", 0.0),
             ("voice_output", 0.0),
@@ -5816,13 +5882,55 @@ class AgentWindow(QMainWindow):
         try:
             importlib.import_module(name)
             print(f"[preload] {name} ready")
-            self._preload_ready.emit(name)
+            if not self._shutting_down:
+                self._preload_ready.emit(name)
         except Exception as exc:
             print(f"[preload] {name} failed: {exc}")
+            if not self._shutting_down:
+                self._preload_ready.emit(f"{name}:error")
 
     def _on_preload_ready(self, name):
         """GUI-thread slot: finish wiring that needs an imported module."""
-        if name == "voice_output":
+        if name.endswith(":error"):
+            module = name[:-len(":error")]
+            if module == "voice":
+                self._voice_failed = True
+                self._pending_f9_start = False
+                self.set_status(
+                    "Voice unavailable — check the terminal", busy=False)
+                if not self._voice_loading_notice_shown:
+                    self._voice_loading_notice_shown = True
+                    self.chat.add_message(SystemMessage(
+                        "Voice unavailable — the speech model failed to "
+                        "import. Check the terminal for details."))
+            elif module == "wake_word":
+                self._wake_failed = True
+                self._wake_ready = False
+                self.set_status(
+                    "Voice ready — wake word unavailable", busy=False)
+            elif module == "voice_output":
+                self._tts_ready = False
+                if not self._tts_error_shown:
+                    self._tts_error_shown = True
+                    self.chat.add_message(SystemMessage(
+                        "Speech output unavailable — check the terminal."))
+            return
+        if name == "voice":
+            self._voice_ready = True
+            print("[voice] ready")
+            if self._f9_held and self._pending_f9_start:
+                self._pending_f9_start = False
+                self._start_recording()
+            elif not self._processing and not self._recording:
+                if self._wake_ready:
+                    text = "Ready"
+                elif self._wake_failed:
+                    text = "Voice ready — wake word unavailable"
+                else:
+                    text = "Voice ready — wake word loading…"
+                self.set_status(text, busy=False)
+        elif name == "voice_output":
+            self._tts_ready = True
             try:
                 voice = get_voice_output()
                 voice.set_error_callback(self._tts_error.emit)
@@ -5831,19 +5939,25 @@ class AgentWindow(QMainWindow):
             except Exception as exc:
                 print(f"[tts] warmup skipped: {exc}")
         elif name == "agent":
+            self._agent_ready = True
             try:
                 agent = get_agent()
                 agent.register_watcher_callback(
                     self._scheduled_triggered.emit)
-                history = agent.load_conversation_history()
-                if history and not self.conversation_history:
-                    self.conversation_history.extend(history)
-                    self.chat.add_message(SystemMessage(
-                        f"Resumed — {len(history)} messages from last session."))
+                if not self._processing:
+                    history = agent.load_conversation_history()
+                    if history and not self.conversation_history:
+                        self.conversation_history.extend(history)
+                        self.chat.add_message(SystemMessage(
+                            f"Resumed — {len(history)} messages from last session."))
             except Exception as exc:
                 print(f"[agent] background init failed: {exc}")
         elif name == "wake_word":
+            self._wake_ready = True
+            self._wake_failed = False
             self._start_wake_word_service()
+            if self._voice_ready and not self._processing and not self._recording:
+                self.set_status("Ready", busy=False)
 
     # -- Telegram document listener (Section 2) -------------------------
     def _start_event_bus(self):
@@ -5856,6 +5970,10 @@ class AgentWindow(QMainWindow):
                 self._event_bus = bus
         except Exception as exc:
             self._show_event_result(f"Event bus not started: {exc}")
+
+    def _on_about_to_quit(self):
+        self._shutting_down = True
+        self._stop_event_bus()
 
     def _stop_event_bus(self):
         bus, self._event_bus = self._event_bus, None
@@ -6035,6 +6153,7 @@ class AgentWindow(QMainWindow):
         self.activateWindow()
 
     def quit_app(self):
+        self._shutting_down = True
         self._stop_event_bus()
         try:
             get_agent().save_conversation_history(self.conversation_history)
@@ -6135,19 +6254,48 @@ class AgentWindow(QMainWindow):
     def _hotkey_release(self, event=None):
         self._hotkey_changed.emit(False)
 
+    def _show_voice_loading(self):
+        self.set_status("Voice loading…", busy=False)
+        if not self._voice_loading_notice_shown:
+            self._voice_loading_notice_shown = True
+            self.chat.add_message(SystemMessage(
+                "Voice loading… F9 and the wake word activate once the "
+                "speech models finish importing."))
+
     def _on_hotkey_changed(self, pressed):
         """GUI-thread slot for F9 press/release."""
         if pressed:
+            self._f9_held = True
+            if not self._voice_ready:
+                if self._voice_failed:
+                    self.set_status(
+                        "Voice unavailable — check the terminal", busy=False)
+                else:
+                    self._pending_f9_start = True
+                    self._show_voice_loading()
+                return
             self._start_recording()
-        else:
-            self._wake_triggered = False
-            self._stop_recording()
+            return
+        self._f9_held = False
+        self._pending_f9_start = False
+        self._wake_triggered = False
+        self._stop_recording()
 
     def _start_recording(self, continuous=False):
+        if not self._voice_ready:
+            if self._voice_failed:
+                self.set_status(
+                    "Voice unavailable — check the terminal", busy=False)
+            else:
+                self._pending_f9_start = True
+                self._show_voice_loading()
+            return
         if self._recording or self._processing:
             return
         self._recording = True
         self._continuous_listening = bool(continuous)
+        self._voice_start_event = threading.Event()
+        start_event = self._voice_start_event
         self._pause_wake_word()
         self.set_status(
             "Listening… (continuous)" if continuous
@@ -6166,6 +6314,8 @@ class AgentWindow(QMainWindow):
                 self._voice_event.emit("recording_started")
             except Exception as e:
                 self._voice_event.emit(f"error:Mic error: {e}")
+            finally:
+                start_event.set()
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -6175,8 +6325,12 @@ class AgentWindow(QMainWindow):
         self._recording = False
         self._continuous_listening = False
         self.set_status("Transcribing…", busy=True)
+        start_event = self._voice_start_event
 
         def work():
+            # A very quick F9 tap can release before start_recording() has
+            # opened the mic; wait for that worker instead of racing it.
+            start_event.wait(timeout=2.0)
             try:
                 text = get_voice().stop_and_transcribe()
                 self._voice_event.emit(f"transcript:{text}")
@@ -6302,7 +6456,74 @@ class AgentWindow(QMainWindow):
             pass
 
 
+_crash_log_handle = None
+_crash_log_lock = threading.Lock()
+
+
+def crash_log_path() -> Path:
+    return Path(get_config_module().memory_path("crash.log"))
+
+
+def _append_crash_log(text: str) -> None:
+    handle = _crash_log_handle
+    if handle is None:
+        return
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with _crash_log_lock:
+            handle.write(f"\n[{stamp}] {text.rstrip()}\n")
+            handle.flush()
+    except Exception:
+        pass
+
+
+def install_crash_logging() -> Path | None:
+    """Log Python failures and native fault stacks under AgentMemory."""
+    global _crash_log_handle
+    if _crash_log_handle is not None:
+        return Path(_crash_log_handle.name)
+    try:
+        path = crash_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a", encoding="utf-8", buffering=1)
+        handle.write(
+            "\n=== AgentBot start "
+            f"{datetime.datetime.now().isoformat(timespec='seconds')} ===\n")
+        handle.flush()
+        _crash_log_handle = handle
+        faulthandler.enable(file=handle, all_threads=True)
+    except Exception as exc:
+        print(f"[crash] log unavailable: {exc}")
+        return None
+
+    previous_main_hook = sys.excepthook
+    previous_thread_hook = threading.excepthook
+
+    def main_hook(exc_type, exc_value, exc_tb):
+        if not issubclass(exc_type, KeyboardInterrupt):
+            _append_crash_log(
+                "unhandled exception in main thread\n"
+                + "".join(traceback.format_exception(
+                    exc_type, exc_value, exc_tb)))
+        previous_main_hook(exc_type, exc_value, exc_tb)
+
+    def thread_hook(args):
+        thread_name = args.thread.name if args.thread is not None else "unknown"
+        if not issubclass(args.exc_type, SystemExit):
+            _append_crash_log(
+                f"unhandled exception in thread {thread_name}\n"
+                + "".join(traceback.format_exception(
+                    args.exc_type, args.exc_value, args.exc_traceback)))
+        previous_thread_hook(args)
+
+    sys.excepthook = main_hook
+    threading.excepthook = thread_hook
+    print(f"[crash] logging to {path}")
+    return path
+
+
 def main():
+    install_crash_logging()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     # A terminal cursor is a steady block, not a blinking hairline.

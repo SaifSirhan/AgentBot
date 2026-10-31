@@ -14,7 +14,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np  # noqa: E402
-from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSizePolicy  # noqa: E402
 
 from audio_bus import AudioBus  # noqa: E402
@@ -58,11 +57,42 @@ class ReactorHudTests(unittest.TestCase):
         self.hud.set_state("NOPE")
         self.assertEqual(self.hud.state, "IDLE")
 
+    def _wait_until(self, predicate, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return predicate()
+
     def test_published_audio_raises_the_voice_level_while_speaking(self):
         self.hud.set_state("SPEAKING")
         self.bus.publish(np.full(1024, 0.5, dtype=np.float32), "tts")
-        QTest.qWait(140)
-        self.assertGreater(self.hud.level, 0.05)
+        self.assertTrue(
+            self._wait_until(lambda: self.hud.level > 0.05),
+            f"level stayed at {self.hud.level}")
+
+    def test_states_differ_by_geometry_and_brightness(self):
+        styles = ReactorHud._STYLES
+        self.assertEqual(
+            len({style.mode for style in styles.values()}), 5)
+        self.assertLess(styles["IDLE"].brightness, styles["THINKING"].brightness)
+        self.assertEqual(styles["ERROR"].speed, 0.0)
+        self.assertEqual(styles["ERROR"].mode, "block")
+        self.assertEqual(styles["LISTENING"].mode, "spikes")
+        self.assertEqual(styles["THINKING"].mode, "sharp")
+        self.assertEqual(styles["SPEAKING"].mode, "pulse")
+
+    def test_speaking_core_radius_pulses_with_audio_rms(self):
+        self.hud.set_state("SPEAKING")
+        self.assertTrue(self._wait_until(lambda: self.hud._phase > 0.0))
+        quiet = self.hud.core_radius_ratio
+        self.bus.publish(np.full(1024, 0.8, dtype=np.float32), "tts")
+        self.assertTrue(
+            self._wait_until(
+                lambda: self.hud.core_radius_ratio > quiet + 0.01),
+            f"core stayed at {self.hud.core_radius_ratio}")
 
 
 class CoreCardIntegrationTests(unittest.TestCase):
@@ -95,9 +125,8 @@ class CoreCardIntegrationTests(unittest.TestCase):
             hud = window.chat.background_hud
             self.assertIsInstance(hud, ReactorHud)
             self.assertEqual((hud.width(), hud.height()), (800, 800))
-            self.assertIsNotNone(hud.graphicsEffect())
-            self.assertAlmostEqual(
-                hud.graphicsEffect().opacity(), 0.15, places=3)
+            self.assertIsNone(hud.graphicsEffect())
+            self.assertAlmostEqual(hud.opacity, 0.15, places=3)
             self.assertGreaterEqual(
                 window.right_panel.minimumWidth(), 250)
         finally:

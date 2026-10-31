@@ -350,20 +350,31 @@ _worker_busy = threading.Event()
 _active_stream = None
 _active_stream_lock = threading.Lock()
 _cancel_event = threading.Event()
+_speech_generation = 0
+_generation_lock = threading.Lock()
+
+
+def _current_generation() -> int:
+    with _generation_lock:
+        return _speech_generation
 
 
 def _worker_loop():
     print("[tts] worker started")
     while True:
         try:
-            text = _speech_queue.get()
+            item = _speech_queue.get()
         except Exception:
             continue
+        if isinstance(item, tuple) and len(item) == 2:
+            generation, text = item
+        else:
+            generation, text = None, item
         if text is None:
             break
         _worker_busy.set()
         try:
-            _speak_blocking(text)
+            _speak_blocking(text, generation=generation)
         except Exception as e:
             _report_error(f"speech failed: {e}")
             import traceback
@@ -374,10 +385,19 @@ def _worker_loop():
                 _worker_busy.clear()
 
 
-def _speak_blocking(text):
+def _speak_blocking(text, generation=None):
     """Stream audio: play each chunk as it's generated."""
     global _active_stream
     _cancel_event.clear()
+
+    def cancelled():
+        # A stop() bumps the generation, so a reply that was already dequeued
+        # when the user typed a new message is dropped instead of speaking.
+        return _cancel_event.is_set() or (
+            generation is not None and generation != _current_generation())
+
+    if cancelled():
+        return
     usable, backend_error = _load_backend_status()
     if not usable:
         if backend_error:
@@ -422,15 +442,15 @@ def _speak_blocking(text):
         _active_stream = stream
 
     chunk_count = 0
-    cancelled = False
+    interrupted = False
     try:
         for piece in _split_for_tts(cleaned):
-            if _cancel_event.is_set():
-                cancelled = True
+            if cancelled():
+                interrupted = True
                 break
             for chunk in pipeline(piece, voice=voice, speed=speed):
-                if _cancel_event.is_set():
-                    cancelled = True
+                if cancelled():
+                    interrupted = True
                     break
                 try:
                     audio = chunk[2]
@@ -447,14 +467,14 @@ def _speak_blocking(text):
                 try:
                     stream.write(audio)
                 except Exception:
-                    if _cancel_event.is_set():
-                        cancelled = True
+                    if cancelled():
+                        interrupted = True
                         break
                     raise
                 chunk_count += 1
-            if cancelled:
+            if interrupted:
                 break
-        if cancelled:
+        if interrupted:
             print(f"[tts] interrupted ({chunk_count} chunks played)")
         else:
             print(f"[tts] done ({chunk_count} chunks played)")
@@ -462,14 +482,7 @@ def _speak_blocking(text):
         with _active_stream_lock:
             if _active_stream is stream:
                 _active_stream = None
-        try:
-            stream.stop()
-        except Exception:
-            pass
-        try:
-            stream.close()
-        except Exception:
-            pass
+        _close_stream(stream)
 
 
 def _ensure_worker():
@@ -513,14 +526,37 @@ def speak(text):
         return False
 
     _ensure_worker()
-    _speech_queue.put(cleaned)
+    with _generation_lock:
+        generation = _speech_generation
+    _speech_queue.put((generation, cleaned))
     return True
+
+
+def _close_stream(stream):
+    """Stop and close one playback stream exactly once, under the lock."""
+    with _active_stream_lock:
+        if getattr(stream, "_agentbot_closed", False):
+            return
+        try:
+            stream._agentbot_closed = True
+        except Exception:
+            pass
+        try:
+            stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 def stop():
     """Interrupt current speech and clear the queue."""
-    global _active_stream
+    global _active_stream, _speech_generation
     _cancel_event.set()
+    with _generation_lock:
+        _speech_generation += 1
     with _active_stream_lock:
         stream = _active_stream
         _active_stream = None
@@ -531,19 +567,7 @@ def stop():
                 abort()
             except Exception:
                 pass
-        try:
-            stream.stop()
-        except Exception:
-            pass
-        try:
-            stream.close()
-        except Exception:
-            pass
-    else:
-        try:
-            sd.stop()
-        except Exception:
-            pass
+        _close_stream(stream)
     try:
         while True:
             _speech_queue.get_nowait()

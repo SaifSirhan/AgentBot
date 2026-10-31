@@ -224,6 +224,7 @@ class TaskContextTests(unittest.TestCase):
 
     def setUp(self):
         self.window = g.AgentWindow()
+        self.window._agent_ready = True
         for _ in range(10):
             self.app.processEvents()
 
@@ -239,6 +240,15 @@ class TaskContextTests(unittest.TestCase):
             self.window._reset_task_context_if_new("watch Jujutsu Kaisen")
         self.assertEqual(self.window.conversation_history, [])
         fake.save_conversation_history.assert_called_once_with([])
+
+    def test_agent_preload_does_not_touch_task_context(self):
+        self.window._agent_ready = False
+        history = ["User: watch Ghosts", "System: old"]
+        self.window.conversation_history = list(history)
+        with mock.patch.object(g, "get_agent") as get_agent:
+            self.window._reset_task_context_if_new("watch Jujutsu Kaisen")
+        self.assertEqual(self.window.conversation_history, history)
+        get_agent.assert_not_called()
 
     def test_continuation_keeps_history(self):
         history = ["User: watch Ghosts", "System: old"]

@@ -249,6 +249,19 @@ class VoiceOutputInterruptTests(unittest.TestCase):
         self.assertEqual(len(stream.written), 1)
         self.assertTrue(voice_output._cancel_event.is_set())
 
+    def test_reply_dequeued_before_stop_is_not_spoken(self):
+        stale_generation = voice_output._current_generation()
+        voice_output.stop()
+        stream = AbortableStream()
+        with mock.patch.object(voice_output.sd, "OutputStream",
+                               return_value=stream) as ctor, \
+                mock.patch.object(voice_output, "_get_pipeline") as pipeline:
+            voice_output._speak_blocking(
+                "hello", generation=stale_generation)
+        self.assertFalse(ctor.called)
+        self.assertFalse(pipeline.called)
+        self.assertEqual(stream.written, [])
+
     def test_pipeline_failure_logs_without_an_error_callback(self):
         class FailingPipeline:
             def __init__(self, **_kwargs):
@@ -329,6 +342,13 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self.window._continuous_listening = False
         self.window._processing = False
         self.window._recording = False
+        self.window._voice_ready = True
+        self.window._wake_ready = True
+        self.window._voice_failed = False
+        self.window._tts_ready = True
+        self.window._agent_ready = True
+        self.window._f9_held = False
+        self.window._pending_f9_start = False
         for _ in range(10):
             self.app.processEvents()
 
@@ -347,6 +367,16 @@ class GuiVoicePipelineTests(unittest.TestCase):
             self.window.send()
         self.assertEqual(tts.stops, 1)
         start_turn.assert_called_once()
+
+    def test_send_before_tts_preload_does_not_import_or_block(self):
+        self.window._tts_ready = False
+        self.window.input_field.setPlainText("hello")
+        with mock.patch.object(
+                g, "get_voice_output",
+                side_effect=AssertionError("TTS imported on the GUI thread")), \
+                mock.patch.object(self.window, "_start_agent_turn") as start:
+            self.window.send()
+        start.assert_called_once()
 
     def test_empty_send_does_not_touch_tts(self):
         tts = FakeTts()
@@ -544,6 +574,45 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self.assertEqual(service.stopped, 1)
         start.assert_called_once()
         self.assertIsNone(self.window._wake_word_service)
+
+    def test_f9_before_voice_ready_shows_loading_without_recording(self):
+        self.window._voice_ready = False
+        with mock.patch.object(self.window, "_start_recording") as start:
+            self.window._on_hotkey_changed(True)
+        start.assert_not_called()
+        self.assertTrue(self.window._pending_f9_start)
+        self.assertIn("Voice loading", self.window.windowTitle())
+        self.window._on_hotkey_changed(False)
+        self.assertFalse(self.window._pending_f9_start)
+
+    def test_pending_f9_starts_once_voice_finishes_loading(self):
+        self.window._voice_ready = False
+        self.window._f9_held = True
+        self.window._pending_f9_start = True
+        with mock.patch.object(self.window, "_start_recording") as start:
+            self.window._on_preload_ready("voice")
+        self.assertTrue(self.window._voice_ready)
+        start.assert_called_once()
+
+    def test_start_recording_waits_for_voice_preload(self):
+        self.window._voice_ready = False
+        with mock.patch.object(g, "get_voice") as get_voice:
+            self.window._start_recording()
+        get_voice.assert_not_called()
+        self.assertIn("Voice loading", self.window.windowTitle())
+
+    def test_voice_preload_failure_is_visible(self):
+        self.window._on_preload_ready("voice:error")
+        self.assertTrue(self.window._voice_failed)
+        self.assertIn("Voice unavailable", self.window.windowTitle())
+
+    def test_wake_preload_failure_survives_voice_ready(self):
+        self.window._voice_ready = False
+        self.window._on_preload_ready("wake_word:error")
+        self.assertTrue(self.window._wake_failed)
+        self.window._on_preload_ready("voice")
+        self.assertIn(
+            "wake word unavailable", self.window.windowTitle().lower())
 
     def test_wake_watchdog_does_not_touch_a_healthy_listener(self):
         service = FakeWakeService(running=True)
