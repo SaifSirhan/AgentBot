@@ -203,7 +203,7 @@ KEEP_ALIVE = "30m"
 # ---------- Common ----------
 OLLAMA_TIMEOUT = 120
 MAX_PAGE_CHARS = 6000
-MAX_STEPS_PER_TURN = 13
+MAX_STEPS_PER_TURN = 30
 MODEL = BRAIN_PRIORITY[0] if BRAIN_PRIORITY else "ollama"
 
 # ---------- Cooldown state per brain ----------
@@ -5759,6 +5759,7 @@ def _build_tool_registry():
             effect_class="read_only",
             timeout=15,
             func=read_file,
+            is_polling=True,
         ),
         ToolSpec(
             name="write_file",
@@ -5801,6 +5802,7 @@ def _build_tool_registry():
             effect_class="system_control",
             timeout=90,
             func=screenshot_background,
+            is_polling=True,
         ),
         ToolSpec(
             name="find_files",
@@ -5810,6 +5812,7 @@ def _build_tool_registry():
             effect_class="read_only",
             timeout=30,
             func=find_files,
+            is_polling=True,
         ),
         ToolSpec(
             name="patch_file",
@@ -6434,6 +6437,9 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_histo
                 tool_descriptions=descriptions,
                 max_steps=MAX_STEPS_PER_TURN,
                 stop_event=stop_event,
+                tool_registry=TOOL_REGISTRY,
+                # system_status is AgentBot's get_status equivalent.
+                polling_tools=("system_status",),
             )
             _ROUTED.autonomous_loop = loop
             result = loop.run(

@@ -157,6 +157,7 @@ class ToolSpec:
     effect_class: str
     timeout: int
     func: Callable[..., Any]
+    is_polling: bool = False
 
     def __post_init__(self):
         if not _NAME_RE.fullmatch(self.name or ""):
@@ -175,6 +176,9 @@ class ToolSpec:
                 or self.timeout <= 0):
             raise ValueError(
                 f"tool '{self.name}' timeout must be a positive integer")
+        if not isinstance(self.is_polling, bool):
+            raise TypeError(
+                f"tool '{self.name}' is_polling must be a boolean")
         if not callable(self.func):
             raise TypeError(f"tool '{self.name}' func must be callable")
 

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -13,10 +14,13 @@ from threading import Event, Lock
 from typing import Any, Callable, Collection, Mapping, Sequence
 from uuid import uuid4
 
+from loop_guard import GuardVerdict, LoopGuard
+
 
 logger = logging.getLogger(__name__)
 
 DELEGATION_SUCCESS_MARKERS = ("server running", "build successful")
+DEFAULT_WALL_CLOCK_TIMEOUT = 300.0
 SCRATCHPAD_TOOLS = {
     "scratchpad_write": 'Store an unverified note. args: {"key": string, "text": string}',
     "scratchpad_read": 'Read a full observation in pages. args: {"id": "obs-N", "offset": integer (optional), "limit": integer (optional, maximum 8000)}',
@@ -137,22 +141,33 @@ class AutonomousLoop:
         authorize: Callable[[str, dict[str, Any]], bool],
         tool_descriptions: Mapping[str, str],
         *,
-        max_steps: int = 15,
+        max_steps: int = 30,
         stop_event: Event | None = None,
+        tool_registry=None,
+        polling_tools: Collection[str] = (),
+        wall_clock_timeout: float = DEFAULT_WALL_CLOCK_TIMEOUT,
         delegation_tool: str | None = "delegate_to_qoder",
         delegation_probe_tools: Collection[str] = (
             "screenshot_background", "analyze_screenshot"),
         delegation_success_markers: Collection[str] = DELEGATION_SUCCESS_MARKERS,
     ):
-        if type(max_steps) is not int or not 1 <= max_steps <= 15:
+        if type(max_steps) is not int or not 1 <= max_steps <= 30:
             raise ValueError(
-                "max_steps must be an integer from 1 through 15"
+                "max_steps must be an integer from 1 through 30"
             )
         if delegation_tool is not None and not isinstance(delegation_tool, str):
             raise ValueError("delegation_tool must be a string or None")
         probes = frozenset(delegation_probe_tools or ())
         if any(not isinstance(name, str) or not name.strip() for name in probes):
             raise ValueError("delegation_probe_tools must contain tool names")
+        polling = frozenset(polling_tools or ())
+        if any(not isinstance(name, str) or not name.strip() for name in polling):
+            raise ValueError("polling_tools must contain tool names")
+        if (isinstance(wall_clock_timeout, bool)
+                or not isinstance(wall_clock_timeout, (int, float))
+                or not wall_clock_timeout > 0):
+            raise ValueError(
+                "wall_clock_timeout must be a positive number of seconds")
         markers = tuple(
             str(marker).strip().lower()
             for marker in delegation_success_markers
@@ -175,6 +190,11 @@ class AutonomousLoop:
         self.delegation_tool = delegation_tool
         self.delegation_probe_tools = probes
         self.delegation_success_markers = markers
+        self.wall_clock_timeout = float(wall_clock_timeout)
+        self.loop_guard = LoopGuard(
+            registry=tool_registry,
+            polling_tools=frozenset(CONTROL_TOOLS) | probes | polling,
+        )
 
     def run(
         self,
@@ -201,6 +221,9 @@ class AutonomousLoop:
         repair_history_start = None
         work_turns = 0
         step = 0
+        self.loop_guard.reset()
+        guard_blocks = 0
+        deadline = time.monotonic() + self.wall_clock_timeout
         # Grants get separate headroom, but cannot cause an unbounded model loop.
         max_model_turns = 2 * self.max_steps + 3
         grant_pending = False
@@ -316,6 +339,12 @@ class AutonomousLoop:
         while True:
             if self.stop_event.is_set():
                 return finish("cancelled", step, "Stopped by cancellation.")
+
+            if time.monotonic() >= deadline:
+                return finish(
+                    "failed", step,
+                    f"Wall-clock timeout after {self.wall_clock_timeout:.0f}s "
+                    "without completing the goal.")
 
             if repair_pending and repair_consumed:
                 if (has_substantive_success(history[repair_history_start:])
@@ -525,6 +554,31 @@ class AutonomousLoop:
                     f"Permission denied for {tool}; no retry.",
                 )
 
+            verdict = self.loop_guard.check(tool, args)
+            if verdict == GuardVerdict.BLOCK:
+                guard_blocks += 1
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[GUARD] You are stuck in a loop repeating {tool}. "
+                        "You MUST change your strategy, use a different tool, "
+                        "or ask the user for help."),
+                })
+                if guard_blocks >= 3:
+                    return finish(
+                        "failed", step,
+                        f"Progress guard: stuck in a loop repeating {tool} "
+                        "three times without a strategy change.",
+                    )
+                continue
+            if verdict == GuardVerdict.WARN:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[GUARD] You have run {tool} several times. "
+                        "Are you making progress?"),
+                })
+
             try:
                 if tool == "scratchpad_write":
                     outcome = ToolResult(True, self.scratchpad.write(**args))
@@ -588,6 +642,13 @@ class AutonomousLoop:
                 )
             )
             self.scratchpad.record(history[-1])
+            self.loop_guard.record(tool, args, outcome.observation)
+
+            if time.monotonic() >= deadline:
+                return finish(
+                    "failed", step,
+                    f"Wall-clock timeout after {self.wall_clock_timeout:.0f}s "
+                    "without completing the goal.")
 
             observation_text = (
                 f"{tool} {'succeeded' if outcome.ok else 'failed'}: "

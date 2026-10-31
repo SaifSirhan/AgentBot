@@ -1,0 +1,156 @@
+"""LoopGuard unit tests and AutonomousLoop integration tests.
+
+Run: python -m unittest tests.test_loop_guard -v
+"""
+import json
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from autonomous_loop import AutonomousLoop, ToolResult, Verification
+from loop_guard import LoopGuard
+from tool_registry import ToolRegistry, ToolSpec
+
+
+def action(tool, **args):
+    return json.dumps({"tool": tool, "args": args})
+
+
+def polling_registry(*names):
+    registry = ToolRegistry()
+    for name in names:
+        registry.register(ToolSpec(
+            name=name,
+            description=f"{name} polling tool.",
+            input_schema={"type": "object"},
+            effect_class="read_only",
+            timeout=5,
+            func=lambda value: "ok",
+            is_polling=True,
+        ))
+    return registry
+
+
+class LoopGuardTests(unittest.TestCase):
+    def test_three_identical_outcomes_block_the_next_attempt(self):
+        guard = LoopGuard()
+        for _ in range(3):
+            self.assertEqual(guard.check("flaky", "same input"), "PASS")
+            guard.record("flaky", "same input", "same error")
+        self.assertEqual(guard.check("flaky", "same input"), "BLOCK")
+
+    def test_three_outcomes_that_differ_warn_instead_of_blocking(self):
+        guard = LoopGuard()
+        for index in range(3):
+            self.assertEqual(guard.check("flaky", "same input"), "PASS")
+            guard.record("flaky", "same input", f"error {index}")
+        self.assertEqual(guard.check("flaky", "same input"), "WARN")
+
+    def test_different_inputs_do_not_count_together(self):
+        guard = LoopGuard()
+        for value in ("a", "b", "c"):
+            guard.check("flaky", value)
+            guard.record("flaky", value, "same error")
+        self.assertEqual(guard.check("flaky", "d"), "PASS")
+
+    def test_polling_tools_always_pass(self):
+        registry = polling_registry("poll_tool")
+        guard = LoopGuard(registry=registry)
+        for _ in range(5):
+            self.assertEqual(guard.check("poll_tool", "now"), "PASS")
+            guard.record("poll_tool", "now", "same state")
+
+    def test_identical_actions_leave_the_window_after_enough_other_work(self):
+        guard = LoopGuard()
+        for _ in range(3):
+            guard.record("flaky", "same", "same error")
+        self.assertEqual(guard.check("flaky", "same"), "BLOCK")
+        for index in range(10):
+            guard.check("work", index)
+            guard.record("work", index, f"result {index}")
+        self.assertEqual(guard.check("flaky", "same"), "PASS")
+
+
+class LoopGuardLoopTests(unittest.TestCase):
+    def make_loop(self, replies, execute, *, registry=None, max_steps=10,
+                  wall_clock_timeout=300.0):
+        prompts = []
+        replies = iter(replies)
+
+        def llm(messages):
+            prompts.append(messages)
+            return next(replies, "DONE")
+
+        verify = mock.Mock(return_value=Verification(True, "Verified"))
+        loop = AutonomousLoop(
+            llm,
+            execute,
+            verify,
+            lambda tool, args: True,
+            {"flaky": "Flaky tool", "poll": "Polling tool", "work": "Work"},
+            max_steps=max_steps,
+            tool_registry=registry,
+            wall_clock_timeout=wall_clock_timeout,
+        )
+        return loop, prompts, verify
+
+    def test_repeated_identical_errors_block_the_fourth_call_and_fail(self):
+        execute = mock.Mock(return_value=ToolResult(False, "same failure"))
+        loop, prompts, verify = self.make_loop([action("flaky")] * 10, execute)
+
+        result = loop.run("finish the task")
+
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(result.status, "failed")
+        self.assertIn("stuck in a loop", result.message)
+        self.assertIn("flaky", result.message)
+        self.assertEqual(verify.call_count, 0)
+        self.assertTrue(any(
+            "[GUARD]" in json.dumps(messages) for messages in prompts))
+
+    def test_polling_tool_may_run_five_times_and_then_finish(self):
+        registry = polling_registry("poll")
+        execute = mock.Mock(return_value=ToolResult(True, "still waiting"))
+        loop, prompts, verify = self.make_loop(
+            [action("poll")] * 5 + ["DONE"], execute, registry=registry)
+
+        result = loop.run("wait for the server")
+
+        self.assertEqual(result.status, "success", result.message)
+        self.assertEqual(execute.call_count, 5)
+        self.assertEqual(verify.call_count, 1)
+        self.assertFalse(any(
+            "[GUARD]" in json.dumps(messages) for messages in prompts))
+
+    def test_wall_clock_timeout_fails_the_loop(self):
+        clock = {"now": 0.0}
+
+        def llm(messages):
+            clock["now"] = 301.0
+            return action("work")
+
+        execute = mock.Mock(return_value=ToolResult(True, "working"))
+        loop = AutonomousLoop(
+            llm,
+            execute,
+            mock.Mock(return_value=Verification(True, "Verified")),
+            lambda tool, args: True,
+            {"work": "Work"},
+            max_steps=10,
+            wall_clock_timeout=300.0,
+        )
+        with mock.patch(
+                "autonomous_loop.time.monotonic",
+                side_effect=lambda: clock["now"]):
+            result = loop.run("do work")
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("timeout", result.message.lower())
+        self.assertEqual(execute.call_count, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -86,6 +86,9 @@ class ToolSpecTests(unittest.TestCase):
         with self.assertRaises(InputValidationError):
             spec.validate("x")
 
+    def test_polling_defaults_to_false(self):
+        self.assertFalse(make_spec().is_polling)
+
 
 class ToolRegistryTests(unittest.TestCase):
     def test_catalog_text_is_sorted_and_shows_metadata(self):
@@ -149,6 +152,13 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
 
     def test_the_fifteen_core_tools_are_registered(self):
         self.assertEqual(set(self.agent.TOOL_REGISTRY.names), self.CORE_TOOLS)
+
+    def test_polling_tools_are_flagged_in_the_registry(self):
+        registry = self.agent.TOOL_REGISTRY
+        for name in ("read_file", "find_files", "screenshot_background"):
+            with self.subTest(name=name):
+                self.assertTrue(registry.get(name).is_polling)
+        self.assertFalse(registry.get("execute_python").is_polling)
 
     def test_registry_catalog_mentions_every_core_tool(self):
         text = self.agent.TOOL_REGISTRY.catalog_text()
