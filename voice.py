@@ -12,6 +12,8 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
+from audio_bus import audio_bus
+
 _whisper_model = None
 WHISPER_MODEL_SIZE = "small.en"   # change to "small" for better accuracy
 
@@ -191,6 +193,7 @@ def start_recording(
         if not _is_recording:
             return
         _recording_chunks.append(indata.copy())
+        audio_bus.publish(indata, "mic")
         try:
             rms = float(np.sqrt(np.mean(np.square(
                 indata.astype(np.float32)))))

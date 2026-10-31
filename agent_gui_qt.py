@@ -104,6 +104,7 @@ except Exception:
     scheduler = None
 
 import memory
+from hud_core import ReactorHud
 
 # --------------------------- palette ---------------------------
 # Section 1 terminal theme: black surfaces, mint foreground, dim mint
@@ -529,6 +530,17 @@ def get_voice_output():
         import voice_output as _vo
         _voice_output_module = _vo
     return _voice_output_module
+
+
+def _tts_is_speaking():
+    """Check TTS state without importing Kokoro on a status-only poll."""
+    module = sys.modules.get("voice_output")
+    if module is None:
+        return False
+    try:
+        return bool(module.is_speaking())
+    except Exception:
+        return False
 
 
 def extract_final_message(step_log):
@@ -2245,7 +2257,7 @@ class RightPanel(QFrame):
     layout restructuring.
     """
 
-    CARD_TITLES = ("ACTIVITY", "NOW PLAYING", "SYSTEM", "WEATHER",
+    CARD_TITLES = ("CORE", "ACTIVITY", "NOW PLAYING", "SYSTEM", "WEATHER",
                    "TELEGRAM")
 
     def __init__(self):
@@ -2285,6 +2297,12 @@ class RightPanel(QFrame):
                 card = InfoCard(title)
             self.cards[title] = card
             self.cards_layout.addWidget(card)
+
+        self.hud = ReactorHud()
+        core_card = self.cards["CORE"]
+        core_card.placeholder.setVisible(False)
+        core_card.body_layout.insertWidget(
+            0, self.hud, 0, Qt.AlignmentFlag.AlignHCenter)
         self.cards_layout.addStretch(1)
 
         # ACTIVITY shows at most ACTIVITY_MAX_LINES single-line steps, so cap it
@@ -3015,6 +3033,8 @@ class AgentWindow(QMainWindow):
         self._card_anims = []
         self._entry_anims = []
         self._panel_anim = None
+        self._hud_error_until = 0.0
+        self._hud_poll_timer = None
         # Section 2 — Telegram document listener (started in start_services).
         self._telegram_service = None
         self._telegram_results = None
@@ -3216,12 +3236,18 @@ class AgentWindow(QMainWindow):
     # Phase 6c — motion startup
     # ------------------------------------------------------------------
     def start_motion(self):
-        """Begin the ambient motion (card entrance).
+        """Begin the ambient motion (card entrance) and HUD state polling.
 
         Called once after the window is shown. When ANIMATIONS_ENABLED is
-        false this is a no-op: every element already renders in its final
-        state.
+        false the card entrance is skipped; the HUD still shows state colours.
         """
+        if self._hud_poll_timer is None:
+            timer = QTimer(self)
+            timer.setInterval(250)
+            timer.timeout.connect(self._sync_hud_state)
+            timer.start()
+            self._hud_poll_timer = timer
+        self._sync_hud_state()
         # Card entrance: only when the panel is actually visible at launch.
         if self._right_panel_visible:
             QTimer.singleShot(0, self._animate_card_entrance)
@@ -3766,6 +3792,27 @@ class AgentWindow(QMainWindow):
         # the only place a shell-like status belongs.
         label = " ".join((text or "").split())
         self.setWindowTitle(f"Agent — {label}" if label else "Agent")
+        self._sync_hud_state()
+
+    def _sync_hud_state(self):
+        hud = getattr(getattr(self, "panel", None), "hud", None)
+        if hud is None:
+            return
+        if time.monotonic() < getattr(self, "_hud_error_until", 0.0):
+            hud.set_state("ERROR")
+            return
+        if getattr(self, "_recording", False):
+            hud.set_state("LISTENING")
+            return
+        if _tts_is_speaking():
+            hud.set_state("SPEAKING")
+            return
+        title = self.windowTitle().lower()
+        busy = getattr(self, "_processing", False) or any(
+            word in title for word in (
+                "thinking", "working", "reading", "verifying",
+                "transcribing", "browsing", "stopping"))
+        hud.set_state("THINKING" if busy else "IDLE")
 
     # ------------------------------------------------------------------
     # Phase 6c performance guard — pause motion while minimized
@@ -3965,7 +4012,9 @@ class AgentWindow(QMainWindow):
     def _on_turn_failed(self, error_text):
         self._clear_thinking_message()
         self.chat.add_message(AssistantMessage(error_text))
+        self._hud_error_until = time.monotonic() + 2.5
         self._end_turn()
+        QTimer.singleShot(2600, self._sync_hud_state)
         self._schedule_continuous_listen()
 
     def _speak_reply(self, message):
@@ -3996,6 +4045,9 @@ class AgentWindow(QMainWindow):
     def _on_tts_error(self, message):
         """Show the first speech failure as a dim system line."""
         print(f"[tts] {message}")
+        self._hud_error_until = time.monotonic() + 2.5
+        self._sync_hud_state()
+        QTimer.singleShot(2600, self._sync_hud_state)
         if self._tts_error_shown:
             return
         self._tts_error_shown = True

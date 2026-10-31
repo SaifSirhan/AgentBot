@@ -18,6 +18,8 @@ import warnings
 import os
 import numpy as np
 
+from audio_bus import audio_bus
+
 # Silence PyTorch / HuggingFace chatter
 warnings.filterwarnings("ignore")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -421,6 +423,7 @@ def _speak_blocking(text):
                 audio = np.asarray(audio, dtype=np.float32).reshape(-1, 1)
                 if audio.size == 0:
                     continue
+                audio_bus.publish(audio, "tts")
                 stream.write(audio)
                 chunk_count += 1
         print(f"[tts] done ({chunk_count} chunks played)")
