@@ -155,6 +155,14 @@ class SkillIntegrationTests(unittest.TestCase):
             "locks, atomic saves, and validation.", manual)
         self.assertNotIn("You MUST use from docx import Document", manual)
 
+    def test_core_tools_manual_teaches_reading_logs(self):
+        manual = " ".join(agent.load_skill_tool("core_tools").split())
+        self.assertIn(
+            "If the user asks to see your logs or errors, you MUST use the "
+            "read_file tool", manual)
+        self.assertIn("AgentMemory\\crash.log", manual)
+        self.assertIn("AgentMemory\\evals\\traces", manual)
+
     def test_progressive_disclosure_prompt_budget(self):
         prompt = agent._build_plan_prompt("hello", "")
         self.assertLess(

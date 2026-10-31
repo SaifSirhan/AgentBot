@@ -706,6 +706,19 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self.assertTrue(self.window._voice_failed)
         self.assertIn("Voice unavailable", self.window.windowTitle())
 
+    def test_transcription_error_is_written_to_transcript(self):
+        self.window._on_voice_event("error:Transcribe error: whisper failed")
+        texts = [text for _kind, text in self.window.chat.chat_log]
+        self.assertTrue(
+            any("whisper failed" in text for text in texts), texts)
+
+    def test_preload_error_detail_reaches_the_transcript(self):
+        self.window._preload_errors["voice"] = "Whisper model missing"
+        self.window._on_preload_ready("voice:error")
+        texts = [text for _kind, text in self.window.chat.chat_log]
+        self.assertTrue(
+            any("Whisper model missing" in text for text in texts), texts)
+
     def test_wake_preload_failure_survives_voice_ready(self):
         self.window._voice_ready = False
         self.window._on_preload_ready("wake_word:error")
@@ -713,6 +726,50 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self.window._on_preload_ready("voice")
         self.assertIn(
             "wake word unavailable", self.window.windowTitle().lower())
+
+    def test_wake_service_waits_for_voice_preload(self):
+        self.window._voice_ready = False
+        self.window._wake_ready = False
+        self.window._wake_preload_done = False
+        with mock.patch.object(
+                self.window, "_start_wake_word_service") as start:
+            self.window._on_preload_ready("wake_word")
+        start.assert_not_called()
+        with mock.patch.object(
+                self.window, "_start_wake_word_service") as start:
+            self.window._on_preload_ready("voice")
+        start.assert_called_once()
+
+    def test_wake_listener_uses_the_resolved_stt_microphone(self):
+        captured = {}
+
+        class FakeService:
+            model_spec = "fake"
+            inference_framework = "fake"
+
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def start(self):
+                pass
+
+        fake_wake = mock.Mock(WakeWordService=FakeService)
+        fake_voice = mock.Mock()
+        fake_voice.resolve_input_device.return_value = (3, "USB Microphone")
+        self.window._wake_word_service = None
+        with mock.patch.dict(sys.modules, {"wake_word": fake_wake}), \
+                mock.patch.object(
+                    g, "get_voice", return_value=fake_voice), \
+                mock.patch.object(
+                    self.window, "_ensure_wake_watchdog"), \
+                mock.patch.object(
+                    g, "read_config_file_raw", return_value={
+                        "WAKE_WORD_ENABLED": True,
+                        "WAKE_WORD_DEVICE": "",
+                        "WAKE_WORD_MODEL": "hey_jarvis",
+                    }):
+            self.window._start_wake_word_service()
+        self.assertEqual(captured["device_index"], 3)
 
     def test_wake_watchdog_does_not_touch_a_healthy_listener(self):
         service = FakeWakeService(running=True)

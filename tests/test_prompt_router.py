@@ -69,6 +69,25 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual([tool.name for tool in result.tools], ["python_execute"])
         self.assertIn("- python_execute:", result.system_prompt)
 
+    def test_artist_song_request_selects_music_tools(self):
+        tools = pc.build_tools(frozenset({
+            "youtube_search", "play_on_youtube", "media_control", "open_app",
+        }))
+        for request in (
+            "find songs from Frank Ocean",
+            "play some music",
+            "what album is this",
+            "find that track",
+            "who is the artist",
+        ):
+            with self.subTest(request=request):
+                result = pr.build_dynamic_prompt(
+                    request, tools, count_tokens=words, max_tokens=5000)
+                names = {tool.name for tool in result.tools}
+                self.assertIn("youtube_search", names)
+                self.assertIn("play_on_youtube", names)
+                self.assertIn(pr.RULES["music"], result.system_prompt)
+
     def test_top_five_tools_are_selected(self):
         tools = [
             pr.Tool(f"file_tool_{i}", f"Edit file {i}.", ("python",), ("file",))
@@ -615,6 +634,14 @@ class AgentRoutingTests(unittest.TestCase):
                      "edit_docx_safe", "load_skill"):
             self.assertIn(name, prompt)
         self.assertLess(len(prompt) / 4, 7800)
+
+    def test_artist_song_prompt_exposes_music_tools(self):
+        prompt = self.agent._build_plan_prompt(
+            "find songs from Frank Ocean", "")
+        self.assertIn("youtube_search", prompt)
+        self.assertIn("play_on_youtube", prompt)
+        self.assertIn(pr.RULES["music"], prompt)
+        self.assertNotIn(pr.RULES["stremio"], prompt)
 
     def test_non_stremio_skill_is_not_classified_as_stremio(self):
         with mock.patch.object(self.agent, "_skill_directive",

@@ -662,6 +662,24 @@ SELF-SUFFICIENCY
   prefixed [SUGGESTED_TOOL] for the user to build.
 
 =====================================================================
+LOGS & ERRORS
+=====================================================================
+
+  If the user asks to see your logs or errors, you MUST use the read_file
+  tool to read %LOCALAPPDATA%\AgentMemory\crash.log or
+  %LOCALAPPDATA%\AgentMemory\evals\traces\ and output the text.
+
+  - Expand %LOCALAPPDATA% to the real absolute path first (usually
+    C:\Users\<you>\AppData\Local). Never guess or invent log contents.
+  - crash.log holds Python exceptions and native crash stacks. Read it,
+    quote the relevant lines, and explain the cause. If read_file reports
+    the file is missing, say there is no crash log yet.
+  - evals\traces is a directory. Use find_files on
+    %LOCALAPPDATA%\AgentMemory\evals\traces\*.json, then read the newest
+    trace file with read_file and output the requested text.
+  - Never claim you read a log without a successful read_file result.
+
+=====================================================================
 10. EXAMPLES
 =====================================================================
 

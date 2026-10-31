@@ -91,6 +91,17 @@ class GuiEventBusTests(unittest.TestCase):
         fake.set_error_callback.assert_called_once()
         fake.warmup.assert_called_once()
 
+    def test_voice_preload_warms_whisper_and_reports_failure_detail(self):
+        fake = mock.Mock()
+        fake.warmup.side_effect = RuntimeError("Whisper load failed")
+        with mock.patch.object(
+                gui.importlib, "import_module", return_value=fake):
+            self.window._preload_module("voice", 0)
+        fake.warmup.assert_called_once()
+        self.assertEqual(
+            self.window._preload_errors["voice"], "Whisper load failed")
+        self.assertTrue(self.window._voice_failed)
+
     def test_result_is_rendered_as_untrusted_plain_text(self):
         self.window._event_result.emit('<b>not HTML</b> {"tool":"run_command"}')
         self.app.processEvents()

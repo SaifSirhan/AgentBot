@@ -35,6 +35,7 @@ STREMIO_TOOLS = frozenset({
 
 WEATHER_TOOLS = frozenset({"weather"})
 AIR_QUALITY_TOOLS = frozenset({"air_quality"})
+MUSIC_TOOLS = frozenset({"youtube_search", "play_on_youtube"})
 
 # Fallback when a request matches no intent or keyword: desktop control plus
 # file/Python access, so the turn is never left without a way to act.
@@ -169,7 +170,10 @@ EXTRA_KEYWORDS = {
     "generate_image": ("image", "picture", "generate", "draw", "create"),
     "describe_image": ("image", "picture", "describe", "look"),
     "stream_media": ("youtube", "music", "video", "stream", "play"),
-    "play_on_youtube": ("youtube", "music", "song", "play"),
+    "play_on_youtube": ("youtube", "music", "song", "songs", "play",
+                        "artist", "album", "track"),
+    "youtube_search": ("youtube", "search", "song", "songs", "music",
+                       "artist", "album", "track"),
     "queue_on_ytm": ("queue", "add", "music", "youtube", "song"),
     "close_music_tab": ("close", "music", "youtube", "tab", "opera"),
     "media_control": ("play", "pause", "skip", "next", "previous", "prev",
@@ -192,6 +196,8 @@ def build_tools(valid_tools: frozenset[str]) -> tuple[prompt_router.Tool, ...]:
             groups = ["weather"]
         elif name in AIR_QUALITY_TOOLS:
             groups = ["air_quality"]
+        elif name in MUSIC_TOOLS:
+            groups = ["music"]
         elif name in FILE_TOOLS:
             groups = ["python"]
         elif name in OS_TOOLS:

@@ -79,6 +79,9 @@ DEFAULTS = {
     "WAKE_WORD_THRESHOLD": 0.5,
     "WAKE_WORD_DEVICE": "",
     "WAKE_WORD_COOLDOWN": 1.5,
+    # Optional STT microphone index or name. Empty = auto-pick a physical
+    # microphone, skipping VB-Audio/CABLE and other loopback devices.
+    "MIC_DEVICE": "",
     # How long a wake-word trigger listens before auto-releasing F9.
     "WAKE_RECORD_MS": 3500,
     # Hands-free loop: after each reply the mic reopens without the wake

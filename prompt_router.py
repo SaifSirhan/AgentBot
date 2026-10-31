@@ -32,6 +32,12 @@ RULES = {
         "Air quality: use the air_quality tool for AQI, pollution, or smog "
         "questions; never guess current readings."
     ),
+    "music": (
+        "Music: to find or play an artist, album, track, or song, use "
+        "youtube_search and play_on_youtube. For pause, skip, or stop use "
+        "media_control. Never claim a song was found, queued, or played "
+        "without a successful tool result."
+    ),
 }
 
 DOCUMENT_WRITE_VERBS = r"write|create|make|generate|draft|save|export|edit|modify|update|rewrite|produce"
@@ -66,6 +72,13 @@ INTENT_PATTERNS = {
     "air_quality": (
         r"\bair\s+(?:quality|pollution)\b",
         r"\b(?:aqi|smog|pm2\.?5)\b",
+    ),
+    "music": (
+        # Discovery/playback requests need YouTube tools, but pause/skip/next
+        # must keep routing to media_control.
+        r"^(?!.*\b(?:pause|paused|skip|skipping|next|previous|prev|stop|"
+        r"stopping|resume|resuming)\b.*\b(?:songs?|music|artists?|albums?|"
+        r"tracks?)\b).*\b(?:songs?|music|artists?|albums?|tracks?)\b",
     ),
 }
 

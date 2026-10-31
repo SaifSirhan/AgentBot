@@ -3072,9 +3072,12 @@ class AgentWindow(QMainWindow):
         self._voice_failed = False
         self._wake_ready = False
         self._wake_failed = False
+        self._wake_preload_done = False
         self._tts_ready = False
         self._agent_ready = False
+        self._preload_errors = {}
         self._voice_loading_notice_shown = False
+        self._voice_error_shown = False
         self._f9_held = False
         self._pending_f9_start = False
         self._voice_start_event = threading.Event()
@@ -5442,7 +5445,16 @@ class AgentWindow(QMainWindow):
             threshold = float(cfg.get("WAKE_WORD_THRESHOLD", 0.5))
             cooldown = float(cfg.get("WAKE_WORD_COOLDOWN", 1.5))
             device_raw = str(cfg.get("WAKE_WORD_DEVICE", "") or "").strip()
-            device_index = int(device_raw) if device_raw else None
+            if device_raw:
+                device_index = int(device_raw)
+            else:
+                # PyAudio otherwise uses the Windows default input, which is
+                # a loopback cable on this machine and cannot hear the user.
+                try:
+                    device_index = get_voice().resolve_input_device()[0]
+                except Exception as exc:
+                    print(f"[wake] microphone selection failed: {exc}")
+                    device_index = None
 
             import wake_word
             service = wake_word.WakeWordService(
@@ -5880,11 +5892,16 @@ class AgentWindow(QMainWindow):
         if delay:
             time.sleep(delay)
         try:
-            importlib.import_module(name)
+            module = importlib.import_module(name)
+            if name == "voice":
+                # Import alone leaves Whisper lazy; load it and validate the
+                # microphone before F9/wake are marked ready.
+                module.warmup()
             print(f"[preload] {name} ready")
             if not self._shutting_down:
                 self._preload_ready.emit(name)
         except Exception as exc:
+            self._preload_errors[name] = str(exc)
             print(f"[preload] {name} failed: {exc}")
             if not self._shutting_down:
                 self._preload_ready.emit(f"{name}:error")
@@ -5896,13 +5913,18 @@ class AgentWindow(QMainWindow):
             if module == "voice":
                 self._voice_failed = True
                 self._pending_f9_start = False
+                detail = str(self._preload_errors.get(module, "")).strip()
                 self.set_status(
-                    "Voice unavailable — check the terminal", busy=False)
-                if not self._voice_loading_notice_shown:
-                    self._voice_loading_notice_shown = True
-                    self.chat.add_message(SystemMessage(
-                        "Voice unavailable — the speech model failed to "
-                        "import. Check the terminal for details."))
+                    "Voice unavailable — check the transcript", busy=False)
+                if not self._voice_error_shown:
+                    self._voice_error_shown = True
+                    message = (
+                        "Voice unavailable — Whisper or the microphone "
+                        "failed to load")
+                    if detail:
+                        message += f": {detail}"
+                    self.chat.add_message(AssistantMessage(
+                        message + "\nCheck the terminal for the full traceback."))
             elif module == "wake_word":
                 self._wake_failed = True
                 self._wake_ready = False
@@ -5918,6 +5940,9 @@ class AgentWindow(QMainWindow):
         if name == "voice":
             self._voice_ready = True
             print("[voice] ready")
+            if (self._wake_preload_done and self._wake_ready
+                    and self._wake_word_service is None):
+                self._start_wake_word_service()
             if self._f9_held and self._pending_f9_start:
                 self._pending_f9_start = False
                 self._start_recording()
@@ -5955,7 +5980,9 @@ class AgentWindow(QMainWindow):
         elif name == "wake_word":
             self._wake_ready = True
             self._wake_failed = False
-            self._start_wake_word_service()
+            self._wake_preload_done = True
+            if self._voice_ready:
+                self._start_wake_word_service()
             if self._voice_ready and not self._processing and not self._recording:
                 self.set_status("Ready", busy=False)
 
@@ -6342,9 +6369,11 @@ class AgentWindow(QMainWindow):
     def _on_voice_event(self, payload):
         """GUI-thread slot for recording/transcription results."""
         if payload.startswith("error:"):
+            detail = payload[len("error:"):].strip() or "Unknown voice error"
             self._recording = False
             self._continuous_listening = False
-            self.set_status(payload[len("error:"):], busy=False)
+            self.set_status(detail, busy=False)
+            self.chat.add_message(AssistantMessage(f"Voice error: {detail}"))
             self._resume_wake_word()
             return
         if payload == "recording_started":

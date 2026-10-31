@@ -27,6 +27,14 @@ _stream = None
 _recording_chunks = []
 _is_recording = False
 _SAMPLERATE = 16000
+_input_device = None   # (index, name) selected by resolve_input_device()
+
+# Inputs that are loopback/virtual endpoints, not a room microphone.
+_VIRTUAL_INPUT_HINTS = (
+    "cable input", "cable output", "vb-audio", "virtual",
+    "stereo mix", "monitor", "loopback", "sound mapper",
+    "primary sound capture", "pc speaker", "wave out",
+)
 
 # Auto-stop state (only used when start_recording gets an on_transcript
 # callback; F9 push-to-talk still stops on key release).
@@ -36,24 +44,178 @@ _idle_timeout = None
 _last_speech_at = 0.0
 _speech_detected = False
 _recording_started_at = 0.0
+_whisper_lock = threading.Lock()
+
+
+def _input_devices():
+    """Return [(index, name)] for every device that can record."""
+    devices = []
+    for index, device in enumerate(sd.query_devices()):
+        channels = int(device.get("max_input_channels", 0) or 0)
+        if channels > 0:
+            devices.append((index, str(device.get("name", ""))))
+    return devices
+
+
+def _supports_16k_input(index):
+    try:
+        sd.check_input_settings(
+            device=index,
+            samplerate=_SAMPLERATE,
+            channels=1,
+            dtype="int16",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _is_virtual_input(name):
+    lowered = str(name or "").lower()
+    return any(hint in lowered for hint in _VIRTUAL_INPUT_HINTS)
+
+
+def _microphone_score(name):
+    lowered = str(name or "").lower()
+    if _is_virtual_input(name):
+        return -1
+    score = 0
+    if "microphone" in lowered or "headset" in lowered:
+        score += 4
+    if "usb" in lowered:
+        score += 2
+    if "array" in lowered:
+        score += 1
+    if "mic" in lowered:
+        score += 1
+    return score
+
+
+def _configured_mic_device():
+    """Read MIC_DEVICE / AGENT_MIC_DEVICE without failing on config errors."""
+    try:
+        import config
+        configured = str(config.load_config().get("MIC_DEVICE", "") or "")
+    except Exception:
+        configured = ""
+    return (os.environ.get("AGENT_MIC_DEVICE", "") or configured).strip()
+
+
+def _match_configured_device(raw, devices):
+    try:
+        wanted = int(raw)
+    except ValueError:
+        matches = [
+            pair for pair in devices if raw.lower() in pair[1].lower()
+        ]
+        if not matches:
+            raise RuntimeError(
+                f"MIC_DEVICE={raw!r} did not match any input device")
+        return matches[0]
+    for index, name in devices:
+        if index == wanted:
+            return index, name
+    raise RuntimeError(f"MIC_DEVICE={wanted} is not an input device")
+
+
+def resolve_input_device(force=False):
+    """Pick a real microphone, skipping VB-Audio/CABLE-style loopbacks.
+
+    Returns ``(index, name)`` and caches the choice for later recordings.
+    """
+    global _input_device
+    if _input_device is not None and not force:
+        return _input_device
+
+    devices = _input_devices()
+    if not devices:
+        raise RuntimeError(
+            "No microphone input devices found. Connect a microphone and "
+            "restart the GUI.")
+
+    configured = _configured_mic_device()
+    if configured:
+        selected = _match_configured_device(configured, devices)
+        if not _supports_16k_input(selected[0]):
+            raise RuntimeError(
+                f"Microphone '{selected[1]}' (device {selected[0]}) does not "
+                "support 16 kHz mono int16 input")
+        _input_device = selected
+        print(f"[voice] input device override: {selected[1]} "
+              f"(index {selected[0]})")
+        return _input_device
+
+    try:
+        default_index = int(sd.default.device[0])
+    except Exception:
+        default_index = None
+    default_pair = next(
+        (pair for pair in devices if pair[0] == default_index), None)
+    if (default_pair is not None
+            and not _is_virtual_input(default_pair[1])
+            and _supports_16k_input(default_pair[0])):
+        _input_device = default_pair
+        print(f"[voice] input device: {default_pair[1]} "
+              f"(index {default_pair[0]})")
+        return _input_device
+
+    candidates = [
+        pair for pair in devices if _microphone_score(pair[1]) >= 0
+    ]
+    if not candidates:
+        default_label = (
+            f" Default input is '{default_pair[1]}'." if default_pair else "")
+        raise RuntimeError(
+            "No physical microphone found; default input is a virtual or "
+            f"loopback device.{default_label} Set MIC_DEVICE to override.")
+    candidates = [
+        pair for pair in candidates if _supports_16k_input(pair[0])
+    ]
+    if not candidates:
+        raise RuntimeError(
+            "No physical microphone supports 16 kHz mono int16 input.")
+    candidates.sort(key=lambda pair: (-_microphone_score(pair[1]), pair[0]))
+    _input_device = candidates[0]
+    if default_pair is not None and _is_virtual_input(default_pair[1]):
+        print(f"[voice] default input '{default_pair[1]}' is virtual; "
+              f"using {_input_device[1]} (index {_input_device[0]})")
+    else:
+        print(f"[voice] input device: {_input_device[1]} "
+              f"(index {_input_device[0]})")
+    return _input_device
+
+
+def warmup():
+    """Load Whisper and validate the mic path. Call off the GUI thread."""
+    index, name = resolve_input_device(force=True)
+    model = get_whisper_model()
+    print(f"[voice] Whisper ready ({WHISPER_MODEL_SIZE}); "
+          f"mic: {name} (index {index})")
+    return model
 
 
 def get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
-        print(f"Loading Whisper model ('{WHISPER_MODEL_SIZE}')... (first call only)")
-        _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+        with _whisper_lock:
+            if _whisper_model is None:
+                print(
+                    f"Loading Whisper model ('{WHISPER_MODEL_SIZE}')... "
+                    "(first call only)")
+                _whisper_model = WhisperModel(
+                    WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
     return _whisper_model
     
 def unload_whisper_model():
     """Free the Whisper model from RAM. It will reload on next use."""
     global _whisper_model
-    if _whisper_model is not None:
-        del _whisper_model
-        _whisper_model = None
-        import gc
-        gc.collect()
-        print("[voice] Whisper model unloaded, RAM freed")
+    with _whisper_lock:
+        if _whisper_model is not None:
+            del _whisper_model
+            _whisper_model = None
+            import gc
+            gc.collect()
+            print("[voice] Whisper model unloaded, RAM freed")
 
 def transcribe(audio_path):
     model = get_whisper_model()
@@ -65,7 +227,6 @@ def transcribe(audio_path):
         vad_parameters=dict(min_silence_duration_ms=500),
     )
     text = " ".join(segment.text.strip() for segment in segments)
-    unload_whisper_model()   # ← ADD THIS LINE
     return text.strip()
 
 
@@ -203,13 +364,31 @@ def start_recording(
             _last_speech_at = time.monotonic()
             _speech_detected = True
 
-    _stream = sd.InputStream(
-        samplerate=_SAMPLERATE,
-        channels=1,
-        dtype='int16',
-        callback=callback,
-    )
-    _stream.start()
+    try:
+        device_index, device_name = resolve_input_device()
+    except Exception:
+        _is_recording = False
+        _on_transcript = None
+        _idle_timeout = None
+        raise
+
+    try:
+        _stream = sd.InputStream(
+            samplerate=_SAMPLERATE,
+            channels=1,
+            dtype='int16',
+            device=device_index,
+            callback=callback,
+        )
+        _stream.start()
+    except Exception as exc:
+        _is_recording = False
+        _on_transcript = None
+        _idle_timeout = None
+        _close_stream()
+        raise RuntimeError(
+            f"Could not open microphone '{device_name}' "
+            f"(device {device_index}): {exc}") from exc
     if on_transcript is not None:
         threading.Thread(
             target=_monitor_recording,
