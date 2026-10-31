@@ -154,3 +154,21 @@ class LoopGuard:
             self._hash(input_data),
             self._hash(outcome_data),
         ))
+
+    @staticmethod
+    def _batch_payload(actions) -> list[dict[str, Any]]:
+        return [
+            {"tool": action["tool"], "args": action.get("args", {})}
+            for action in actions
+        ]
+
+    def check_batch(self, actions) -> GuardVerdict:
+        """Hash the whole ordered action list so repeated identical batches block."""
+        return self.check("batch", self._batch_payload(actions))
+
+    def record_batch(self, actions, outcomes) -> None:
+        self.record(
+            "batch",
+            self._batch_payload(actions),
+            [getattr(outcome, "observation", outcome) for outcome in outcomes],
+        )

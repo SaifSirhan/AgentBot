@@ -13,6 +13,7 @@ import traceback
 import urllib.parse
 import winsound
 import weather_news
+from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 from pathlib import Path
 from PIL import ImageGrab
@@ -27,7 +28,13 @@ import watcher
 import gmail_tool
 import scheduler
 import memory
-from tool_registry import InputValidationError, ToolRegistry, ToolSpec
+from tool_registry import (
+    BATCH_EFFECT_ERROR,
+    InputValidationError,
+    ToolRegistry,
+    ToolSpec,
+    batch_rejection_error,
+)
 from uia_control import uia_click, uia_dump_tree, uia_type
 import screen
 import security_tools
@@ -1633,6 +1640,40 @@ _HALLUCINATED_RESULT_RE = re.compile(
     r"<\s*tool_result\b[^>]*\bname\s*=", re.IGNORECASE)
 
 
+def _normalize_action(raw_action):
+    """Rename the action alias and default the input field; None when invalid."""
+    if not isinstance(raw_action, dict):
+        return None
+    action = dict(raw_action)
+    if 'action' in action and 'tool' not in action:
+        action['tool'] = action.pop('action')
+    tool = action.get('tool')
+    if not isinstance(tool, str) or not tool.strip():
+        return None
+    if tool == "delegate_to_qoder" and not action.get('input'):
+        action['input'] = action.get('prompt', '')
+    action.setdefault('input', '')
+    return action
+
+
+def _validate_parsed_batch(items):
+    """Validate every action in a top-level JSON array, all or nothing."""
+    batch = []
+    for item in items:
+        action = _normalize_action(item)
+        if action is None:
+            return None, ('Each batched action must be a JSON object with '
+                          'a "tool" field.')
+        tool = action['tool']
+        if tool not in VALID_TOOLS:
+            return None, (f"'{tool}' is not a valid tool name. "
+                          f"Valid: {', '.join(sorted(VALID_TOOLS))}")
+        if not _tool_allowed(tool):
+            return None, _not_allowed_error(tool)
+        batch.append(action)
+    return batch, None
+
+
 def parse_action(plan_text):
     raw = (plan_text or "").strip()
 
@@ -1651,6 +1692,17 @@ def parse_action(plan_text):
     if _HALLUCINATED_RESULT_RE.search(raw):
         return None, ("Do not output <tool_result> blocks. Tool results come "
                       "only from real tool calls.")
+
+    # A pure top-level JSON array is a concurrent read-only batch request.
+    # Line-delimited objects keep the legacy first-plus-queued behavior below.
+    try:
+        parsed_json = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed_json = None
+    if isinstance(parsed_json, list):
+        if not parsed_json:
+            return None, "Batch must contain at least one action."
+        return _validate_parsed_batch(parsed_json)
 
     # Try to extract one or more JSON tool calls
     actions = _extract_json_actions(raw)
@@ -6124,6 +6176,29 @@ def execute_tool(action):
     return result
 
 
+def run_read_only_batch(actions):
+    """Run up to three registered read-only actions concurrently, in order.
+
+    Returns (ordered_results, rejection). The whole batch is rejected when any
+    action is not a verified read-only tool, so no write can ride along.
+    """
+    rejection = batch_rejection_error(
+        [action.get('tool') for action in actions], TOOL_REGISTRY)
+    if rejection:
+        return [], rejection
+    results = []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(execute_tool, action) for action in actions]
+        for future in futures:
+            try:
+                results.append(future.result())
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                results.append(f"ERROR: {type(exc).__name__}: {exc}")
+    return results, None
+
+
 # ---------------------------
 # AGENT TURN ORCHESTRATION
 # ---------------------------
@@ -6892,6 +6967,30 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
             step_log.append(f"System: {error}")
             break
 
+        if isinstance(action, list):
+            batch_key = json.dumps(
+                [[item.get('tool'), item.get('input', '')] for item in action],
+                sort_keys=True, ensure_ascii=False)
+            if _is_repeat_action('batch', batch_key, last_signature):
+                print("\nDetected repeated batch - stopping.")
+                step_log.append("System: Repeated batch - stopped.")
+                break
+            last_signature = ('batch', batch_key)
+            _raise_if_stopped(stop_event)
+            outputs, rejection = run_read_only_batch(action)
+            _raise_if_stopped(stop_event)
+            if rejection:
+                print(f"\n{rejection}")
+                step_log.append(f"Action: batch({batch_key}) -> Result: {rejection}")
+                continue
+            for item, output in zip(action, outputs):
+                qtool = item.get('tool')
+                qinp = item.get('input', '')
+                tool_executions_this_turn.append((qtool, qinp, output))
+                print(f"\n{output}")
+                step_log.append(f"Action: {qtool}({qinp}) -> Result: {output}")
+            continue
+
         tool = action.get('tool')
         inp = action.get('input', '')
 
@@ -6944,7 +7043,7 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
             _raise_if_stopped(stop_event)
             force_action, _ = get_valid_action(force_prompt, "\n".join(step_log))
             _raise_if_stopped(stop_event)
-            if force_action and force_action.get('tool') == 'chat':
+            if isinstance(force_action, dict) and force_action.get('tool') == 'chat':
                 final = force_action['input']
                 if not _reply_allowed(final):
                     if _retry_after_rejection():

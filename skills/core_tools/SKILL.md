@@ -197,6 +197,10 @@ narration before, between, or after tool-call lines.
 Batch multiple calls one JSON object per line ONLY when they are independent
 or all inputs are already known. Preserve the user's requested order.
 
+You can execute up to 3 READ-ONLY tools simultaneously by outputting a JSON
+array of actions. This is highly recommended for research tasks (e.g.,
+searching multiple URLs). NEVER batch write tools or OS control.
+
 For a dependent chain, call the first required tool, wait for its result,
 then construct the next call from that result. Never invent a downstream
 input.

@@ -14,6 +14,14 @@ from typing import Any, Callable
 
 EFFECT_CLASSES = frozenset({"read_only", "write", "system_control"})
 
+MAX_BATCH_ACTIONS = 3
+BATCH_EFFECT_ERROR = (
+    "ERROR: Cannot batch write/system_control tools. "
+    "Execute them sequentially.")
+BATCH_SIZE_ERROR = (
+    f"ERROR: Cannot batch more than {MAX_BATCH_ACTIONS} actions. "
+    "Execute at most three read-only tools per batch.")
+
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -233,3 +241,23 @@ class ToolRegistry:
         for spec in self.specs:
             lines.append(f"- {spec.name} {spec.catalog_description()}")
         return "\n".join(lines)
+
+
+def batch_rejection_error(names, registry: ToolRegistry) -> str | None:
+    """Return the rejection for a batch, or None when it is safe to run concurrently.
+
+    Unregistered tools fail closed: without a spec the effect class cannot be
+    verified, and a legacy write tool must never join a parallel batch.
+    """
+    names = list(names)
+    if len(names) > MAX_BATCH_ACTIONS:
+        return BATCH_SIZE_ERROR
+    for name in names:
+        spec = (
+            registry.get(name)
+            if registry is not None and isinstance(name, str)
+            else None
+        )
+        if spec is None or spec.effect_class != "read_only":
+            return BATCH_EFFECT_ERROR
+    return None

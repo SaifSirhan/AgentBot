@@ -15,6 +15,7 @@ from typing import Any, Callable, Collection, Mapping, Sequence
 from uuid import uuid4
 
 from loop_guard import GuardVerdict, LoopGuard
+from tool_registry import MAX_BATCH_ACTIONS, batch_rejection_error
 
 
 logger = logging.getLogger(__name__)
@@ -191,11 +192,27 @@ class AutonomousLoop:
         self.delegation_probe_tools = probes
         self.delegation_success_markers = markers
         self.wall_clock_timeout = float(wall_clock_timeout)
+        self.tool_registry = tool_registry
         self.loop_guard = LoopGuard(
             registry=tool_registry,
             polling_tools=probes | polling,
             exempt_tools=CONTROL_TOOLS,
         )
+
+    def _execute_batch_item(self, item):
+        outcome = self.execute_tool(
+            item["tool"], deepcopy(item["args"]), self.stop_event)
+        if (
+            not isinstance(outcome, ToolResult)
+            or type(outcome.ok) is not bool
+            or not isinstance(outcome.observation, str)
+            or (
+                outcome.replay_args is not None
+                and not isinstance(outcome.replay_args, dict)
+            )
+        ):
+            raise TypeError("Dispatcher must return ToolResult")
+        return outcome
 
     def run(
         self,
@@ -232,6 +249,7 @@ class AutonomousLoop:
         instructions = (
             'Choose exactly one next action: '
             '{"tool":"name","args":{...}}, '
+            "or a JSON array of up to 3 READ-ONLY actions to run concurrently, "
             "or output exactly DONE when the goal is achieved. "
             "No prose or code fences. "
             "You do not need to expose private reasoning. "
@@ -487,88 +505,131 @@ class AutonomousLoop:
             try:
                 request = json.loads(reply)
 
-                if (
+                batch = None
+                if isinstance(request, list):
+                    if not 1 <= len(request) <= MAX_BATCH_ACTIONS:
+                        raise ValueError("Invalid batch size")
+                    batch = []
+                    for item in request:
+                        if (
+                            not isinstance(item, dict)
+                            or set(item) != {"tool", "args"}
+                            or not isinstance(item["tool"], str)
+                            or not isinstance(item["args"], dict)
+                        ):
+                            raise ValueError("Invalid batch action")
+                        json.dumps(item, allow_nan=False)
+                        batch.append({
+                            "tool": item["tool"].strip(),
+                            "args": item["args"],
+                        })
+                elif (
                     not isinstance(request, dict)
                     or set(request) != {"tool", "args"}
                     or not isinstance(request["tool"], str)
                     or not isinstance(request["args"], dict)
                 ):
                     raise ValueError("Invalid action")
-
-                json.dumps(request, allow_nan=False)
+                else:
+                    json.dumps(request, allow_nan=False)
 
             except (ValueError, TypeError, RecursionError):
                 observe(
-                    "Invalid action. Return exactly DONE or "
-                    '{"tool":"allowed_name","args":{...}}.'
+                    "Invalid action. Return exactly DONE, "
+                    '{"tool":"allowed_name","args":{...}}, or a JSON array '
+                    f"of up to {MAX_BATCH_ACTIONS} read-only actions."
                 )
                 continue
 
-            tool = request["tool"].strip()
-            args = request["args"]
-            if tool == "request_tool":
-                work_turns -= 1
-                if repair_pending:
-                    repair_consumed = False
+            tool = args = None
+            if batch is None:
+                tool = request["tool"].strip()
+                args = request["args"]
+                if tool == "request_tool":
+                    work_turns -= 1
+                    if repair_pending:
+                        repair_consumed = False
+                actions = [{"tool": tool, "args": args}]
+            else:
+                actions = batch
 
-            if tool not in self.tools:
-                error = f"Tool '{tool}' is not available this turn."
+            unavailable = next(
+                (item["tool"] for item in actions
+                 if item["tool"] not in self.tools),
+                None,
+            )
+            if unavailable is not None:
+                error = f"Tool '{unavailable}' is not available this turn."
                 if "request_tool" not in self.tools:
                     return finish(
                         "error", step,
                         f"{error} request_tool is unavailable; cannot request it.",
                     )
-                observe(f"{error} Use request_tool to request '{tool}' first.")
+                observe(f"{error} Use request_tool to request '{unavailable}' first.")
                 continue
 
-            try:
-                approved = (
-                    self.authorize(tool, deepcopy(args)) is True
-                )
+            if batch is not None:
+                rejection = batch_rejection_error(
+                    [item["tool"] for item in batch], self.tool_registry)
+                if rejection:
+                    observe(rejection)
+                    continue
 
-            except InterruptedError:
-                return finish(
-                    "cancelled",
-                    step,
-                    "Approval was cancelled.",
-                )
+            for item in actions:
+                try:
+                    approved = (
+                        self.authorize(
+                            item["tool"], deepcopy(item["args"])) is True
+                    )
 
-            except Exception as exc:
-                return finish(
-                    "denied",
-                    step,
-                    "Approval failed closed: "
-                    f"{type(exc).__name__}.",
-                )
+                except InterruptedError:
+                    return finish(
+                        "cancelled",
+                        step,
+                        "Approval was cancelled.",
+                    )
 
-            if self.stop_event.is_set():
-                return finish(
-                    "cancelled",
-                    step,
-                    "Stopped by cancellation.",
-                )
+                except Exception as exc:
+                    return finish(
+                        "denied",
+                        step,
+                        "Approval failed closed: "
+                        f"{type(exc).__name__}.",
+                    )
 
-            if not approved:
-                return finish(
-                    "denied",
-                    step,
-                    f"Permission denied for {tool}; no retry.",
-                )
+                if self.stop_event.is_set():
+                    return finish(
+                        "cancelled",
+                        step,
+                        "Stopped by cancellation.",
+                    )
 
-            verdict = self.loop_guard.check(tool, args)
+                if not approved:
+                    return finish(
+                        "denied",
+                        step,
+                        f"Permission denied for {item['tool']}; no retry.",
+                    )
+
+            if batch is not None:
+                verdict = self.loop_guard.check_batch(batch)
+                guard_target = "the same tool batch"
+            else:
+                verdict = self.loop_guard.check(tool, args)
+                guard_target = tool
             if verdict == GuardVerdict.BLOCK:
                 guard_blocks += 1
                 messages.append({
                     "role": "system",
                     "content": (
-                        f"[GUARD] You are stuck in a loop repeating {tool}. "
+                        f"[GUARD] You are stuck in a loop repeating {guard_target}. "
                         "You MUST change your strategy, use a different tool, "
                         "or ask the user for help."),
                 })
                 if guard_blocks >= 3:
                     return finish(
                         "failed", step,
-                        f"Progress guard: stuck in a loop repeating {tool} "
+                        f"Progress guard: stuck in a loop repeating {guard_target} "
                         "three times without a strategy change.",
                     )
                 continue
@@ -576,74 +637,126 @@ class AutonomousLoop:
                 messages.append({
                     "role": "system",
                     "content": (
-                        f"[GUARD] You have run {tool} several times. "
+                        f"[GUARD] You have run {guard_target} several times. "
                         "Are you making progress?"),
                 })
 
-            try:
-                if tool == "scratchpad_write":
-                    outcome = ToolResult(True, self.scratchpad.write(**args))
-                elif tool == "scratchpad_read":
-                    outcome = ToolResult(True, self.scratchpad.read(**args))
-                else:
-                    outcome = self.execute_tool(
-                        tool,
-                        deepcopy(args),
-                        self.stop_event,
+            if batch is not None:
+                outcomes = []
+                interrupted = False
+                denied = None
+                with ThreadPoolExecutor(max_workers=3) as pool:
+                    futures = [
+                        (item, pool.submit(self._execute_batch_item, item))
+                        for item in batch
+                    ]
+                    for item, future in futures:
+                        try:
+                            outcomes.append(future.result())
+                        except InterruptedError:
+                            interrupted = True
+                        except PermissionError as exc:
+                            denied = str(exc)
+                        except Exception as exc:
+                            outcomes.append(ToolResult(
+                                False,
+                                f"Tool '{item['tool']}' failed: "
+                                f"{type(exc).__name__}: {exc}; "
+                                "state may be partial.",
+                            ))
+                if interrupted:
+                    return finish(
+                        "cancelled",
+                        step,
+                        "Tool execution was cancelled; "
+                        "state may be partial.",
+                    )
+                if denied is not None:
+                    return finish(
+                        "denied",
+                        step,
+                        f"Dispatcher denied execution: {denied}; no retry.",
+                    )
+            else:
+                try:
+                    if tool == "scratchpad_write":
+                        outcome = ToolResult(True, self.scratchpad.write(**args))
+                    elif tool == "scratchpad_read":
+                        outcome = ToolResult(True, self.scratchpad.read(**args))
+                    else:
+                        outcome = self.execute_tool(
+                            tool,
+                            deepcopy(args),
+                            self.stop_event,
+                        )
+
+                    if (
+                        not isinstance(outcome, ToolResult)
+                        or type(outcome.ok) is not bool
+                        or not isinstance(outcome.observation, str)
+                        or (
+                            outcome.replay_args is not None
+                            and not isinstance(
+                                outcome.replay_args,
+                                dict,
+                            )
+                        )
+                    ):
+                        raise TypeError(
+                            "Dispatcher must return ToolResult"
+                        )
+
+                except InterruptedError:
+                    return finish(
+                        "cancelled",
+                        step,
+                        "Tool execution was cancelled; "
+                        "state may be partial.",
                     )
 
-                if (
-                    not isinstance(outcome, ToolResult)
-                    or type(outcome.ok) is not bool
-                    or not isinstance(outcome.observation, str)
-                    or (
-                        outcome.replay_args is not None
-                        and not isinstance(
-                            outcome.replay_args,
-                            dict,
+                except PermissionError as exc:
+                    return finish(
+                        "denied",
+                        step,
+                        f"Dispatcher denied execution: {exc}; no retry.",
+                    )
+
+                except Exception as exc:
+                    outcome = ToolResult(
+                        ok=False,
+                        observation=(
+                            f"Tool '{tool}' failed: {type(exc).__name__}: {exc}; "
+                            "state may be partial."
+                        ),
+                    )
+
+            if batch is not None:
+                for item, item_outcome in zip(batch, outcomes):
+                    history.append(
+                        RecordedAction(
+                            step=history_offset + step,
+                            tool=item["tool"],
+                            ok=item_outcome.ok,
+                            observation=item_outcome.observation,
+                            replay_args=deepcopy(item_outcome.replay_args),
+                            arguments=deepcopy(item["args"]),
                         )
                     )
-                ):
-                    raise TypeError(
-                        "Dispatcher must return ToolResult"
+                    self.scratchpad.record(history[-1])
+                self.loop_guard.record_batch(batch, outcomes)
+            else:
+                history.append(
+                    RecordedAction(
+                        step=history_offset + step,
+                        tool=tool,
+                        ok=outcome.ok,
+                        observation=outcome.observation,
+                        replay_args=deepcopy(outcome.replay_args),
+                        arguments=deepcopy(args),
                     )
-
-            except InterruptedError:
-                return finish(
-                    "cancelled",
-                    step,
-                    "Tool execution was cancelled; "
-                    "state may be partial.",
                 )
-
-            except PermissionError as exc:
-                return finish(
-                    "denied",
-                    step,
-                    f"Dispatcher denied execution: {exc}; no retry.",
-                )
-
-            except Exception as exc:
-                outcome = ToolResult(
-                    ok=False,
-                    observation=(
-                        f"Tool '{tool}' failed: {type(exc).__name__}: {exc}; "
-                        "state may be partial."
-                    ),
-                )
-
-            history.append(
-                RecordedAction(
-                    step=history_offset + step,
-                    tool=tool,
-                    ok=outcome.ok,
-                    observation=outcome.observation,
-                    replay_args=deepcopy(outcome.replay_args),
-                    arguments=deepcopy(args),
-                )
-            )
-            self.scratchpad.record(history[-1])
-            self.loop_guard.record(tool, args, outcome.observation)
+                self.scratchpad.record(history[-1])
+                self.loop_guard.record(tool, args, outcome.observation)
 
             if time.monotonic() >= deadline:
                 return finish(
@@ -651,11 +764,19 @@ class AutonomousLoop:
                     f"Wall-clock timeout after {self.wall_clock_timeout:.0f}s "
                     "without completing the goal.")
 
-            observation_text = (
-                f"{tool} {'succeeded' if outcome.ok else 'failed'}: "
-                f"{outcome.observation[:8000]}"
-            )
-            if outcome.ok and self.delegation_tool and tool == self.delegation_tool:
+            if batch is not None:
+                budget = max(1000, 8000 // max(1, len(outcomes)))
+                observation_text = "\n\n".join(
+                    f"{item['tool']} "
+                    f"{'succeeded' if item_outcome.ok else 'failed'}: "
+                    f"{item_outcome.observation[:budget]}"
+                    for item, item_outcome in zip(batch, outcomes))
+            else:
+                observation_text = (
+                    f"{tool} {'succeeded' if outcome.ok else 'failed'}: "
+                    f"{outcome.observation[:8000]}"
+                )
+            if batch is None and outcome.ok and self.delegation_tool and tool == self.delegation_tool:
                 delegation_pending = True
                 observation_text += (
                     "\n\nNEXT REQUIRED STEP: Take a screenshot of the "
@@ -667,7 +788,7 @@ class AutonomousLoop:
                     "has no result yet, wait and inspect again. Do not output "
                     "DONE until you have inspected the result."
                 )
-            elif outcome.ok and tool in self.delegation_probe_tools:
+            elif batch is None and outcome.ok and tool in self.delegation_probe_tools:
                 normalized = " ".join(
                     outcome.observation.lower().split())
                 if any(marker in normalized
@@ -689,7 +810,7 @@ class AutonomousLoop:
                     "Stopped after the current tool returned.",
                 )
 
-            if tool == "request_tool":
+            if batch is None and tool == "request_tool":
                 if not outcome.ok:
                     return finish("error", step, "Tool request failed.")
                 grant_pending = True
