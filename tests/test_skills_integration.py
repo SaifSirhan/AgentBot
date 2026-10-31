@@ -98,10 +98,8 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn('load_skill("local:core_tools")', prompt)
         self.assertIn("Do not guess the input format.", prompt)
         self.assertIn(
-            'To call a tool, you MUST output a valid JSON block: '
-            '{"tool": "tool_name", "input": "tool_input"}.', prompt)
-        self.assertIn(
-            'Output ONLY valid JSON. NEVER write tool("arg") or XML.', prompt)
+            'To call a tool, output ONLY a JSON object: {"tool": "tool_name", '
+            '"input": "tool_input"}. Never write tool("arg") or XML.', prompt)
         self.assertLess(len(agent.TOOL_DESCRIPTIONS), 2000)
         for name in agent.VALID_TOOLS - {"chat", "done"}:
             self.assertIn(name, agent.TOOL_DESCRIPTIONS)

@@ -1295,13 +1295,10 @@ MAX_PROMPT_TOKENS = 7800
 _ROUTED = _threading.local()
 
 TOOL_PROTOCOL = (
-    'TOOL CALL PROTOCOL: To call a tool, you MUST output a valid JSON block: '
-    '{"tool": "tool_name", "input": "tool_input"}.\n'
-    'Output ONLY valid JSON. NEVER write tool("arg") or XML.\n'
-    'Call load_skill("local:core_tools") before using a tool whose input '
-    'format you do not know. Do not guess the input format.\n'
-    'If a needed tool is not listed, output '
-    '{"tool": "request_tool", "input": "tool_name"} to add it for this turn.'
+    'Call load_skill("local:core_tools") for unknown tool input formats. '
+    'Do not guess the input format.\n'
+    'If a tool is not listed, output '
+    '{"tool": "request_tool", "input": "tool_name"}.'
 )
 
 
