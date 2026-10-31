@@ -135,6 +135,9 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
         "current_time",
         "remember",
         "telegram_user_send",
+        "uia_dump_tree",
+        "uia_click",
+        "uia_type",
     }
 
     def setUp(self):
@@ -150,8 +153,19 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_the_fifteen_core_tools_are_registered(self):
+    def test_the_eighteen_core_tools_are_registered(self):
         self.assertEqual(set(self.agent.TOOL_REGISTRY.names), self.CORE_TOOLS)
+
+    def test_uia_tools_have_expected_effects_and_polling(self):
+        registry = self.agent.TOOL_REGISTRY
+        dump = registry.get("uia_dump_tree")
+        self.assertEqual(dump.effect_class, "read_only")
+        self.assertTrue(dump.is_polling)
+        for name in ("uia_click", "uia_type"):
+            with self.subTest(name=name):
+                spec = registry.get(name)
+                self.assertEqual(spec.effect_class, "write")
+                self.assertFalse(spec.is_polling)
 
     def test_polling_tools_are_flagged_in_the_registry(self):
         registry = self.agent.TOOL_REGISTRY

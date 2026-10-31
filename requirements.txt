@@ -55,6 +55,7 @@ comtypes             # required by pycaw
 psutil
 pyautogui
 mss                  # fast primary-monitor screenshots (os_control.py)
+pywinauto            # grounded Windows UI Automation (uia_control.py)
 schedule
 
 # --- Browser automation ---

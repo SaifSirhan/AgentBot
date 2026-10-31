@@ -28,6 +28,7 @@ import gmail_tool
 import scheduler
 import memory
 from tool_registry import InputValidationError, ToolRegistry, ToolSpec
+from uia_control import uia_click, uia_dump_tree, uia_type
 import screen
 import security_tools
 import air_quality as air_quality_tool
@@ -5140,7 +5141,8 @@ VALID_TOOLS = {
     "system_status", "check_battery_health", "lock_pc", "sleep_pc", "shutdown_pc", "restart_pc",
     "save_screenshot", "todo", "list_windows", "focus_window", "notify",
     "screenshot_background", "analyze_screenshot", "click_coordinates",
-    "type_text", "get_pixel_color", "save_macro", "play_macro",
+    "type_text", "get_pixel_color", "uia_dump_tree", "uia_click",
+    "uia_type", "save_macro", "play_macro",
     "delegate_to_qoder",
     "beep", "done", "set_reminder_at", "list_reminders", "list_brains",
     "close_window", "watch_folder", "stop_watching", "watch_system_condition",
@@ -5803,6 +5805,37 @@ def _build_tool_registry():
             timeout=90,
             func=screenshot_background,
             is_polling=True,
+        ),
+        ToolSpec(
+            name="uia_dump_tree",
+            description=(
+                "List interactive UI Automation elements in an open window."),
+            input_schema=_input_string(min_length=1),
+            effect_class="read_only",
+            timeout=20,
+            func=uia_dump_tree,
+            is_polling=True,
+        ),
+        ToolSpec(
+            name="uia_click",
+            description=(
+                "Click a UI Automation element: 'window|element'."),
+            input_schema=_input_string(
+                min_length=3, pattern=r"^[^|]+\|.+$"),
+            effect_class="write",
+            timeout=20,
+            func=uia_click,
+        ),
+        ToolSpec(
+            name="uia_type",
+            description=(
+                "Type into a UI Automation field: "
+                "'window|element|text'."),
+            input_schema=_input_string(
+                min_length=5, pattern=r"^[^|]+\|[^|]+\|[\s\S]+$"),
+            effect_class="write",
+            timeout=20,
+            func=uia_type,
         ),
         ToolSpec(
             name="find_files",
