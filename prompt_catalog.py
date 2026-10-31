@@ -81,7 +81,7 @@ DESCRIPTIONS = {
     "delegate_to_qoder": "Send a complex website/app/localhost-server build to Qoder IDE via clipboard and Ctrl+L chat, then let the turn inspect the terminal. Input: prompt and goal.",
     "save_macro": "Save a reusable click/type/hotkey macro.",
     "play_macro": "Run a saved macro by name.",
-    "set_volume": "Set, mute, or unmute system volume.",
+    "set_volume": "Set system volume to an integer from 0 through 100.",
     "media_control": "Play/pause, next, previous, or stop media.",
     "check_battery_health": "Battery health percentage, design and full-charge capacities via powercfg; no input or file path needed.",
     "watch_system_condition": "Notify once when battery charge, CPU or RAM reaches a threshold in the background. Input: condition|target_percent|message.",

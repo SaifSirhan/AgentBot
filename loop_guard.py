@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import deque
 from enum import Enum
 from typing import Any, Collection
@@ -19,7 +20,7 @@ class GuardVerdict(str, Enum):
 class LoopGuard:
     """Track recent (tool, input hash, outcome hash) triples.
 
-    Three rules stop the loops agents actually fall into:
+    Four rules stop the loops agents actually fall into:
 
     * The same (tool, input) three times in the window blocks the next call,
       even when the output text changes slightly.
@@ -27,12 +28,17 @@ class LoopGuard:
       A B A B A B pattern block the proposed call.
     * A polling tool called five times in a row without another action
       between calls blocks the sixth call.
+    * A fourth consecutive click within 15 pixels of the first click in the
+      current cluster blocks; clicks moving across the screen keep passing.
 
     Polling tools are safe to call repeatedly while waiting for a state
     change, so short runs pass. Control tools are exempt entirely.
     """
 
     MAX_CONSECUTIVE_POLLS = 5
+    CLICK_TOOL = "click_coordinates"
+    CLICK_RADIUS_PX = 15
+    MAX_STATIONARY_CLICKS = 3
 
     def __init__(
         self,
@@ -62,6 +68,8 @@ class LoopGuard:
         self._window: deque[tuple[str, str, str]] = deque(maxlen=window_size)
         self._poll_streak_tool = None
         self._poll_streak = 0
+        self._click_anchor: tuple[int, int] | None = None
+        self._click_streak = 0
 
     @property
     def window(self) -> tuple[tuple[str, str, str], ...]:
@@ -70,10 +78,45 @@ class LoopGuard:
     def reset(self) -> None:
         self._window.clear()
         self._clear_poll_streak()
+        self._reset_click_streak()
 
     def _clear_poll_streak(self) -> None:
         self._poll_streak_tool = None
         self._poll_streak = 0
+
+    def _reset_click_streak(self) -> None:
+        self._click_anchor = None
+        self._click_streak = 0
+
+    @staticmethod
+    def _click_point(input_data: Any) -> tuple[int, int] | None:
+        if not isinstance(input_data, str):
+            return None
+        match = re.match(r"^\s*(-?\d+)\s*(?:,|\s)\s*(-?\d+)", input_data)
+        if match is None:
+            return None
+        return int(match.group(1)), int(match.group(2))
+
+    def _click_is_stationary(self, point: tuple[int, int]) -> bool:
+        if self._click_anchor is None:
+            return False
+        dx = point[0] - self._click_anchor[0]
+        dy = point[1] - self._click_anchor[1]
+        return dx * dx + dy * dy <= self.CLICK_RADIUS_PX ** 2
+
+    def _record_click(self, tool_name: str, input_data: Any) -> None:
+        if tool_name != self.CLICK_TOOL:
+            self._reset_click_streak()
+            return
+        point = self._click_point(input_data)
+        if point is None:
+            self._reset_click_streak()
+            return
+        if self._click_is_stationary(point):
+            self._click_streak += 1
+        else:
+            self._click_anchor = point
+            self._click_streak = 1
 
     def _is_polling(self, tool_name: str) -> bool:
         if tool_name in self._polling_tools:
@@ -125,6 +168,13 @@ class LoopGuard:
                 return GuardVerdict.BLOCK
             return GuardVerdict.PASS
 
+        if tool_name == self.CLICK_TOOL:
+            point = self._click_point(input_data)
+            if (point is not None
+                    and self._click_is_stationary(point)
+                    and self._click_streak >= self.MAX_STATIONARY_CLICKS):
+                return GuardVerdict.BLOCK
+
         input_hash = self._hash(input_data)
         if self._forms_ping_pong(tool_name, input_hash):
             return GuardVerdict.BLOCK
@@ -148,6 +198,7 @@ class LoopGuard:
                 self._poll_streak_tool = tool_name
                 self._poll_streak = 1
             return
+        self._record_click(tool_name, input_data)
         self._clear_poll_streak()
         self._window.append((
             tool_name,

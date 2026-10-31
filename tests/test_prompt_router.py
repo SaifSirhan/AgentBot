@@ -248,6 +248,44 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("- search_web:", result.system_prompt)
         self.assertLessEqual(result.token_count, 1500)
 
+    def test_research_intent_always_pins_search_web_and_serp_search(self):
+        tools = [
+            pr.Tool("search_web", "Search the web.", (), ("search", "web")),
+            pr.Tool("serp_search", "Structured search.", (), ("search",)),
+        ] + [
+            pr.Tool(f"document_tool_{i}", "Document helper.", ("python",),
+                    ("docx", "document"))
+            for i in range(7)
+        ]
+        for request in (
+            "research the best laptops for programming",
+            "search the web for laptop reviews",
+            "search for a good Italian restaurant",
+        ):
+            with self.subTest(request=request):
+                result = pr.build_dynamic_prompt(
+                    request, tools, count_tokens=words, max_tokens=5000)
+                names = [tool.name for tool in result.tools]
+                self.assertIn("search_web", names)
+                self.assertIn("serp_search", names)
+                self.assertIn(pr.RULES["research"], result.system_prompt)
+                self.assertNotIn(pr.RULES["python"], result.system_prompt)
+
+    def test_classifier_research_intent_pins_the_same_tools(self):
+        tools = [
+            pr.Tool("search_web", "Search the web.", ()),
+            pr.Tool("serp_search", "Structured search.", ()),
+            pr.Tool("os_control", "Desktop control.", ("os",)),
+        ]
+        result = pr.build_dynamic_prompt(
+            "compare three laptops", tools, count_tokens=words,
+            max_tokens=5000, classify_intents=lambda request: ["research"],
+        )
+        names = [tool.name for tool in result.tools]
+        self.assertIn("search_web", names)
+        self.assertIn("serp_search", names)
+        self.assertIn(pr.RULES["research"], result.system_prompt)
+
     def test_document_writes_pin_registered_python(self):
         tools = [
             pr.Tool(f"a_document_{i}", "Document helper.", ("python",),

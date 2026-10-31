@@ -201,6 +201,8 @@ You can execute up to 3 READ-ONLY tools simultaneously by outputting a JSON
 array of actions. This is highly recommended for research tasks (e.g.,
 searching multiple URLs). NEVER batch write tools or OS control.
 
+To run multiple read-only tools at once, output a JSON array: [{"tool": "search_web", "input": "Apple"}, {"tool": "search_web", "input": "Google"}].
+
 For a dependent chain, call the first required tool, wait for its result,
 then construct the next call from that result. Never invent a downstream
 input.
@@ -471,7 +473,7 @@ PC CONTROL
     condition: battery, cpu, or ram; target: 0–100. Example:
     "battery|100|Battery is fully charged!". Checks every 30 seconds in a daemon
     thread while AgentBot is running; stops after sending the notification.
-  set_volume(input) — "0"–"100", "mute", "unmute".
+  set_volume(input) — integer 0–100.
   media_control(input) — "play_pause", "next", "prev", "stop".
   lock_pc() — lock Windows.
   sleep_pc() — sleep Windows.

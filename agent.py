@@ -2559,16 +2559,19 @@ def set_volume(input_str):
     if not PYCAW_AVAILABLE:
         return "ERROR: pycaw not installed."
     try:
-        s = input_str.strip().lower()
         vol = _get_volume_interface()
-        if s in ("mute", "off"):
-            vol.SetMute(1, None)
-            return "Muted."
-        if s in ("unmute", "on"):
-            vol.SetMute(0, None)
-            return "Unmuted."
-        level = int(re.sub(r'[^0-9]', '', s))
-        level = max(0, min(100, level))
+        if isinstance(input_str, (int, float)) and not isinstance(input_str, bool):
+            level = max(0, min(100, int(input_str)))
+        else:
+            s = str(input_str).strip().lower()
+            if s in ("mute", "off"):
+                vol.SetMute(1, None)
+                return "Muted."
+            if s in ("unmute", "on"):
+                vol.SetMute(0, None)
+                return "Unmuted."
+            level = int(re.sub(r'[^0-9]', '', s))
+            level = max(0, min(100, level))
         vol.SetMute(0, None)
         vol.SetMasterVolumeLevelScalar(level / 100.0, None)
         return f"Volume set to {level}%."
@@ -5846,6 +5849,18 @@ def _build_tool_registry():
             effect_class="system_control",
             timeout=30,
             func=type_text,
+        ),
+        ToolSpec(
+            name="set_volume",
+            description="Set the system volume to an integer from 0 through 100.",
+            input_schema={
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+            },
+            effect_class="system_control",
+            timeout=10,
+            func=set_volume,
         ),
         ToolSpec(
             name="screenshot_background",

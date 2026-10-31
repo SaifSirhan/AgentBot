@@ -94,6 +94,55 @@ class LoopGuardTests(unittest.TestCase):
             guard.record("work", index, f"result {index}")
         self.assertEqual(guard.check("flaky", "same"), "PASS")
 
+    def test_fourth_near_stationary_click_blocks(self):
+        guard = LoopGuard()
+        for x, y in ((920, 75), (920, 71), (914, 72)):
+            self.assertEqual(
+                guard.check("click_coordinates", f"{x},{y}"), "PASS")
+            guard.record("click_coordinates", f"{x},{y}", "clicked")
+        self.assertEqual(
+            guard.check("click_coordinates", "915,70"), "BLOCK")
+
+    def test_three_near_stationary_clicks_are_allowed(self):
+        guard = LoopGuard()
+        for x, y in ((920, 75), (920, 71)):
+            guard.record("click_coordinates", f"{x},{y}", "clicked")
+        self.assertEqual(
+            guard.check("click_coordinates", "914,72"), "PASS")
+
+    def test_clicks_moving_across_the_screen_do_not_block(self):
+        guard = LoopGuard()
+        for x in (100, 200, 300):
+            self.assertEqual(
+                guard.check("click_coordinates", f"{x},100"), "PASS")
+            guard.record("click_coordinates", f"{x},100", "clicked")
+        self.assertEqual(
+            guard.check("click_coordinates", "400,100"), "PASS")
+
+    def test_other_work_resets_the_click_streak(self):
+        guard = LoopGuard()
+        for x, y in ((920, 75), (920, 71), (914, 72)):
+            guard.record("click_coordinates", f"{x},{y}", "clicked")
+        guard.record("read_file", "notes.txt", "file contents")
+        self.assertEqual(
+            guard.check("click_coordinates", "915,70"), "PASS")
+
+    def test_click_window_suffix_still_counts_as_the_same_spot(self):
+        guard = LoopGuard()
+        for value in ("920,75 | Stremio", "920,71 | Stremio",
+                      "914,72 | Stremio"):
+            guard.record("click_coordinates", value, "clicked")
+        self.assertEqual(
+            guard.check("click_coordinates", "915,70 | Stremio"), "BLOCK")
+
+    def test_unparseable_click_input_does_not_crash(self):
+        guard = LoopGuard()
+        guard.record("click_coordinates", "center", "clicked")
+        guard.record("click_coordinates", "left", "clicked")
+        guard.record("click_coordinates", "top", "clicked")
+        self.assertEqual(
+            guard.check("click_coordinates", "anywhere"), "PASS")
+
 
 class LoopGuardLoopTests(unittest.TestCase):
     def make_loop(self, replies, execute, *, registry=None, max_steps=10,

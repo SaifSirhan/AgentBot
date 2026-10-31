@@ -138,6 +138,7 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
         "uia_dump_tree",
         "uia_click",
         "uia_type",
+        "set_volume",
     }
 
     def setUp(self):
@@ -153,8 +154,40 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_the_eighteen_core_tools_are_registered(self):
+    def test_the_nineteen_core_tools_are_registered(self):
         self.assertEqual(set(self.agent.TOOL_REGISTRY.names), self.CORE_TOOLS)
+
+    def test_set_volume_requires_an_integer_from_0_to_100(self):
+        spec = self.agent.TOOL_REGISTRY.get("set_volume")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.effect_class, "system_control")
+        spec.validate(0)
+        spec.validate(50)
+        spec.validate(100)
+        for value in ("loud", "50", 101, -1, 50.5, True):
+            with self.subTest(value=value):
+                with self.assertRaises(InputValidationError):
+                    spec.validate(value)
+
+    def test_set_volume_rejects_a_string_before_dispatch(self):
+        with mock.patch.object(self.agent, "set_volume") as volume:
+            result = self.agent.execute_tool(
+                {"tool": "set_volume", "input": "loud"})
+
+        volume.assert_not_called()
+        self.assertTrue(result.startswith(
+            "ERROR: Invalid input for set_volume. Expected "))
+        self.assertIn('"type": "integer"', result)
+
+    def test_set_volume_integer_reaches_the_function(self):
+        with mock.patch.object(
+                self.agent, "set_volume", return_value="Volume set to 42%."
+        ) as volume:
+            result = self.agent.execute_tool(
+                {"tool": "set_volume", "input": 42})
+
+        volume.assert_called_once_with(42)
+        self.assertEqual(result, "Volume set to 42%.")
 
     def test_uia_tools_have_expected_effects_and_polling(self):
         registry = self.agent.TOOL_REGISTRY
