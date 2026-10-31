@@ -139,6 +139,7 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
         "uia_click",
         "uia_type",
         "set_volume",
+        "read_artifact",
     }
 
     def setUp(self):
@@ -154,7 +155,7 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_the_nineteen_core_tools_are_registered(self):
+    def test_the_twenty_core_tools_are_registered(self):
         self.assertEqual(set(self.agent.TOOL_REGISTRY.names), self.CORE_TOOLS)
 
     def test_set_volume_requires_an_integer_from_0_to_100(self):
@@ -188,6 +189,41 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
 
         volume.assert_called_once_with(42)
         self.assertEqual(result, "Volume set to 42%.")
+
+    def test_remember_schema_accepts_source_and_rejects_unknown_values(self):
+        spec = self.agent.TOOL_REGISTRY.get("remember")
+        self.assertIsNotNone(spec)
+        spec.validate("I like green tea.")
+        spec.validate({"fact": "The sky is green.", "source": "web"})
+        for value in (
+                {"fact": "x", "source": "twitter"},
+                {"source": "web"},
+                {"fact": "x", "source": "web", "extra": 1}):
+            with self.subTest(value=value):
+                with self.assertRaises(InputValidationError):
+                    spec.validate(value)
+
+    def test_read_artifact_reads_saved_text(self):
+        import os
+        import tempfile
+
+        from artifact_store import read_artifact, save_artifact
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+                artifact_id = save_artifact("full page text", "search_web")
+                result = self.agent.execute_tool(
+                    {"tool": "read_artifact", "input": artifact_id})
+                self.assertEqual(
+                    read_artifact(artifact_id), "full page text")
+
+        self.assertEqual(result, "full page text")
+
+    def test_read_artifact_missing_id_returns_an_error(self):
+        result = self.agent.execute_tool(
+            {"tool": "read_artifact", "input": "0" * 32})
+
+        self.assertTrue(result.startswith("ERROR:"), result)
 
     def test_uia_tools_have_expected_effects_and_polling(self):
         registry = self.agent.TOOL_REGISTRY

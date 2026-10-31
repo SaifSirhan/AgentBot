@@ -33,10 +33,10 @@ class AutonomousStateTests(unittest.TestCase):
         )
 
     def test_scratchpad_retrieves_results_beyond_history_excerpt(self):
-        source = "x" * 9000 + "Universiti Malaya event on 10 November"
+        source = "x" * 1500 + "Universiti Malaya event on 10 November"
         loop = self.loop([
             '{"tool":"search_web","args":{"query":"UM"}}',
-            '{"tool":"scratchpad_read","args":{"id":"obs-1","offset":9000}}',
+            '{"tool":"scratchpad_read","args":{"id":"obs-1","offset":1200}}',
             "DONE",
         ], execute=lambda *args: ToolResult(True, source), max_steps=3)
         result = loop.run("Research Universiti Malaya")

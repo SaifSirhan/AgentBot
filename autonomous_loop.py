@@ -14,6 +14,7 @@ from threading import Event, Lock
 from typing import Any, Callable, Collection, Mapping, Sequence
 from uuid import uuid4
 
+import artifact_store
 from loop_guard import GuardVerdict, LoopGuard
 from tool_registry import MAX_BATCH_ACTIONS, batch_rejection_error
 
@@ -213,6 +214,22 @@ class AutonomousLoop:
         ):
             raise TypeError("Dispatcher must return ToolResult")
         return outcome
+
+    @staticmethod
+    def _prepare_observation(tool_name, observation):
+        """Save oversized output and return a bounded artifact summary."""
+        # These tools already page bounded text; never wrap a page in another
+        # artifact, which would force repeated reads to reach the same bytes.
+        if (tool_name in ("read_artifact", "scratchpad_read")
+                or len(observation) <= artifact_store.ARTIFACT_THRESHOLD_CHARS):
+            return observation
+        try:
+            artifact_id = artifact_store.save_artifact(observation, tool_name)
+        except OSError:
+            return observation
+        preview = observation[:artifact_store.SUMMARY_PREVIEW_CHARS]
+        return (f"[ARTIFACT SAVED: {artifact_id} - {preview}... "
+                "Use read_artifact to view the full text.]")
 
     def run(
         self,
@@ -731,13 +748,24 @@ class AutonomousLoop:
                     )
 
             if batch is not None:
-                for item, item_outcome in zip(batch, outcomes):
+                stored_observations = [
+                    self._prepare_observation(
+                        item["tool"], item_outcome.observation)
+                    for item, item_outcome in zip(batch, outcomes)
+                ]
+            else:
+                stored_observation = self._prepare_observation(
+                    tool, outcome.observation)
+
+            if batch is not None:
+                for item, item_outcome, stored in zip(
+                        batch, outcomes, stored_observations):
                     history.append(
                         RecordedAction(
                             step=history_offset + step,
                             tool=item["tool"],
                             ok=item_outcome.ok,
-                            observation=item_outcome.observation,
+                            observation=stored,
                             replay_args=deepcopy(item_outcome.replay_args),
                             arguments=deepcopy(item["args"]),
                         )
@@ -750,13 +778,13 @@ class AutonomousLoop:
                         step=history_offset + step,
                         tool=tool,
                         ok=outcome.ok,
-                        observation=outcome.observation,
+                        observation=stored_observation,
                         replay_args=deepcopy(outcome.replay_args),
                         arguments=deepcopy(args),
                     )
                 )
                 self.scratchpad.record(history[-1])
-                self.loop_guard.record(tool, args, outcome.observation)
+                self.loop_guard.record(tool, args, stored_observation)
 
             if time.monotonic() >= deadline:
                 return finish(
@@ -769,12 +797,13 @@ class AutonomousLoop:
                 observation_text = "\n\n".join(
                     f"{item['tool']} "
                     f"{'succeeded' if item_outcome.ok else 'failed'}: "
-                    f"{item_outcome.observation[:budget]}"
-                    for item, item_outcome in zip(batch, outcomes))
+                    f"{stored[:budget]}"
+                    for item, item_outcome, stored in zip(
+                        batch, outcomes, stored_observations))
             else:
                 observation_text = (
                     f"{tool} {'succeeded' if outcome.ok else 'failed'}: "
-                    f"{outcome.observation[:8000]}"
+                    f"{stored_observation[:8000]}"
                 )
             if batch is None and outcome.ok and self.delegation_tool and tool == self.delegation_tool:
                 delegation_pending = True

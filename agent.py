@@ -28,6 +28,7 @@ import watcher
 import gmail_tool
 import scheduler
 import memory
+import artifact_store
 from tool_registry import (
     BATCH_EFFECT_ERROR,
     InputValidationError,
@@ -4781,12 +4782,30 @@ def get_video_links(query):
 # MEMORY
 # ---------------------------
 def remember_fact(fact):
-    if not fact or not fact.strip():
+    source = memory.DEFAULT_SOURCE
+    if isinstance(fact, dict):
+        source = fact.get("source", memory.DEFAULT_SOURCE)
+        fact = fact.get("fact") or fact.get("content") or fact.get("text")
+    text = str(fact or "").strip()
+    if not text:
         return "ERROR: No fact given."
-    record = memory.remember(fact.strip())
+    try:
+        source = memory.normalize_source(source)
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+    record = memory.remember(text, source=source)
     if record is None:
-        return f"Already remembered: {fact.strip()}"
-    return f"Remembered (global): {fact.strip()}"
+        return f"Already remembered: {text}"
+    return f"Remembered (global, source: {source}): {text}"
+
+
+def read_artifact_tool(artifact_id):
+    try:
+        return artifact_store.read_artifact(artifact_id)
+    except FileNotFoundError:
+        return f"ERROR: Artifact '{artifact_id}' not found."
+    except (ValueError, OSError) as exc:
+        return f"ERROR: {exc}"
 
 
 def forget_fact(fact):
@@ -5191,7 +5210,7 @@ VALID_TOOLS = {
     "play_on_youtube", "queue_on_ytm", "close_music_tab", "stream_media",
     "open_app", "open_website", "run_command", "execute_python", "make_folder",
     "find_and_open_folder", "write_file", "read_file",
-    "set_reminder", "remember", "forget", "read_screen",
+    "set_reminder", "remember", "forget", "read_screen", "read_artifact",
     "schedule_task",    "clipboard_read", "clipboard_write", "set_volume", "media_control",
     "system_status", "check_battery_health", "lock_pc", "sleep_pc", "shutdown_pc", "restart_pc",
     "save_screenshot", "todo", "list_windows", "focus_window", "notify",
@@ -5951,11 +5970,39 @@ def _build_tool_registry():
         ),
         ToolSpec(
             name="remember",
-            description="Save a lasting personal fact.",
-            input_schema=_input_string(min_length=1),
+            description=(
+                "Save a lasting personal fact with provenance. Input: a fact "
+                'string or {"fact": string, "source": "user"|"web"|"agent"}.'),
+            input_schema={
+                "anyOf": [
+                    {"type": "string", "minLength": 1},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "fact": {"type": "string", "minLength": 1},
+                            "source": {
+                                "type": "string",
+                                "enum": ["user", "web", "agent"],
+                            },
+                        },
+                        "required": ["fact", "source"],
+                        "additionalProperties": False,
+                    },
+                ],
+            },
             effect_class="write",
             timeout=10,
             func=remember_fact,
+        ),
+        ToolSpec(
+            name="read_artifact",
+            description=(
+                "Read the full text of a large tool-output artifact by id."),
+            input_schema=_input_string(
+                min_length=32, pattern=r"^[0-9a-fA-F-]{32,36}$"),
+            effect_class="read_only",
+            timeout=10,
+            func=read_artifact_tool,
         ),
         ToolSpec(
             name="telegram_user_send",
@@ -6488,6 +6535,9 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_histo
                         "the saved verification checkpoint is invalid.")
                     return step_log
             _ROUTED.goal_verifier = verifier
+            # Artifact summaries point here; keep the reader available even
+            # when the router did not select it from the goal wording.
+            _ROUTED.allowed.add("read_artifact")
             allowed = sorted(_ROUTED.allowed - {"chat", "done"})
             descriptions = {name: _autonomous_tool_spec(name) for name in allowed}
             descriptions["request_tool"] = (

@@ -1,11 +1,15 @@
 """Pure loop tests: model, dispatcher, authorization and verifier are fakes."""
 import json
+import os
+import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import artifact_store
 from autonomous_loop import AutonomousLoop, LoopResult, RecordedAction, Scratchpad, ToolResult, Verification
 
 
@@ -14,6 +18,14 @@ def action(tool, **args):
 
 
 class LoopCheckpointTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.dict(
+            os.environ, {"LOCALAPPDATA": tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def make_loop(self, replies, max_steps=2, verdicts=None):
         self.prompts = []
         replies = iter(replies)
@@ -82,14 +94,20 @@ class LoopCheckpointTests(unittest.TestCase):
         checkpoints = []
         loop = self.make_loop([action("scratchpad_write", key="next", text="Write"),
                                action("work")])
-        result = loop.run("Do work", initial_history=[prior], initial_notes=notes,
-                          on_checkpoint=checkpoints.append)
+        result = loop.run(
+            "Do work", initial_history=[prior], initial_notes=notes,
+            on_checkpoint=checkpoints.append)
+        stored = result.history[-1].observation
+        match = re.match(r"\[ARTIFACT SAVED: ([0-9a-f]{32}) - ", stored)
+        self.assertIsNotNone(match, stored[:120])
+        self.assertEqual(
+            artifact_store.read_artifact(match.group(1)),
+            "complete observation " + "x" * 10000)
         self.assertEqual([r.status for r in checkpoints], ["running"] * 3 + ["success"])
         self.assertEqual([r.steps for r in checkpoints], [0, 1, 2, 2])
         self.assertEqual(checkpoints[0].scratchpad_notes, notes)
         self.assertEqual(result.scratchpad_notes, {**notes, "next": "Write"})
         self.assertEqual(result.history[0].observation, prior.observation)
-        self.assertGreater(len(result.history[-1].observation), 10000)
         self.assertIn("Keep original facts", json.dumps(self.prompts[0]))
         checkpoints[-1].scratchpad_notes.clear()
         self.assertIn("plan", result.scratchpad_notes)

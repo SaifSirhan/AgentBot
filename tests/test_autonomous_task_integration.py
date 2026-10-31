@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import threading
@@ -11,6 +12,8 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import artifact_store
 PREFIX = "System: Autonomous task snapshot: "
 SUCCESS = "Execution and goal checks passed."
 SOURCE = "Universiti Malaya event: November 10; https://example.org/events/um?source=official"
@@ -344,9 +347,22 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         history = ["User: Use search_web to find event"]
         self.run_task("Use search_web to find event", [action("search_web", "event"), "DONE", "DONE"], history)
         snapshot = self.snapshots(history)[-1]
-        self.assertEqual(snapshot["history"][0]["observation"], self.search.return_value)
+        stored = snapshot["history"][0]["observation"]
+        match = re.match(r"\[ARTIFACT SAVED: ([0-9a-f]{32}) - ", stored)
+        self.assertIsNotNone(match, stored[:120])
+        self.assertEqual(
+            artifact_store.read_artifact(match.group(1)),
+            self.search.return_value)
         self.assertFalse(snapshot["incomplete"])
-        self.assertIn("https://example.org/events/um?source=official", history[-1])
+        self.assertIn("[ARTIFACT SAVED:", history[-1])
+
+    def test_artifact_reader_is_always_available_to_the_loop(self):
+        history = ["User: Use search_web to find event"]
+        self.run_task(
+            "Use search_web to find event",
+            [action("search_web", "event"), "DONE"], history)
+
+        self.assertIn("read_artifact", self.catalogs()[0])
 
     def test_router_failure_stops_without_opening_tools(self):
         allowed_during_result = []
@@ -486,6 +502,8 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         goal = "Use search_web to research this exact table: " + "row|value\n" * 2400
         output = "evidence:" + "x" * 40000
         self.search.return_value = output
+        # Keep the task unfinished so the restart path is exercised.
+        self.semantic = '{"goal_met":false,"reason":"Table rows are incomplete."}'
         history = ["User: " + goal]
         with mock.patch.object(self.a, "MAX_STEPS_PER_TURN", 2):
             self.run_task(goal, [
@@ -497,7 +515,10 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         task = payload["active_task"]
         self.assertEqual(task["goal"], goal)
         self.assertEqual(task["scratchpad_notes"], {"layout": "All rows required"})
-        self.assertEqual(task["history"][1]["observation"], output)
+        stored = task["history"][1]["observation"]
+        match = re.match(r"\[ARTIFACT SAVED: ([0-9a-f]{32}) - ", stored)
+        self.assertIsNotNone(match, stored[:120])
+        self.assertEqual(artifact_store.read_artifact(match.group(1)), output)
         history.extend(["System: activity"] * 70)
         self.a.save_conversation_history(history)
         restored = self.a.load_conversation_history()
