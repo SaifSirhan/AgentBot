@@ -96,7 +96,7 @@ class SkillIntegrationTests(unittest.TestCase):
         prompt = agent._build_plan_prompt("hello", "")
         self.assertIn("Available tools:", prompt)
         self.assertIn('load_skill("local:core_tools")', prompt)
-        self.assertIn("Do not guess the input format.", prompt)
+        self.assertIn("for unknown tool input formats.", prompt)
         self.assertIn(
             'To call a tool, output ONLY a JSON object: {"tool": "tool_name", '
             '"input": "tool_input"}. Never write tool("arg") or XML.', prompt)

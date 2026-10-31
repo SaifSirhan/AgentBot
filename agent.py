@@ -1295,8 +1295,7 @@ MAX_PROMPT_TOKENS = 7800
 _ROUTED = _threading.local()
 
 TOOL_PROTOCOL = (
-    'Call load_skill("local:core_tools") for unknown tool input formats. '
-    'Do not guess the input format.\n'
+    'Call load_skill("local:core_tools") for unknown tool input formats.\n'
     'If a tool is not listed, output '
     '{"tool": "request_tool", "input": "tool_name"}.'
 )

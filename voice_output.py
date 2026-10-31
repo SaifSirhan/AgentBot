@@ -349,6 +349,9 @@ _worker_lock = threading.Lock()
 _worker_busy = threading.Event()
 _active_stream = None
 _active_stream_lock = threading.Lock()
+# PortAudio streams are not safe to write, abort, or close concurrently. Every
+# one of those operations happens while holding this lock.
+_stream_lock = threading.Lock()
 _cancel_event = threading.Event()
 _speech_generation = 0
 _generation_lock = threading.Lock()
@@ -460,17 +463,22 @@ def _speak_blocking(text, generation=None):
                     continue
                 if hasattr(audio, "detach"):
                     audio = audio.detach().cpu().numpy()
-                audio = np.asarray(audio, dtype=np.float32).reshape(-1, 1)
+                audio = np.ascontiguousarray(
+                    audio, dtype=np.float32).reshape(-1, 1)
                 if audio.size == 0:
                     continue
                 audio_bus.publish(audio, "tts")
-                try:
-                    stream.write(audio)
-                except Exception:
+                with _stream_lock:
                     if cancelled():
                         interrupted = True
                         break
-                    raise
+                    try:
+                        stream.write(audio)
+                    except Exception:
+                        if cancelled():
+                            interrupted = True
+                            break
+                        raise
                 chunk_count += 1
             if interrupted:
                 break
@@ -532,23 +540,28 @@ def speak(text):
     return True
 
 
+def _close_stream_locked(stream):
+    """Stop and close one stream exactly once. Caller holds _stream_lock."""
+    if getattr(stream, "_agentbot_closed", False):
+        return
+    try:
+        stream._agentbot_closed = True
+    except Exception:
+        pass
+    try:
+        stream.stop()
+    except Exception:
+        pass
+    try:
+        stream.close()
+    except Exception:
+        pass
+
+
 def _close_stream(stream):
-    """Stop and close one playback stream exactly once, under the lock."""
-    with _active_stream_lock:
-        if getattr(stream, "_agentbot_closed", False):
-            return
-        try:
-            stream._agentbot_closed = True
-        except Exception:
-            pass
-        try:
-            stream.stop()
-        except Exception:
-            pass
-        try:
-            stream.close()
-        except Exception:
-            pass
+    """Stop and close one playback stream under the PortAudio lock."""
+    with _stream_lock:
+        _close_stream_locked(stream)
 
 
 def stop():
@@ -561,13 +574,25 @@ def stop():
         stream = _active_stream
         _active_stream = None
     if stream is not None:
-        abort = getattr(stream, "abort", None)
-        if callable(abort):
+        # Wait for an in-flight write() to return before aborting. Closing a
+        # PortAudio stream underneath its writer is an access violation, not a
+        # Python exception (see crash.log).
+        if _stream_lock.acquire(timeout=1.0):
             try:
-                abort()
-            except Exception:
-                pass
-        _close_stream(stream)
+                if not getattr(stream, "_agentbot_closed", False):
+                    abort = getattr(stream, "abort", None)
+                    if callable(abort):
+                        try:
+                            abort()
+                        except Exception:
+                            pass
+                    _close_stream_locked(stream)
+            finally:
+                _stream_lock.release()
+        else:
+            # The writer will observe _cancel_event and close the stream in
+            # its own finally block. Never abort underneath it.
+            print("[tts] stop deferred: write still in flight")
     try:
         while True:
             _speech_queue.get_nowait()

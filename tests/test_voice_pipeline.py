@@ -184,6 +184,33 @@ class AbortableStream:
         self.written.append(data)
 
 
+class BlockingStream(AbortableStream):
+    def __init__(self, **_kwargs):
+        super().__init__()
+        self.write_started = threading.Event()
+        self.release_write = threading.Event()
+        self.order = []
+
+    def write(self, data):
+        self.order.append("write-start")
+        self.write_started.set()
+        self.release_write.wait(timeout=5.0)
+        self.order.append("write-end")
+        super().write(data)
+
+    def abort(self):
+        self.order.append("abort")
+        super().abort()
+
+    def stop(self):
+        self.order.append("stop")
+        super().stop()
+
+    def close(self):
+        self.order.append("close")
+        super().close()
+
+
 class VoiceOutputInterruptTests(unittest.TestCase):
     def setUp(self):
         voice_output._cancel_event.clear()
@@ -248,6 +275,79 @@ class VoiceOutputInterruptTests(unittest.TestCase):
         self.assertIs(seen_streams[0], stream)
         self.assertEqual(len(stream.written), 1)
         self.assertTrue(voice_output._cancel_event.is_set())
+
+    def test_stop_waits_for_an_in_flight_write_before_touching_the_stream(self):
+        stream = BlockingStream()
+        chunk = (None, None, np.array([0.1], dtype=np.float32))
+
+        def pipeline(piece, voice=None, speed=None):
+            yield chunk
+            yield chunk
+
+        self.addCleanup(stream.release_write.set)
+        with mock.patch.object(voice_output.sd, "OutputStream",
+                               return_value=stream), \
+                mock.patch.object(
+                    voice_output, "_get_pipeline", return_value=pipeline):
+            worker = threading.Thread(
+                target=voice_output._speak_blocking, args=("hello",),
+                daemon=True)
+            worker.start()
+            self.assertTrue(stream.write_started.wait(2.0))
+            stopper = threading.Thread(target=voice_output.stop, daemon=True)
+            stopper.start()
+            time.sleep(0.2)
+            self.assertEqual(stream.order, ["write-start"])
+            self.assertEqual(stream.aborted, 0)
+            self.assertEqual(stream.closed, 0)
+            stream.release_write.set()
+            worker.join(2.0)
+            stopper.join(2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(stopper.is_alive())
+        self.assertEqual(stream.order.count("write-start"), 1)
+        self.assertEqual(len(stream.written), 1)
+        teardown = [
+            index for index, event in enumerate(stream.order)
+            if event in ("abort", "stop", "close")
+        ]
+        self.assertTrue(teardown)
+        self.assertGreater(min(teardown), stream.order.index("write-end"))
+        self.assertEqual(stream.stopped, 1)
+        self.assertEqual(stream.closed, 1)
+
+    def test_stop_defers_teardown_when_a_write_outlives_the_timeout(self):
+        stream = BlockingStream()
+        chunk = (None, None, np.array([0.1], dtype=np.float32))
+
+        def pipeline(piece, voice=None, speed=None):
+            yield chunk
+
+        self.addCleanup(stream.release_write.set)
+        with mock.patch.object(voice_output.sd, "OutputStream",
+                               return_value=stream), \
+                mock.patch.object(
+                    voice_output, "_get_pipeline", return_value=pipeline):
+            worker = threading.Thread(
+                target=voice_output._speak_blocking, args=("hello",),
+                daemon=True)
+            worker.start()
+            self.assertTrue(stream.write_started.wait(2.0))
+            started = time.monotonic()
+            voice_output.stop()
+            waited = time.monotonic() - started
+            self.assertGreaterEqual(waited, 0.9)
+            self.assertEqual(stream.aborted, 0)
+            self.assertEqual(stream.closed, 0)
+            stream.release_write.set()
+            worker.join(2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(stream.stopped, 1)
+        self.assertEqual(stream.closed, 1)
+        self.assertGreater(
+            stream.order.index("close"), stream.order.index("write-end"))
 
     def test_reply_dequeued_before_stop_is_not_spoken(self):
         stale_generation = voice_output._current_generation()

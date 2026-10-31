@@ -60,6 +60,30 @@ class KokoroTapTests(unittest.TestCase):
         self.assertEqual(bus.source, "tts")
         self.assertEqual(len(stream.written), 1)
 
+    def test_stream_is_float32_and_receives_float32_mono(self):
+        stream = _FakeStream()
+        chunk = (None, None, np.array([1.0, -2.0], dtype=np.float64))
+
+        def pipeline(piece, voice=None, speed=None):
+            return iter([chunk])
+
+        voice_output._cancel_event.clear()
+        with mock.patch.object(voice_output, "_load_backend_status", return_value=(True, "")), \
+                mock.patch.object(voice_output, "_load_tts_config", return_value=("af_heart", "1.0", "a", True)), \
+                mock.patch.object(voice_output, "_load_max_chars", return_value=10000), \
+                mock.patch.object(voice_output, "_clean_for_speech", side_effect=lambda text: text), \
+                mock.patch.object(voice_output, "_split_for_tts", return_value=["hello"]), \
+                mock.patch.object(voice_output, "_get_pipeline", return_value=pipeline), \
+                mock.patch.object(voice_output, "sd") as fake_sd:
+            fake_sd.OutputStream.return_value = stream
+            voice_output._speak_blocking("hello")
+
+        _, kwargs = fake_sd.OutputStream.call_args
+        self.assertEqual(kwargs["dtype"], "float32")
+        self.assertEqual(stream.written[0].dtype, np.float32)
+        self.assertEqual(stream.written[0].shape, (2, 1))
+        self.assertTrue(stream.written[0].flags["C_CONTIGUOUS"])
+
 
 class MicrophoneTapTests(unittest.TestCase):
     def test_microphone_callback_publishes_normalized_samples(self):
