@@ -3,7 +3,7 @@ AgentBot launcher — picks the CORRECT Python.
 
 Config: agentbot_launcher.json next to this EXE:
     { "python": "C:\\path\\to\\python.exe",
-      "script": "C:\\Users\\USER\\AgentBot\\agent_gui.py" }
+      "script": "C:\\Users\\USER\\AgentBot\\agent_gui_qt.py" }
 
 If config is missing, auto-detects, but SKIPS known-bad Python installs
 (Laragon, Microsoft Store stubs, WindowsApps).
@@ -18,7 +18,7 @@ LOG         = os.path.join(tempfile.gettempdir(), "agentbot_launcher.log")
 CHILD_LOG   = os.path.join(tempfile.gettempdir(), "agentbot_child.log")
 APP_ID      = "AgentBot.Local.1"
 
-DEFAULT_SCRIPT = r"C:\Users\USER\AgentBot\agent_gui.py"
+DEFAULT_SCRIPT = r"C:\Users\USER\AgentBot\agent_gui_qt.py"
 
 BAD_MARKERS = ("\\laragon\\", "\\WindowsApps\\", "\\Microsoft\\WindowsApps\\")
 

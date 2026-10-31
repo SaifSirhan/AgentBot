@@ -1,8 +1,8 @@
 """
 AgentBot GUI — PySide6 port.
 
-Phase 4a: slash commands, settings overlay, memory reset — faithful ports of
-the same features in agent_gui.py. Phase 4b: per-turn collapsible activity
+Phase 4a: slash commands, settings overlay, memory reset — ported from
+the old Tkinter GUI. Phase 4b: per-turn collapsible activity
 chips showing the step log. Phase 5a: system tray, F9 hotkey (stub) and
 scheduler notifications. Phase 5b: voice (F9 push-to-talk STT, auto-speak TTS)
 and a scheduler queue so overlapping turns no longer race. Phase 5c: TTS
@@ -13,14 +13,13 @@ Activity log, Copy all, Export chat, New chat), added a visible mic button
 (click-to-toggle, in sync with F9), and replaced Unicode glyphs with SVG
 icons rendered via QtSvg.
 
-This file will eventually replace agent_gui.py. Until the port is complete,
-agent_gui.py remains the live GUI and this file is only run manually.
+This is the live GUI. The old Tkinter GUI (agent_gui.py) has been removed.
 
 Palette values are inlined from gui_widgets.py (the mint accent has been
 shifted greener for this port). That module imports tkinter, so it must NOT
-be imported here — the Qt port stays free of tkinter. agent_gui.py is NOT
-imported either; the logic shared with it (the hallucination guard, the slash
-command dispatch) is replicated below as pure Python. scheduler.py is
+be imported here — the Qt port stays free of tkinter. The old Tkinter GUI is
+not imported either; the logic shared with it (the hallucination guard, the
+slash command dispatch) is replicated below as pure Python. scheduler.py is
 plain-Python and safe to import; the tray is native QSystemTrayIcon.
 """
 from __future__ import annotations

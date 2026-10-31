@@ -1,5 +1,5 @@
 """
-Rich chat widgets for agent_gui.py — markdown text, code fences, activity
+Rich chat widgets for the removed Tkinter GUI — markdown text, code fences, activity
 chips and crisp coloured icons. No new dependencies: tkinter + (optionally)
 PIL for icon rendering, with an emoji fallback when PIL is missing.
 """

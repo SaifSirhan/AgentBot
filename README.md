@@ -87,7 +87,7 @@ Non-secret settings (model names, brain priority, Telegram IDs, etc.) live in
 ## Usage
 
 ```bash
-python agent_gui.py
+python agent_gui_qt.py
 ```
 
 Type a request in the chat box and press Enter. Type `/help` for the list of
@@ -99,7 +99,7 @@ request flows through the system.
 | File | Role |
 | --- | --- |
 | `agent.py` | LLM routing, tool dispatch, and the agent turn loop |
-| `agent_gui.py` | CustomTkinter desktop UI |
+| `agent_gui_qt.py` | PySide6 desktop UI |
 | `gui_widgets.py` | Shared rich chat widgets (Markdown, code blocks, icons) |
 | `rag_tool.py` | Document indexing and semantic search |
 | `memory.py` | Persistent user facts |

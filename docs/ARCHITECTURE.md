@@ -9,7 +9,7 @@ the result is summarised back to the user.
 | Module | Responsibility |
 | --- | --- |
 | `agent.py` | Core: LLM provider routing + failover, tool dispatch, and the multi-step agent turn loop. Also holds the tool-description prompt the model uses to choose tools. |
-| `agent_gui.py` | CustomTkinter desktop UI — chat view, sidebar, input pill, settings overlay, tray, hotkeys, mic. |
+| `agent_gui_qt.py` | PySide6 desktop UI — chat view, sidebar, input pill, settings overlay, tray, hotkeys, mic. |
 | `gui_widgets.py` | Shared rich widgets: Markdown text, code blocks, activity chips, PIL-rendered icons. |
 | `rag_tool.py` | Indexes local documents into ChromaDB with Sentence-Transformers embeddings; semantic search for retrieval-augmented answers. |
 | `memory.py` | Persistent user facts recalled across conversations. |
@@ -20,8 +20,7 @@ the result is summarised back to the user.
 | `config.py` | Loads configuration from `%APPDATA%\AgentBot\config.json` and environment variables. |
 
 Supporting tool modules include `file_tools.py`, `export_tools.py`, `screen.py`,
-`weather_news.py`, `gmail_tool.py`, `whatsapp_tool.py`, `air_quality.py`, and
-`tray.py`.
+`weather_news.py`, `gmail_tool.py`, `whatsapp_tool.py`, and `air_quality.py`.
 
 ## LLM routing & failover
 
@@ -40,7 +39,7 @@ reasoning tokens), while `deep_research` uses a high-effort thinking path.
 
 ```
                      +---------------------------+
-   user request ---> |  agent_gui.py / Telegram  |
+   user request ---> |  agent_gui_qt / Telegram  |
    (typed, voice,    +-------------+-------------+
     or scheduled)                  |
                                    v

@@ -80,7 +80,7 @@ At least **one** provider key must be valid for the agent to answer. Local
 ## 5. First run
 
 ```powershell
-python agent_gui.py
+python agent_gui_qt.py
 ```
 
 - The chat window opens. Type a request and press **Enter**.

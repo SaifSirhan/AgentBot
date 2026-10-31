@@ -5,8 +5,9 @@ a "check the news at 8am" task could only ever fire while you happened to
 have the window open.
 
 The tray loop is started with pystray's run_detached() integration from the
-Tk main thread. on_show and on_quit run outside Tk's main thread, so
-agent_gui.py wraps both in root.after(0, ...) before touching any widget.
+Tk main thread. on_show and on_quit run outside Tk's main thread, so the old
+Tkinter GUI wrapped both in root.after(0, ...) before touching any widget.
+This module is legacy; the PySide6 GUI uses QSystemTrayIcon.
 
 Requires: pip install pystray
 """

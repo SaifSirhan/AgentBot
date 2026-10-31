@@ -14,7 +14,7 @@ Briefly describe what this PR does and why.
 - [ ] I did **not** rename existing tools/functions (or I discussed it first).
 - [ ] I added no new third-party dependencies (or I raised an issue first).
 - [ ] `python -c "import agent"` succeeds.
-- [ ] The GUI launches with `python agent_gui.py`.
+- [ ] The GUI launches with `python agent_gui_qt.py`.
 - [ ] No secrets, credentials, session files, or personal paths are included.
 
 ## How I tested

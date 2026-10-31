@@ -43,7 +43,7 @@ Automated tests are **work in progress**. For now, verify changes manually:
 
 ```bash
 python -c "import agent; print(agent.list_brains())"
-python agent_gui.py
+python agent_gui_qt.py
 ```
 
 Please describe how you tested your change in the PR.

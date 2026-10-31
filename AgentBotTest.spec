@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['agent_gui.py'],
+    ['agent_gui_qt.py'],
     pathex=[],
     binaries=[],
     datas=[('skills', 'skills')],

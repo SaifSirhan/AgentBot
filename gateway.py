@@ -238,7 +238,7 @@ class InstagramAdapter:
 
 
 def start_gateway(config: dict):
-    """Called from agent_gui at startup. Returns the adapter, or an ERROR string."""
+    """Called from agent_gui_qt at startup. Returns the adapter, or an ERROR string."""
     global _active_adapter
     if not config.get("INSTAGRAM_ENABLED"):
         return None

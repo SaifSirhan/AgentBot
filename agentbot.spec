@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 a = Analysis(
-    ['agent_gui.py'],
+    ['agent_gui_qt.py'],
     pathex=[],
     binaries=[],
     datas=[

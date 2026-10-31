@@ -1,7 +1,7 @@
 """
 Standalone visual mockup of the proposed AgentBot GUI rehaul.
 
-Does NOT import agent.py, does NOT touch agent_gui.py, no new dependencies.
+Does NOT import agent.py, does NOT touch agent_gui_qt.py, no new dependencies.
     python _gui_mockup.py            # interactive
     python _gui_mockup.py --shot     # render, screenshot to _gui_mockup.png, exit
 """
