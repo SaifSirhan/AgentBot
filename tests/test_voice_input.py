@@ -139,6 +139,78 @@ class VoiceDeviceSelectionTests(unittest.TestCase):
         sleep.assert_called_once_with(0.2)
 
 
+class VoiceAutoStopCancellationTests(unittest.TestCase):
+    def setUp(self):
+        self._old = (
+            voice._is_recording,
+            voice._on_transcript,
+            voice._recording_generation,
+            voice._idle_timeout,
+            voice._stream,
+        )
+        voice._recording_generation = 5
+        voice._is_recording = True
+        voice._idle_timeout = 60.0
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        (voice._is_recording, voice._on_transcript,
+         voice._recording_generation, voice._idle_timeout,
+         voice._stream) = self._old
+
+    def test_cancel_during_transcription_drops_the_late_callback(self):
+        calls = []
+        voice._on_transcript = lambda text, reason: calls.append(
+            (text, reason))
+
+        def transcribe_while_cancelled():
+            voice.cancel_recording()
+            return "stale words"
+
+        with mock.patch.object(
+                voice, "auto_stop_reason", return_value="idle"), \
+                mock.patch.object(
+                    voice, "stop_and_transcribe",
+                    side_effect=transcribe_while_cancelled):
+            voice._monitor_recording(5)
+
+        self.assertEqual(calls, [])
+        self.assertFalse(voice._is_recording)
+
+    def test_normal_auto_stop_still_delivers_the_transcript(self):
+        calls = []
+        voice._on_transcript = lambda text, reason: calls.append(
+            (text, reason))
+
+        with mock.patch.object(
+                voice, "auto_stop_reason", return_value="idle"), \
+                mock.patch.object(
+                    voice, "stop_and_transcribe", return_value="hello"):
+            voice._monitor_recording(5)
+
+        self.assertEqual(calls, [("hello", "idle")])
+
+    def test_cancel_while_the_mic_opens_closes_the_stream(self):
+        stream = FakeInputStream()
+
+        def open_while_cancelled(_device_index, _callback):
+            voice.cancel_recording()
+            return stream
+
+        with mock.patch.object(
+                voice, "resolve_input_device",
+                return_value=(1, "Microphone Array")), \
+                mock.patch.object(
+                    voice, "_open_input_stream",
+                    side_effect=open_while_cancelled):
+            voice.start_recording()
+
+        self.assertFalse(voice._is_recording)
+        self.assertEqual(stream.stopped, 1)
+        self.assertEqual(stream.closed, 1)
+        self.assertIsNone(voice._stream)
+
+
 class WhisperLifecycleTests(unittest.TestCase):
     def test_warmup_loads_whisper_and_validates_the_microphone(self):
         model = object()

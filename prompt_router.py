@@ -199,6 +199,7 @@ def build_dynamic_prompt(
     fallback_tools: Sequence[str] = (),
     fallback_groups: Sequence[str] = DEFAULT_FALLBACK_GROUPS,
     tool_registry: ToolRegistry | None = None,
+    carry_tools: Sequence[str] = (),
 ) -> RoutedPrompt:
     budget = max_tokens - reserve_tokens
     if budget <= 0:
@@ -213,6 +214,8 @@ def build_dynamic_prompt(
             raise ValueError(f"Unknown fallback group {group!r}")
     if any(not isinstance(name, str) for name in fallback_tools):
         raise ValueError("Fallback tool names must be strings.")
+    if any(not isinstance(name, str) for name in carry_tools):
+        raise ValueError("Carried tool names must be strings.")
 
     positive_request = positive_tool_request(user_request)
     by_name = {tool.name: tool for tool in available_tools}
@@ -223,6 +226,8 @@ def build_dynamic_prompt(
             if description is not None:
                 registry_descriptions[tool.name] = description
     mandatory = set(requested_tool_names(user_request, by_name))
+    # A follow-up such as "yeah" reuses the tools that did the previous work.
+    mandatory.update(name for name in carry_tools if name in by_name)
     document_write = bool(re.search(
         DOCUMENT_WRITE_PATTERN, positive_request, re.I | re.S))
     if document_write and "execute_python" in by_name:

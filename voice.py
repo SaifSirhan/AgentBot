@@ -49,6 +49,9 @@ _last_speech_at = 0.0
 _speech_detected = False
 _recording_started_at = 0.0
 _whisper_lock = threading.Lock()
+# Incremented on every start/cancel. A monitor thread that was already
+# transcribing when the GUI cancelled must not deliver its stale transcript.
+_recording_generation = 0
 
 
 def _input_devices():
@@ -290,9 +293,14 @@ def _close_stream():
         pass
 
 
-def _monitor_recording():
-    """End an auto-stop recording and hand the transcript to the callback."""
-    while _is_recording:
+def _monitor_recording(generation):
+    """End an auto-stop recording and hand the transcript to the callback.
+
+    ``generation`` is the recording this monitor belongs to. If the recording
+    was cancelled (``/continuous off``) while Whisper was running, the
+    generation no longer matches and the transcript is dropped.
+    """
+    while _is_recording and generation == _recording_generation:
         reason = auto_stop_reason(
             time.monotonic(),
             _speech_detected,
@@ -305,7 +313,7 @@ def _monitor_recording():
             break
         time.sleep(0.05)
 
-    if not _is_recording:
+    if not _is_recording or generation != _recording_generation:
         return
 
     callback = _on_transcript
@@ -314,13 +322,13 @@ def _monitor_recording():
     except Exception as e:
         print(f"[voice] auto-stop transcription failed: {e}")
         _close_stream()
-        if callback is not None:
+        if callback is not None and generation == _recording_generation:
             try:
                 callback("", "error")
             except Exception:
                 pass
         return
-    if callback is None:
+    if callback is None or generation != _recording_generation:
         return
     try:
         callback(text, reason)
@@ -375,8 +383,10 @@ def start_recording(
     """
     global _stream, _recording_chunks, _is_recording, _on_transcript
     global _silence_timeout, _idle_timeout, _last_speech_at, _speech_detected
-    global _recording_started_at
+    global _recording_started_at, _recording_generation
 
+    _recording_generation += 1
+    generation = _recording_generation
     _recording_chunks = []
     _is_recording = True
     _recording_started_at = time.monotonic()
@@ -411,7 +421,7 @@ def start_recording(
         raise
 
     try:
-        _stream = _open_input_stream(device_index, callback)
+        stream = _open_input_stream(device_index, callback)
     except Exception as exc:
         _is_recording = False
         _on_transcript = None
@@ -420,9 +430,27 @@ def start_recording(
         raise RuntimeError(
             f"Could not open microphone '{device_name}' "
             f"(device {device_index}): {exc}") from exc
+    _stream = stream
+
+    if not _is_recording or generation != _recording_generation:
+        # Cancelled while the device was opening: never leave the mic held.
+        if _stream is stream:
+            _close_stream()
+        else:
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        return
+
     if on_transcript is not None:
         threading.Thread(
             target=_monitor_recording,
+            args=(generation,),
             daemon=True,
             name="voice-vad",
         ).start()
@@ -457,6 +485,8 @@ def stop_and_transcribe():
 def cancel_recording():
     """Drop the current recording without transcribing it."""
     global _is_recording, _recording_chunks, _on_transcript, _idle_timeout
+    global _recording_generation
+    _recording_generation += 1
     _is_recording = False
     _on_transcript = None
     _idle_timeout = None

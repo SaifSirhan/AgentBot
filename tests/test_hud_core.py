@@ -19,7 +19,8 @@ from PySide6.QtWidgets import QApplication, QSizePolicy  # noqa: E402
 from audio_bus import AudioBus  # noqa: E402
 from hud_core import ReactorHud  # noqa: E402
 
-STATES = ("IDLE", "LISTENING", "THINKING", "SPEAKING", "ERROR")
+STATES = (
+    "IDLE", "LISTENING", "CONTINUOUS", "THINKING", "SPEAKING", "ERROR")
 
 
 class ReactorHudTests(unittest.TestCase):
@@ -83,6 +84,17 @@ class ReactorHudTests(unittest.TestCase):
         self.assertEqual(styles["LISTENING"].mode, "spikes")
         self.assertEqual(styles["THINKING"].mode, "sharp")
         self.assertEqual(styles["SPEAKING"].mode, "pulse")
+        self.assertEqual(styles["CONTINUOUS"].mode, "pulse")
+
+    def test_continuous_is_bright_cyan_and_brighter_than_idle(self):
+        continuous = ReactorHud._STYLES["CONTINUOUS"]
+        self.assertEqual(continuous.brightness, 1.0)
+        cyan = continuous.color
+        self.assertGreater(cyan.green(), 200)
+        self.assertGreater(cyan.blue(), 200)
+        self.assertLess(cyan.red(), 120)
+        self.assertGreater(
+            continuous.brightness, ReactorHud._STYLES["IDLE"].brightness)
 
     def test_speaking_core_radius_pulses_with_audio_rms(self):
         self.hud.set_state("SPEAKING")
@@ -148,7 +160,20 @@ class CoreCardIntegrationTests(unittest.TestCase):
             window.set_status("Listening…", busy=True)
             self.assertEqual(hud.state, "LISTENING")
 
+            window._continuous_listening = True
+            window.set_status("Listening (Continuous)…", busy=True)
+            self.assertEqual(hud.state, "CONTINUOUS")
+            self.assertEqual(
+                window.windowTitle(), "Agent — Listening (Continuous)…")
+
+            window._on_voice_event("continuous:idle:")
+            self.assertEqual(
+                window.windowTitle(),
+                "Agent — Mic sleeping. Say 'Hey Jarvis' or press F9.")
+            self.assertEqual(hud.state, "IDLE")
+
             window._recording = False
+            window._continuous_listening = False
             with mock.patch.object(gui, "_tts_is_speaking", return_value=True):
                 window.set_status("Ready", busy=False)
                 self.assertEqual(hud.state, "SPEAKING")
@@ -160,6 +185,30 @@ class CoreCardIntegrationTests(unittest.TestCase):
             window._hud_error_until = time.monotonic() + 5.0
             window.set_status("Ready", busy=False)
             self.assertEqual(hud.state, "ERROR")
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_continuous_off_clears_the_hud_and_title(self):
+        import agent_gui_qt as gui
+
+        window = gui.AgentWindow()
+        try:
+            hud = window.chat.background_hud
+            window._recording = True
+            window._continuous_listening = True
+            window.set_status("Listening (Continuous)…", busy=True)
+            self.assertEqual(hud.state, "CONTINUOUS")
+
+            with mock.patch.object(gui, "get_voice") as get_voice:
+                window._cancel_continuous_listening()
+
+            get_voice.return_value.cancel_recording.assert_called_once()
+            self.assertFalse(window._recording)
+            self.assertFalse(window._continuous_listening)
+            self.assertEqual(window.windowTitle(), "Agent — Ready")
+            self.assertEqual(hud.state, "IDLE")
         finally:
             window.close()
             window.deleteLater()

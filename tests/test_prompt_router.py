@@ -88,6 +88,23 @@ class RoutingTests(unittest.TestCase):
                 self.assertIn("play_on_youtube", names)
                 self.assertIn(pr.RULES["music"], result.system_prompt)
 
+    def test_carry_tools_survive_a_bare_followup(self):
+        tools = pc.build_tools(frozenset({
+            "rag_search", "search_web", "read_file", "open_app",
+        }))
+        result = pr.build_dynamic_prompt(
+            "yeah", tools, count_tokens=words, max_tokens=5000,
+            carry_tools=("rag_search",))
+        self.assertIn("rag_search", {tool.name for tool in result.tools})
+        self.assertIn("- rag_search:", result.system_prompt)
+
+    def test_unknown_carry_tools_are_ignored(self):
+        result = pr.build_dynamic_prompt(
+            "yeah", example_tools(), count_tokens=words, max_tokens=5000,
+            carry_tools=("no_such_tool",))
+        self.assertNotIn(
+            "no_such_tool", {tool.name for tool in result.tools})
+
     def test_top_five_tools_are_selected(self):
         tools = [
             pr.Tool(f"file_tool_{i}", f"Edit file {i}.", ("python",), ("file",))

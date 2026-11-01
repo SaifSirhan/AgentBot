@@ -267,6 +267,86 @@ class HybridSearchTests(unittest.TestCase):
         self.assertTrue(hits)
         self.assertIn("budget_2026_final.txt", hits[0]["source"])
 
+    def test_default_chunks_are_wide_with_a_500_char_overlap(self):
+        rag = rag_tool.RAGTool.__new__(rag_tool.RAGTool)
+        text = "".join(chr(ord("a") + index % 26) for index in range(7000))
+
+        chunks = rag._chunk(text)
+
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual([len(chunk) for chunk in chunks], [3000, 3000, 2000])
+        self.assertEqual(chunks[0][-500:], chunks[1][:500])
+        self.assertEqual(chunks[1][-500:], chunks[2][:500])
+
+    def test_chat_export_uses_the_wide_chunks_too(self):
+        rag = rag_tool.RAGTool.__new__(rag_tool.RAGTool)
+        rag.model = FakeEncoder()
+        rag.collection = RecordingCollection()
+        rag.fts = self.fts
+        path = self.tmp / "PrivateExport" / "messages.html"
+        path.parent.mkdir(parents=True)
+        path.write_text("love you " * 500, encoding="utf-8")
+
+        result = rag.index_file(str(path))
+
+        self.assertTrue(result.startswith("Indexed"), result)
+        documents = rag.collection.upserts[0]["documents"]
+        self.assertEqual(len(documents), 2)
+        self.assertTrue(all(len(chunk) <= 3000 for chunk in documents))
+        self.assertTrue(all("love you" in chunk for chunk in documents))
+
+    def test_version_bump_reindexes_unchanged_files_once(self):
+        folder = self.tmp / "docs"
+        folder.mkdir()
+        path = folder / "note.txt"
+        path.write_text("alpha memory", encoding="utf-8")
+        state_path = self.tmp / "state.json"
+        stat = path.stat()
+        state_path.write_text(json.dumps({
+            str(path): {"mtime": stat.st_mtime, "size": stat.st_size},
+            "__index_version__": 1,
+        }), encoding="utf-8")
+
+        rag = rag_tool.RAGTool.__new__(rag_tool.RAGTool)
+        rag.model = FakeEncoder()
+        rag.collection = RecordingCollection()
+        rag.fts = self.fts
+
+        with mock.patch.object(rag_tool, "STATE_FILE", str(state_path)):
+            first = rag.index_folder(str(folder))
+            second = rag.index_folder(str(folder))
+
+        self.assertIn("Indexed: 1", first)
+        self.assertIn("Indexed: 0", second)
+        self.assertEqual(len(rag.collection.upserts), 1)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            state["__index_version__"], rag_tool.INDEX_VERSION)
+
+    def test_search_documents_defaults_to_five_results(self):
+        rag = self.make_rag(
+            [f"a{index}" for index in range(8)],
+            [f"keyword text {index}" for index in range(8)],
+            [f"doc{index}.txt" for index in range(8)])
+
+        with mock.patch.object(rag_tool, "get_rag", return_value=rag):
+            output = rag_tool.search_documents("keyword")
+
+        self.assertEqual(output.count("[From: "), 5)
+        self.assertEqual(rag.collection.query_calls, [10])
+
+    def test_search_documents_accepts_an_explicit_top_k(self):
+        rag = self.make_rag(
+            [f"a{index}" for index in range(8)],
+            [f"keyword text {index}" for index in range(8)],
+            [f"doc{index}.txt" for index in range(8)])
+
+        with mock.patch.object(rag_tool, "get_rag", return_value=rag):
+            output = rag_tool.search_documents("keyword", top_k=2)
+
+        self.assertEqual(output.count("[From: "), 2)
+        self.assertEqual(rag.collection.query_calls, [4])
+
 
 class BackfillTests(unittest.TestCase):
     def setUp(self):

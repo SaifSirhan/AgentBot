@@ -3874,7 +3874,10 @@ class AgentWindow(QMainWindow):
             hud.set_state("ERROR")
             return
         if getattr(self, "_recording", False):
-            hud.set_state("LISTENING")
+            if getattr(self, "_continuous_listening", False):
+                hud.set_state("CONTINUOUS")
+            else:
+                hud.set_state("LISTENING")
             return
         if _tts_is_speaking():
             hud.set_state("SPEAKING")
@@ -5717,6 +5720,9 @@ class AgentWindow(QMainWindow):
                 pass
         if resume_wake:
             self._resume_wake_word()
+            # /continuous off must not leave the cyan HUD or a stale
+            # "Listening" title behind.
+            self.set_status("Ready", busy=False)
 
     # ------------------------------------------------------------------
     # Option A — proactive thoughts
@@ -6302,6 +6308,9 @@ class AgentWindow(QMainWindow):
                     self._pending_f9_start = True
                     self._show_voice_loading()
                 return
+            if self._continuous_enabled:
+                # F9 is advertised as the way out of "Mic sleeping".
+                self._continuous_paused = False
             self._start_recording()
             return
         self._f9_held = False
@@ -6325,7 +6334,7 @@ class AgentWindow(QMainWindow):
         self._voice_start_event = threading.Event()
         start_event = self._voice_start_event
         self.set_status(
-            "Listening… (continuous)" if continuous
+            "Listening (Continuous)…" if continuous
             else "Recording… release F9 to transcribe",
             busy=True)
 
@@ -6415,12 +6424,9 @@ class AgentWindow(QMainWindow):
                 # Nobody spoke for 60s: hand the mic back to the wake word.
                 self._continuous_paused = True
                 self._resume_wake_word()
-                self.set_status(
-                    "Continuous listening paused \u2014 say the wake word",
-                    busy=False)
-                self.chat.add_message(SystemMessage(
-                    "Continuous listening paused after 60s of silence \u2014 "
-                    "say the wake word to resume."))
+                sleeping = "Mic sleeping. Say 'Hey Jarvis' or press F9."
+                self.set_status(sleeping, busy=False)
+                self.chat.add_message(SystemMessage(sleeping))
                 return
             self._handle_transcript(text)
             return

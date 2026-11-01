@@ -573,7 +573,8 @@ class GuiVoicePipelineTests(unittest.TestCase):
             for label in notice.findChildren(g.QLabel)
         ]
         self.assertTrue(
-            any("60s of silence" in text for text in labels), labels)
+            any("Mic sleeping. Say" in text and "or press F9." in text
+                for text in labels), labels)
 
     def test_continuous_transcript_sends_without_resuming_wake(self):
         self.window._continuous_enabled = True

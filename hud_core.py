@@ -3,6 +3,8 @@
 States are distinguishable without color: idle is dim and slow, listening is
 dominated by a 60-spike ring, thinking is a fast white scanner, speaking
 pulses its core with the live audio RMS, and error is a thick static block.
+Continuous listening reuses the pulse geometry in bright cyan so an open
+hands-free mic never looks like idle.
 """
 from __future__ import annotations
 
@@ -27,9 +29,11 @@ class HudStyle:
 
 class ReactorHud(QWidget):
     SIZE = 240
-    STATES = ("IDLE", "LISTENING", "THINKING", "SPEAKING", "ERROR")
+    STATES = (
+        "IDLE", "LISTENING", "CONTINUOUS", "THINKING", "SPEAKING", "ERROR")
 
     _MINT = QColor("#70FFD4")
+    _CYAN = QColor("#25F2FF")
     _WHITE = QColor("#ECFFF8")
     _RED = QColor("#FF5B6E")
     _BG = QColor("#000000")
@@ -37,6 +41,7 @@ class ReactorHud(QWidget):
     _STYLES = {
         "IDLE": HudStyle(0.45, _MINT, 0.30, "circles"),
         "LISTENING": HudStyle(1.0, _MINT, 0.85, "spikes"),
+        "CONTINUOUS": HudStyle(2.0, _CYAN, 1.0, "pulse"),
         "THINKING": HudStyle(3.2, _WHITE, 1.0, "sharp"),
         "SPEAKING": HudStyle(1.5, _WHITE, 1.0, "pulse"),
         "ERROR": HudStyle(0.0, _RED, 1.0, "block"),
@@ -115,14 +120,14 @@ class ReactorHud(QWidget):
         self._phase = (self._phase + dt * style.speed) % 360.0
 
         target = 0.0
-        if self._state in ("LISTENING", "SPEAKING"):
+        if self._state in ("LISTENING", "CONTINUOUS", "SPEAKING"):
             _, rms = self._bus.get_latest()
             gain = 12.0 if self._bus.source == "mic" else 4.0
             target = min(1.0, rms * gain)
         attack = 0.45 if target > self._level else 0.10
         self._level += (target - self._level) * attack
 
-        if self._state == "SPEAKING":
+        if self._state in ("SPEAKING", "CONTINUOUS"):
             breathing = 0.5 + 0.5 * math.sin(self._phase * 2.6)
             self._core_ratio = 0.24 + 0.10 * breathing + 0.34 * self._level
         elif self._state == "THINKING":

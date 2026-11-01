@@ -37,6 +37,17 @@ GROUP_EXPORT_ROOT = r"C:\Users\USER\PrivateExport"
 # single-list hits.
 RRF_K = 60
 
+# Wide windows keep a chat exchange together: a 3,000-char chunk spans many
+# messages, so a reply stays next to the line it answers instead of being cut
+# off in the middle of the conversation.
+CHUNK_SIZE = 3000
+CHUNK_OVERLAP = 500
+
+# Bump when chunking changes. A version mismatch makes index_folder rechunk
+# every already-indexed file exactly once instead of trusting its mtime cache.
+INDEX_VERSION = 2
+_VERSION_KEY = "__index_version__"
+
 
 def _filename_for(source: str) -> str:
     return source.replace("\\", "/").rsplit("/", 1)[-1]
@@ -286,13 +297,10 @@ class RAGTool:
         if len(text) > 500_000:
             return f"Skipped {filepath} (too large: {len(text)} chars)"
 
-        # Chat logs need fine-grained chunks: a 1000-char window spans 8-15
-        # messages, so a chunk's date/author blurs across several messages.
-        use_small = "PrivateExport" in filepath
         if chunk_size is None:
-            chunk_size = 300 if use_small else 1000
+            chunk_size = CHUNK_SIZE
         if overlap is None:
-            overlap = 50 if use_small else 200
+            overlap = CHUNK_OVERLAP
 
         chunks = self._chunk(text, size=chunk_size, overlap=overlap)
         if not chunks:
@@ -343,6 +351,11 @@ class RAGTool:
         )
 
         state = _load_state()
+        stale_version = state.get(_VERSION_KEY) != INDEX_VERSION
+        if stale_version:
+            print(
+                "  [reindex] chunker version changed; rechunking indexed files",
+                flush=True)
         seen_paths = set()
         indexed, skipped, removed, failed = [], [], [], []
 
@@ -367,7 +380,9 @@ class RAGTool:
                     continue
 
                 prev = state.get(path)
-                if prev and prev.get("mtime") == sig[0] and prev.get("size") == sig[1]:
+                if (not stale_version and prev
+                        and prev.get("mtime") == sig[0]
+                        and prev.get("size") == sig[1]):
                     # File unchanged since last index — skip
                     skipped.append(path)
                     continue
@@ -380,13 +395,19 @@ class RAGTool:
                         state[path] = {"mtime": sig[0], "size": sig[1]}
                         indexed.append(path)
                     else:
+                        if stale_version:
+                            # Do not keep an old signature for a file that
+                            # still needs the new chunker.
+                            state.pop(path, None)
                         failed.append(f"{path}: {result}")
                 except Exception as e:
+                    if stale_version:
+                        state.pop(path, None)
                     failed.append(f"{path}: {e}")
 
         # ---- Pass 2: remove DB entries for files that no longer exist ----
         for path in list(state.keys()):
-            if path in seen_paths:
+            if path == _VERSION_KEY or path in seen_paths:
                 continue
             # Only touch paths that were inside the folder we just walked
             if not os.path.abspath(path).startswith(os.path.abspath(folder)):
@@ -402,6 +423,7 @@ class RAGTool:
             removed.append(path)
             state.pop(path, None)
 
+        state[_VERSION_KEY] = INDEX_VERSION
         _save_state(state)
 
         # ---- Build summary ----
@@ -543,7 +565,8 @@ class RAGTool:
         wb.close()
         return "\n".join(parts)
 
-    def _chunk(self, text: str, size: int = 1000, overlap: int = 200):
+    def _chunk(self, text: str, size: int = CHUNK_SIZE,
+               overlap: int = CHUNK_OVERLAP):
         """Split text into overlapping chunks."""
         chunks = []
         start = 0
@@ -576,6 +599,6 @@ def index_documents(path: str) -> str:
     return rag.index_file(path)
 
 
-def search_documents(query: str) -> str:
+def search_documents(query: str, top_k: int = 5) -> str:
     """Public function AgentBot calls."""
-    return get_rag().search(query)
+    return get_rag().search(query, top_k=top_k)
