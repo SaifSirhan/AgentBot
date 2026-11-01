@@ -348,6 +348,153 @@ class HybridSearchTests(unittest.TestCase):
         self.assertEqual(rag.collection.query_calls, [4])
 
 
+class LargeExportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="rag_large_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.fts = rag_tool.FTSIndex(str(self.tmp / "fts.sqlite3"))
+        self.addCleanup(self.fts.close)
+
+    def make_rag(self):
+        rag = rag_tool.RAGTool.__new__(rag_tool.RAGTool)
+        rag.model = FakeEncoder()
+        rag.collection = RecordingCollection()
+        rag.fts = self.fts
+        return rag
+
+    def test_five_megabyte_telegram_json_is_streamed_not_skipped(self):
+        path = self.tmp / "result.json"
+        payload = "love you " * 55
+        messages = [{"from": "Moss", "text": "ZXOPENINGMARKER"}]
+        for index in range(12000):
+            messages.append({
+                "from": f"User{index % 20}",
+                "text": [{"type": "plain", "text": f"{payload}{index}"}],
+            })
+        messages.append({"from": "Moss", "text": "ZXCLOSINGMARKER"})
+        path.write_text(
+            json.dumps({"messages": messages}), encoding="utf-8")
+        self.assertGreater(path.stat().st_size, 5_000_000)
+
+        rag = self.make_rag()
+        result = rag.index_file(str(path))
+
+        self.assertTrue(result.startswith("Indexed"), result)
+        self.assertGreater(len(rag.collection.upserts), 1)
+        total = sum(len(upsert["ids"]) for upsert in rag.collection.upserts)
+        self.assertGreater(total, 100)
+        self.assertEqual(total, self.fts.count())
+        self.assertEqual(
+            len({chunk_id
+                 for upsert in rag.collection.upserts
+                 for chunk_id in upsert["ids"]}),
+            total)
+        self.assertTrue(
+            all(len(chunk) <= rag_tool.CHUNK_SIZE
+                for upsert in rag.collection.upserts
+                for chunk in upsert["documents"]))
+
+        first_hits = self.fts.search("ZXOPENINGMARKER")
+        last_hits = self.fts.search("ZXCLOSINGMARKER")
+        self.assertTrue(first_hits)
+        self.assertTrue(last_hits)
+        self.assertIn("Moss: ZXOPENINGMARKER", first_hits[0]["text"])
+        self.assertIn("Moss: ZXCLOSINGMARKER", last_hits[0]["text"])
+
+    def test_telegram_text_accepts_strings_and_entity_lists(self):
+        path = self.tmp / "result.json"
+        path.write_text(json.dumps({"messages": [
+            {"from": "Moss", "text": "plain hello"},
+            {"from": "Ash", "text": [
+                {"type": "plain", "text": "hello "},
+                {"type": "bold", "text": "world"},
+            ]},
+            {"from": "Ash", "text": ["chunk one", " chunk two"]},
+            {"type": "service", "text": ""},
+            {"text": "no sender"},
+        ]}), encoding="utf-8")
+
+        rag = self.make_rag()
+        result = rag.index_file(str(path))
+
+        self.assertTrue(result.startswith("Indexed"), result)
+        documents = "\n".join(rag.collection.upserts[0]["documents"])
+        self.assertIn("Moss: plain hello", documents)
+        self.assertIn("Ash: hello world", documents)
+        self.assertIn("Ash: chunk one chunk two", documents)
+        self.assertIn("unknown: no sender", documents)
+
+    def test_large_html_export_is_parsed_and_indexed(self):
+        path = self.tmp / "messages.html"
+        paragraph = "<p>" + ("love you " * 220) + "</p>\n"
+        repeats = (rag_tool.LARGE_HTML_BYTES // len(paragraph)) + 1
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("<html><body>")
+            for _ in range(repeats):
+                handle.write(paragraph)
+            handle.write("<p>ZXHTMLENDMARKER</p></body></html>")
+        self.assertGreater(path.stat().st_size, rag_tool.LARGE_HTML_BYTES)
+
+        rag = self.make_rag()
+        result = rag.index_file(str(path))
+
+        self.assertTrue(result.startswith("Indexed"), result)
+        self.assertGreater(len(rag.collection.upserts), 0)
+        self.assertTrue(self.fts.search("ZXHTMLENDMARKER"))
+
+    def test_folder_index_records_the_telegram_export_in_state(self):
+        folder = self.tmp / "export"
+        folder.mkdir()
+        path = folder / "result.json"
+        messages = [
+            {"from": "Moss", "text": "ZXFOLDERMARKER " * 40}
+            for _ in range(900)
+        ]
+        path.write_text(
+            json.dumps({"messages": messages}), encoding="utf-8")
+        self.assertGreater(len(path.read_text(encoding="utf-8")),
+                           rag_tool.MAX_TEXT_CHARS)
+        state_path = self.tmp / "state.json"
+
+        rag = self.make_rag()
+        with mock.patch.object(rag_tool, "STATE_FILE", str(state_path)):
+            first = rag.index_folder(str(folder))
+            second = rag.index_folder(str(folder))
+
+        self.assertIn("Indexed: 1", first)
+        self.assertIn("Indexed: 0", second)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            state["__index_version__"], rag_tool.INDEX_VERSION)
+        self.assertIn(str(path), state)
+
+    def test_malformed_telegram_json_skips_cleanly(self):
+        path = self.tmp / "result.json"
+        path.write_text("{not valid json", encoding="utf-8")
+
+        rag = self.make_rag()
+        result = rag.index_file(str(path))
+
+        self.assertTrue(result.startswith("Skipped"), result)
+        self.assertIn("JSON parse failed", result)
+        self.assertEqual(rag.collection.upserts, [])
+
+    def test_reindexing_replaces_the_previous_telegram_chunks(self):
+        path = self.tmp / "result.json"
+        path.write_text(json.dumps({"messages": [
+            {"from": "A", "text": "ZXOLDMARKER"}]}), encoding="utf-8")
+        rag = self.make_rag()
+        rag.index_file(str(path))
+
+        path.write_text(json.dumps({"messages": [
+            {"from": "A", "text": "ZXNEWMARKER"}]}), encoding="utf-8")
+        rag.index_file(str(path))
+
+        self.assertEqual(self.fts.search("ZXOLDMARKER"), [])
+        self.assertTrue(self.fts.search("ZXNEWMARKER"))
+        self.assertEqual(self.fts.count(), 1)
+
+
 class BackfillTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="rag_backfill_"))

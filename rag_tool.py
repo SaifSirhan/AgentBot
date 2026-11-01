@@ -9,6 +9,7 @@ Rank Fusion so exact names, IDs and filenames are not lost to vector search.
 import os
 import json
 import glob
+import itertools
 import re
 import sqlite3
 import threading
@@ -16,6 +17,11 @@ import threading
 import chromadb
 from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:  # only large HTML exports need it
+    BeautifulSoup = None
 
 import config as _cfg
 
@@ -47,6 +53,17 @@ CHUNK_OVERLAP = 500
 # every already-indexed file exactly once instead of trusting its mtime cache.
 INDEX_VERSION = 2
 _VERSION_KEY = "__index_version__"
+
+# Plain-text files above this size are skipped; structured exports get a
+# dedicated reader instead of one oversized string.
+MAX_TEXT_CHARS = 500_000
+
+# HTML exports above this size are parsed into text nodes with BeautifulSoup.
+LARGE_HTML_BYTES = 5 * 1024 * 1024
+
+# Encode and store chunks in bounded batches. A large export never needs all
+# of its chunks or embeddings in RAM at once.
+INDEX_BATCH_CHUNKS = 32
 
 
 def _filename_for(source: str) -> str:
@@ -260,6 +277,26 @@ class RAGTool:
         values; when omitted they are chosen from the filepath.
         """
         ext = os.path.splitext(filepath)[1].lower()
+        if chunk_size is None:
+            chunk_size = CHUNK_SIZE
+        if overlap is None:
+            overlap = CHUNK_OVERLAP
+
+        # Telegram's JSON export is tens of MB. Parse its messages instead of
+        # reading it as one string that can never pass the size limit.
+        if ext == ".json" and os.path.basename(filepath).lower().endswith(
+                "result.json"):
+            return self._index_telegram_json(filepath, chunk_size, overlap)
+
+        # A large HTML export is walked as text nodes instead of being read
+        # into one oversized string.
+        if ext == ".html":
+            try:
+                large = os.path.getsize(filepath) > LARGE_HTML_BYTES
+            except OSError:
+                large = False
+            if large:
+                return self._index_large_html(filepath, chunk_size, overlap)
 
         if ext == ".pdf":
             text = self._read_pdf(filepath)
@@ -293,35 +330,129 @@ class RAGTool:
         if not text or not text.strip():
             return f"Skipped {filepath} (empty)"
 
-        # Skip huge files
-        if len(text) > 500_000:
+        # Skip huge plain-text files; structured exports use the paths above.
+        if len(text) > MAX_TEXT_CHARS:
             return f"Skipped {filepath} (too large: {len(text)} chars)"
 
-        if chunk_size is None:
-            chunk_size = CHUNK_SIZE
-        if overlap is None:
-            overlap = CHUNK_OVERLAP
+        return self._index_text(filepath, text, chunk_size, overlap)
 
-        chunks = self._chunk(text, size=chunk_size, overlap=overlap)
-        if not chunks:
+    def _index_text(self, filepath, text, chunk_size, overlap):
+        return self._store_chunks(
+            filepath,
+            self._chunk_blocks([text], size=chunk_size, overlap=overlap))
+
+    def _store_chunks(self, filepath, chunks):
+        """Embed and store an iterable of chunks in bounded batches."""
+        iterator = iter(chunks)
+        first = next(iterator, None)
+        if first is None:
             return f"No text chunks from {filepath}"
-
-        ids = [f"{filepath}::{i}" for i in range(len(chunks))]
-        embeddings = self.model.encode(chunks, show_progress_bar=False).tolist()
 
         try:
             self.collection.delete(where={"source": filepath})
         except Exception:
             pass
+        self.fts.delete_source(filepath)
 
+        total = 0
+        batch = []
+        for chunk in itertools.chain([first], iterator):
+            batch.append(chunk)
+            if len(batch) >= INDEX_BATCH_CHUNKS:
+                self._store_batch(filepath, batch, total)
+                total += len(batch)
+                batch = []
+        if batch:
+            self._store_batch(filepath, batch, total)
+            total += len(batch)
+        return f"Indexed {total} chunks from {filepath}"
+
+    def _store_batch(self, filepath, chunks, start):
+        ids = [
+            f"{filepath}::{start + index}" for index in range(len(chunks))]
+        embeddings = self.model.encode(chunks, show_progress_bar=False).tolist()
         self.collection.upsert(
             ids=ids,
-            documents=chunks,
+            documents=list(chunks),
             embeddings=embeddings,
-            metadatas=[{"source": filepath} for _ in chunks]
+            metadatas=[{"source": filepath} for _ in chunks],
         )
-        self.fts.replace_source(filepath, zip(ids, chunks))
-        return f"Indexed {len(chunks)} chunks from {filepath}"
+        self.fts.bulk_insert(zip(ids, [filepath] * len(chunks), chunks))
+
+    def _index_telegram_json(self, filepath, chunk_size, overlap):
+        try:
+            with open(filepath, "r", encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+        except Exception as e:
+            return f"Skipped {filepath} (JSON parse failed: {e})"
+        messages = data.get("messages") if isinstance(data, dict) else None
+        if not isinstance(messages, list):
+            return f"Skipped {filepath} (no messages array)"
+
+        def blocks():
+            for message in messages:
+                block = self._telegram_block(message)
+                if block:
+                    yield block
+
+        return self._store_chunks(
+            filepath,
+            self._chunk_blocks(blocks(), size=chunk_size, overlap=overlap))
+
+    @classmethod
+    def _telegram_block(cls, message):
+        if not isinstance(message, dict):
+            return ""
+        text = cls._telegram_text(message.get("text"))
+        if not text:
+            return ""
+        sender = message.get("from") or message.get("from_id") or "unknown"
+        return f"{sender}: {text}"
+
+    @staticmethod
+    def _telegram_text(value):
+        """Join Telegram's string or list-of-entities message text."""
+        if isinstance(value, str):
+            return value.strip()
+        if not isinstance(value, list):
+            return ""
+        parts = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                piece = item.get("text")
+                if isinstance(piece, str):
+                    parts.append(piece)
+        return "".join(parts).strip()
+
+    @staticmethod
+    def _parse_html(filepath):
+        if BeautifulSoup is None:
+            raise RuntimeError("beautifulsoup4 is not installed")
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as handle:
+            return BeautifulSoup(handle, "html.parser")
+
+    @staticmethod
+    def _html_text_blocks(soup):
+        for node in soup.find_all(string=True):
+            parent = node.parent
+            if parent is not None and parent.name in ("script", "style"):
+                continue
+            text = str(node).strip()
+            if text:
+                yield text
+
+    def _index_large_html(self, filepath, chunk_size, overlap):
+        try:
+            soup = self._parse_html(filepath)
+        except Exception as e:
+            return f"Skipped {filepath} (HTML parse failed: {e})"
+        return self._store_chunks(
+            filepath,
+            self._chunk_blocks(
+                self._html_text_blocks(soup),
+                size=chunk_size, overlap=overlap))
 
     def index_folder(self, folder: str, chunk_size: int = None,
                      overlap: int = None) -> str:
@@ -565,18 +696,27 @@ class RAGTool:
         wb.close()
         return "\n".join(parts)
 
+    def _chunk_blocks(self, blocks, size: int = CHUNK_SIZE,
+                      overlap: int = CHUNK_OVERLAP):
+        """Accumulate text blocks into overlapping chunks."""
+        buffer = ""
+        for block in blocks:
+            if not block:
+                continue
+            buffer = f"{buffer}\n{block}" if buffer else block
+            while len(buffer) >= size:
+                chunk = buffer[:size].strip()
+                if chunk:
+                    yield chunk
+                buffer = buffer[size - overlap:]
+        tail = buffer.strip()
+        if tail:
+            yield tail
+
     def _chunk(self, text: str, size: int = CHUNK_SIZE,
                overlap: int = CHUNK_OVERLAP):
         """Split text into overlapping chunks."""
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = start + size
-            chunk = text[start:end].strip()
-            if chunk:
-                chunks.append(chunk)
-            start = end - overlap
-        return chunks
+        return list(self._chunk_blocks([text], size=size, overlap=overlap))
 
 
 # ----------------------------------------------------------
