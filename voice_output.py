@@ -14,6 +14,7 @@ Requires:
 import re
 import queue
 import threading
+import time
 import warnings
 import os
 import numpy as np
@@ -391,6 +392,10 @@ _worker_lock = threading.Lock()
 _worker_busy = threading.Event()
 _active_stream = None
 _active_stream_lock = threading.Lock()
+# Cleared while an output stream is open, set once it is fully closed. Input
+# code waits on this before opening the microphone.
+_output_idle = threading.Event()
+_output_idle.set()
 # PortAudio streams are not safe to write, abort, or close concurrently. Every
 # one of those operations happens while holding this lock.
 _stream_lock = threading.Lock()
@@ -492,6 +497,7 @@ def _speak_blocking(text, generation=None):
 
     with _active_stream_lock:
         _active_stream = stream
+    _output_idle.clear()
 
     audio_queue = queue.Queue(maxsize=_AUDIO_QUEUE_MAXSIZE)
     producer_stop = threading.Event()
@@ -584,6 +590,7 @@ def _speak_blocking(text, generation=None):
             if _active_stream is stream:
                 _active_stream = None
         _close_stream(stream)
+        _output_idle.set()
 
 
 def _ensure_worker():
@@ -682,6 +689,9 @@ def stop():
                     _close_stream_locked(stream)
             finally:
                 _stream_lock.release()
+            with _active_stream_lock:
+                if _active_stream is None:
+                    _output_idle.set()
         else:
             # The writer will observe _cancel_event and close the stream in
             # its own finally block. Never abort underneath it.
@@ -698,6 +708,18 @@ def stop():
 def is_speaking():
     """True while speech is queued or playing."""
     return _worker_busy.is_set() or not _speech_queue.empty()
+
+
+def wait_until_idle(timeout=2.0):
+    """Block until nothing is queued and the output stream is fully closed."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        if not is_speaking() and _output_idle.is_set():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.02, remaining))
 
 
 def warmup():

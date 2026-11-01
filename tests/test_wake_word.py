@@ -52,6 +52,28 @@ class FlakyStream(FakeStream):
         return b"\x00\x00" * frames
 
 
+class SlowProbeStream(FakeStream):
+    """Flags a close() that lands while read() is still in flight."""
+
+    def __init__(self):
+        super().__init__()
+        self.reading = False
+        self.closed_during_read = False
+        self.read_started = threading.Event()
+
+    def read(self, frames, exception_on_overflow=False):
+        self.reading = True
+        self.read_started.set()
+        time.sleep(0.1)
+        self.reading = False
+        return b"\x00\x00" * frames
+
+    def close(self):
+        if self.reading:
+            self.closed_during_read = True
+        super().close()
+
+
 class FakeAudio:
     def __init__(self):
         self.streams = []
@@ -175,8 +197,36 @@ class WakeWordTests(unittest.TestCase):
         try:
             time.sleep(0.2)
             self.assertFalse(detected.is_set())
+            self.assertEqual(
+                self.audio.streams, [],
+                "paused listener opened the microphone")
             service.resume()
             self.assertTrue(detected.wait(2.0))
+        finally:
+            service.stop()
+
+    def test_pause_waits_for_the_wake_thread_to_release_the_mic(self):
+        service = self.make_service(lambda score: None)
+        probe = SlowProbeStream()
+
+        def open_probe(**_kwargs):
+            self.audio.streams.append(probe)
+            return probe
+
+        self.audio.open = open_probe
+        service.start()
+        try:
+            self.assertTrue(probe.read_started.wait(2.0))
+            started = time.monotonic()
+            released = service.pause(timeout=2.0)
+            elapsed = time.monotonic() - started
+            self.assertTrue(released)
+            self.assertGreaterEqual(elapsed, 0.05)
+            self.assertFalse(
+                probe.closed_during_read,
+                "the mic was closed from another thread mid-read")
+            self.assertTrue(probe.closed)
+            self.assertTrue(service.is_paused())
         finally:
             service.stop()
 

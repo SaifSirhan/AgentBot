@@ -108,12 +108,35 @@ class VoiceDeviceSelectionTests(unittest.TestCase):
         with mock.patch.object(voice, "sd", fake), \
                 mock.patch.object(
                     voice, "resolve_input_device",
-                    return_value=(1, "Microphone Array")):
+                    return_value=(1, "Microphone Array")), \
+                mock.patch.object(voice.time, "sleep") as sleep:
             with self.assertRaisesRegex(
                     RuntimeError, "Microphone Array.*device busy"):
                 voice.start_recording()
+        self.assertEqual(fake.InputStream.call_count, 2)
+        sleep.assert_called_once_with(0.2)
         self.assertFalse(voice._is_recording)
         self.assertIsNone(voice._on_transcript)
+
+    def test_mic_open_retries_a_transient_error_then_succeeds(self):
+        fake = self._fake_sd(default_index=0)
+        stream = FakeInputStream()
+        fake.InputStream.side_effect = [
+            RuntimeError("Error opening InputStream: device unavailable"),
+            stream,
+        ]
+        with mock.patch.object(voice, "sd", fake), \
+                mock.patch.object(
+                    voice, "resolve_input_device",
+                    return_value=(1, "Microphone Array")), \
+                mock.patch.object(voice.time, "sleep") as sleep:
+            voice.start_recording()
+            try:
+                self.assertTrue(stream.started)
+            finally:
+                voice.cancel_recording()
+        self.assertEqual(fake.InputStream.call_count, 2)
+        sleep.assert_called_once_with(0.2)
 
 
 class WhisperLifecycleTests(unittest.TestCase):

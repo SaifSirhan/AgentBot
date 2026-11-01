@@ -5611,9 +5611,11 @@ class AgentWindow(QMainWindow):
         service = self._wake_word_service
         if service is not None:
             try:
-                service.pause()
+                released = service.pause()
             except Exception:
-                pass
+                return
+            if released is False:
+                print("[wake] microphone release timed out")
 
     def _resume_wake_word(self):
         service = self._wake_word_service
@@ -6322,7 +6324,6 @@ class AgentWindow(QMainWindow):
         self._continuous_listening = bool(continuous)
         self._voice_start_event = threading.Event()
         start_event = self._voice_start_event
-        self._pause_wake_word()
         self.set_status(
             "Listening… (continuous)" if continuous
             else "Recording… release F9 to transcribe",
@@ -6330,6 +6331,9 @@ class AgentWindow(QMainWindow):
 
         def work():
             try:
+                self._release_audio_before_recording()
+                if not self._recording:
+                    return
                 if continuous:
                     get_voice().start_recording(
                         on_transcript=lambda text, reason: self._voice_event.emit(
@@ -6344,6 +6348,22 @@ class AgentWindow(QMainWindow):
                 start_event.set()
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _release_audio_before_recording(self):
+        """Release the wake mic and TTS output before opening the STT mic."""
+        self._pause_wake_word()
+        if self._wake_word_service is not None:
+            time.sleep(0.1)  # give the OS time to hand the device over
+        if not self._tts_ready:
+            return
+        try:
+            tts = get_voice_output()
+            tts.stop()
+            wait_idle = getattr(tts, "wait_until_idle", None)
+            if callable(wait_idle):
+                wait_idle(timeout=2.0)
+        except Exception as exc:
+            print(f"[voice] could not release TTS output: {exc}")
 
     def _stop_recording(self):
         if not self._recording:

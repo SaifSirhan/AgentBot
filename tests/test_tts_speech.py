@@ -116,11 +116,13 @@ class _BlockingStream:
 class PrefetchTests(unittest.TestCase):
     def setUp(self):
         voice_output._cancel_event.clear()
+        voice_output._output_idle.set()
         with voice_output._active_stream_lock:
             voice_output._active_stream = None
 
     def tearDown(self):
         voice_output._cancel_event.clear()
+        voice_output._output_idle.set()
         with voice_output._active_stream_lock:
             voice_output._active_stream = None
 
@@ -218,6 +220,41 @@ class PrefetchTests(unittest.TestCase):
 
         report.assert_called_once_with("speech failed: synth boom")
         self.assertEqual(stream.written, [])
+        self.assertEqual(stream.closed, 1)
+
+    def test_wait_until_idle_tracks_a_deferred_stop(self):
+        stream = _BlockingStream()
+        chunk = (None, None, np.array([0.1], dtype=np.float32))
+
+        def pipeline(piece, voice=None, speed=None):
+            yield chunk
+
+        with mock.patch.multiple(
+                voice_output,
+                _load_backend_status=mock.Mock(return_value=(True, "")),
+                _load_tts_config=mock.Mock(
+                    return_value=("af_heart", 1.0, "a", True)),
+                _load_max_chars=mock.Mock(return_value=10000),
+                _get_pipeline=mock.Mock(return_value=pipeline),
+                _split_for_tts=mock.Mock(return_value=["hello"]),
+                sanitize_for_speech=mock.Mock(side_effect=lambda t: t),
+                sd=mock.Mock(OutputStream=mock.Mock(return_value=stream))):
+            worker = threading.Thread(
+                target=voice_output._speak_blocking, args=("hello",),
+                daemon=True)
+            worker.start()
+            self.assertTrue(stream.write_started.wait(2.0))
+            stopper = threading.Thread(target=voice_output.stop, daemon=True)
+            stopper.start()
+            stopper.join(2.0)
+            self.assertFalse(stopper.is_alive())
+            self.assertEqual(stream.closed, 0)
+            self.assertFalse(voice_output.wait_until_idle(timeout=0.1))
+            stream.release.set()
+            worker.join(3.0)
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(voice_output.wait_until_idle(timeout=1.0))
+
         self.assertEqual(stream.closed, 1)
 
     def test_speak_queues_sanitized_text(self):

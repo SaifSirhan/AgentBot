@@ -28,6 +28,10 @@ _recording_chunks = []
 _is_recording = False
 _SAMPLERATE = 16000
 _input_device = None   # (index, name) selected by resolve_input_device()
+# A just-released device can fail the first open while the OS finishes tearing
+# the previous stream down. Retry exactly once after a short settling delay.
+_MIC_OPEN_ATTEMPTS = 2
+_MIC_RETRY_DELAY = 0.2
 
 # Inputs that are loopback/virtual endpoints, not a room microphone.
 _VIRTUAL_INPUT_HINTS = (
@@ -324,6 +328,40 @@ def _monitor_recording():
         print(f"[voice] transcript callback failed: {e}")
 
 
+def _open_input_stream(device_index, callback):
+    """Open and start the mic, retrying once for a transient device error."""
+    last_error = None
+    for attempt in range(_MIC_OPEN_ATTEMPTS):
+        if attempt:
+            time.sleep(_MIC_RETRY_DELAY)
+        stream = None
+        try:
+            stream = sd.InputStream(
+                samplerate=_SAMPLERATE,
+                channels=1,
+                dtype='int16',
+                device=device_index,
+                callback=callback,
+            )
+            stream.start()
+            return stream
+        except Exception as exc:
+            last_error = exc
+            if stream is not None:
+                try:
+                    stream.stop()
+                except Exception:
+                    pass
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            print(
+                f"[voice] mic open failed "
+                f"({attempt + 1}/{_MIC_OPEN_ATTEMPTS}): {exc}")
+    raise last_error
+
+
 def start_recording(
     on_transcript=None,
     silence_timeout=SILENCE_TIMEOUT,
@@ -373,14 +411,7 @@ def start_recording(
         raise
 
     try:
-        _stream = sd.InputStream(
-            samplerate=_SAMPLERATE,
-            channels=1,
-            dtype='int16',
-            device=device_index,
-            callback=callback,
-        )
-        _stream.start()
+        _stream = _open_input_stream(device_index, callback)
     except Exception as exc:
         _is_recording = False
         _on_transcript = None

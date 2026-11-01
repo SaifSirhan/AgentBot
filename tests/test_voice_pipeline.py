@@ -442,6 +442,9 @@ class FakeStt:
     def cancel_recording(self):
         self.cancelled += 1
 
+    def stop_and_transcribe(self):
+        return ""
+
 
 class GuiVoicePipelineTests(unittest.TestCase):
     @classmethod
@@ -621,6 +624,9 @@ class GuiVoicePipelineTests(unittest.TestCase):
     def test_continuous_recording_uses_sixty_second_idle_timeout(self):
         stt = FakeStt()
         with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(
+                    g, "get_voice_output",
+                    return_value=FakeTts(speaking=False)), \
                 mock.patch.object(self.window, "_pause_wake_word"):
             self.window._start_recording(continuous=True)
             self.assertTrue(
@@ -713,6 +719,87 @@ class GuiVoicePipelineTests(unittest.TestCase):
             self.window._start_recording()
         get_voice.assert_not_called()
         self.assertIn("Voice loading", self.window.windowTitle())
+
+    def test_f9_waits_for_wake_release_before_opening_the_mic(self):
+        stt = FakeStt()
+        pause_entered = threading.Event()
+        release_mic = threading.Event()
+
+        def pause():
+            pause_entered.set()
+            release_mic.wait(2.0)
+
+        with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(
+                    g, "get_voice_output",
+                    return_value=FakeTts(speaking=False)), \
+                mock.patch.object(
+                    self.window, "_pause_wake_word", side_effect=pause):
+            self.window._start_recording()
+            self.assertTrue(pause_entered.wait(2.0))
+            time.sleep(0.15)
+            self.assertFalse(
+                stt.started.is_set(),
+                "recording started before the wake listener released")
+            release_mic.set()
+            self.assertTrue(stt.started.wait(2.0))
+
+    def test_release_during_mic_prep_does_not_open_the_mic(self):
+        stt = FakeStt()
+        pause_entered = threading.Event()
+        release_mic = threading.Event()
+
+        def pause():
+            pause_entered.set()
+            release_mic.wait(2.0)
+
+        with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(
+                    g, "get_voice_output",
+                    return_value=FakeTts(speaking=False)), \
+                mock.patch.object(
+                    self.window, "_pause_wake_word", side_effect=pause):
+            self.window._start_recording()
+            self.assertTrue(pause_entered.wait(2.0))
+            self.window._recording = False  # F9 released while releasing
+            release_mic.set()
+            time.sleep(0.25)
+            self.assertFalse(
+                stt.started.is_set(),
+                "released F9 still opened the microphone")
+
+    def test_f9_stops_tts_and_waits_for_output_before_the_mic(self):
+        stt = FakeStt()
+        idle = threading.Event()
+        wait_started = threading.Event()
+
+        class WaitingTts(FakeTts):
+            def __init__(self):
+                super().__init__(queued=True, speaking=True)
+                self.timeout = None
+
+            def stop(self):
+                super().stop()
+                self.speaking = False
+
+            def wait_until_idle(self, timeout=None):
+                self.timeout = timeout
+                wait_started.set()
+                idle.wait(2.0)
+
+        tts = WaitingTts()
+        with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(g, "get_voice_output", return_value=tts), \
+                mock.patch.object(self.window, "_pause_wake_word"):
+            self.window._start_recording()
+            self.assertTrue(wait_started.wait(2.0))
+            self.assertEqual(tts.stops, 1)
+            self.assertEqual(tts.timeout, 2.0)
+            self.assertFalse(
+                stt.started.is_set(),
+                "recording started before TTS released the device")
+            idle.set()
+            self.assertTrue(stt.started.wait(2.0))
 
     def test_voice_preload_failure_is_visible(self):
         self.window._on_preload_ready("voice:error")

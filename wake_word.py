@@ -172,6 +172,10 @@ class WakeWordService:
         self._paused = False
         self._resume_after = 0.0
         self._stream = None
+        # Set whenever no PyAudio stream is open. pause() waits on it instead
+        # of closing the stream from the caller thread, which races read().
+        self._mic_released = threading.Event()
+        self._mic_released.set()
         self._audio = None
         self._model = None
         self._last_error = ""
@@ -196,11 +200,16 @@ class WakeWordService:
             thread.join(timeout=2.0)
         self._thread = None
 
-    def pause(self) -> None:
-        """Close the mic while recording; no detections until resume()."""
+    def pause(self, timeout: float = 1.0) -> bool:
+        """Close the mic while recording; block until the loop releases it.
+
+        The wake thread owns the stream, so closing it from here can cancel a
+        concurrent read() mid-call and surface as a PortAudio/CFFI error. The
+        loop closes the stream on its next pass; this waits for that to finish.
+        """
         with self._lock:
             self._paused = True
-        self._close_stream()
+        return self._mic_released.wait(timeout=max(0.0, float(timeout)))
 
     def resume(self) -> None:
         with self._lock:
@@ -253,6 +262,8 @@ class WakeWordService:
         with self._lock:
             if self._stream is not None:
                 return self._stream
+            if self._paused or self._stop.is_set():
+                return None
             if self._audio is None:
                 return None
             kwargs = {
@@ -265,23 +276,24 @@ class WakeWordService:
             if self._device_index is not None:
                 kwargs["input_device_index"] = self._device_index
             self._stream = self._audio.open(**kwargs)
+            self._mic_released.clear()
             return self._stream
 
     def _close_stream(self) -> None:
         with self._lock:
             stream = self._stream
             self._stream = None
-        if stream is None:
-            return
-        # Never touch the mixer here: keep shutdown portable.
-        try:
-            stream.stop_stream()
-        except Exception:
-            pass
-        try:
-            stream.close()
-        except Exception:
-            pass
+        if stream is not None:
+            # Never touch the mixer here: keep shutdown portable.
+            try:
+                stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        self._mic_released.set()
 
     def _detect(self, score: float) -> None:
         now = time.monotonic()
@@ -320,6 +332,8 @@ class WakeWordService:
 
                 stream = self._ensure_stream(pyaudio_module)
                 if stream is None:
+                    if self.is_paused() and not self._stop.is_set():
+                        continue
                     break
                 if self.is_paused():
                     # pause() may have landed while the stream was opening.
@@ -344,6 +358,8 @@ class WakeWordService:
                     continue
                 read_failures = 0
 
+                if self.is_paused():
+                    continue
                 frame = np.frombuffer(data, dtype=np.int16)
                 if frame.size == 0:
                     continue
@@ -352,7 +368,7 @@ class WakeWordService:
                     continue
                 _, score = max(
                     scores.items(), key=lambda item: float(item[1]))
-                if float(score) >= self._threshold:
+                if float(score) >= self._threshold and not self.is_paused():
                     self._detect(float(score))
 
         except Exception as exc:
