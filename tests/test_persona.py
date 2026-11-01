@@ -1,4 +1,4 @@
-"""Tests for time-of-day persona, mood state, and spontaneous observations.
+"""Tests for mood state, prompt persona, and spontaneous observations.
 
 Run: python -m unittest tests.test_persona -v
 """
@@ -14,20 +14,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import agent
 import config
-
-
-class DayPartTests(unittest.TestCase):
-    def test_late_night_hours(self):
-        for hour in (23, 0, 4):
-            self.assertEqual(agent.day_part(hour), "late")
-
-    def test_morning_hours(self):
-        for hour in (5, 8, 11):
-            self.assertEqual(agent.day_part(hour), "morning")
-
-    def test_day_hours(self):
-        for hour in (12, 17, 22):
-            self.assertEqual(agent.day_part(hour), "day")
 
 
 class MoodTests(unittest.TestCase):
@@ -97,44 +83,32 @@ class MoodTests(unittest.TestCase):
             agent.FRUSTRATION_DIRECTIVE,
             "You are currently frustrated because tools are failing. "
             "Express slight annoyance to the user.")
-        self.assertEqual(
-            agent.LATE_NIGHT_DIRECTIVE,
-            "It is late at night. The user is up late. Be brief, and gently "
-            "suggest they get some rest.")
-        self.assertEqual(
-            agent.MORNING_DIRECTIVE,
-            "It is morning. Greet the user warmly.")
 
 
 class PromptDirectiveTests(unittest.TestCase):
-    def test_late_night_directive_in_prompt(self):
-        with mock.patch.object(
-            agent, "day_part", return_value="late",
-        ), mock.patch.object(agent, "get_mood_directive", return_value=""):
-            prompt = agent._build_plan_prompt("hello", "")
-        self.assertIn(agent.LATE_NIGHT_DIRECTIVE, prompt)
-        self.assertNotIn(agent.MORNING_DIRECTIVE, prompt)
+    def test_sleep_and_time_of_day_persona_is_gone(self):
+        self.assertFalse(hasattr(agent, "LATE_NIGHT_DIRECTIVE"))
+        self.assertFalse(hasattr(agent, "MORNING_DIRECTIVE"))
+        self.assertFalse(hasattr(agent, "day_part"))
 
-    def test_morning_directive_in_prompt(self):
-        with mock.patch.object(
-            agent, "day_part", return_value="morning",
-        ), mock.patch.object(agent, "get_mood_directive", return_value=""):
-            prompt = agent._build_plan_prompt("hello", "")
-        self.assertIn(agent.MORNING_DIRECTIVE, prompt)
-        self.assertNotIn(agent.LATE_NIGHT_DIRECTIVE, prompt)
+        prompt = agent._build_plan_prompt("hello", "").lower()
+        for phrase in (
+            "get some rest",
+            "up late",
+            "late at night",
+            "it is morning",
+            "greet the user warmly",
+            "bedtime",
+            "go to sleep",
+        ):
+            self.assertNotIn(phrase, prompt, phrase)
 
-    def test_day_has_no_time_directive(self):
-        with mock.patch.object(
-            agent, "day_part", return_value="day",
-        ), mock.patch.object(agent, "get_mood_directive", return_value=""):
-            prompt = agent._build_plan_prompt("hello", "")
-        self.assertNotIn(agent.LATE_NIGHT_DIRECTIVE, prompt)
-        self.assertNotIn(agent.MORNING_DIRECTIVE, prompt)
+    def test_current_time_is_still_factual_context(self):
+        prompt = agent._build_plan_prompt("hello", "")
+        self.assertIn("CURRENT DATE AND TIME:", prompt)
 
     def test_frustration_directive_in_prompt(self):
         with mock.patch.object(
-            agent, "day_part", return_value="day",
-        ), mock.patch.object(
             agent, "get_mood_directive",
             return_value=agent.FRUSTRATION_DIRECTIVE,
         ):

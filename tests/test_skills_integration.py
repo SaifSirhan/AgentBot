@@ -164,7 +164,11 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn("AgentMemory\\evals\\traces", manual)
 
     def test_progressive_disclosure_prompt_budget(self):
-        prompt = agent._build_plan_prompt("hello", "")
+        # The profile is a deliberate extra block; the static prompt guard
+        # stays under 2,000 tokens on its own.
+        with mock.patch.object(
+                agent.memory, "get_user_model_block", return_value=""):
+            prompt = agent._build_plan_prompt("hello", "")
         self.assertLess(
             len(prompt) / 4, 2000,
             f"prompt is {len(prompt)} chars (~{len(prompt) / 4:.0f} tokens)")
@@ -221,14 +225,12 @@ class SkillIntegrationTests(unittest.TestCase):
     # Prompt budget
     # ------------------------------------------------------------------
     def test_real_prompt_stays_under_token_budget(self):
-        # Worst case: late-night directive plus the frustration directive, on
-        # top of the real catalog. Mood and time of day otherwise make this
-        # measurement vary between runs.
+        # Worst case: the frustration directive on top of the real catalog.
+        # Mood otherwise makes this measurement vary between runs.
         with mock.patch.multiple(
             agent, _skill_manager=None, _skills_dirty=True, GROUP_MODE=False
-        ), mock.patch.object(agent, "day_part", return_value="late"), \
-                mock.patch.object(agent, "get_mood_directive",
-                                  return_value=agent.FRUSTRATION_DIRECTIVE):
+        ), mock.patch.object(agent, "get_mood_directive",
+                             return_value=agent.FRUSTRATION_DIRECTIVE):
             prompt = agent._build_plan_prompt("hello", "")
             catalog = agent.get_skill_catalog()
 
@@ -301,9 +303,8 @@ class SkillIntegrationTests(unittest.TestCase):
     def test_real_stremio_prompt_stays_under_token_budget(self):
         with mock.patch.multiple(
             agent, _skill_manager=None, _skills_dirty=True, GROUP_MODE=False
-        ), mock.patch.object(agent, "day_part", return_value="late"), \
-                mock.patch.object(agent, "get_mood_directive",
-                                  return_value=agent.FRUSTRATION_DIRECTIVE):
+        ), mock.patch.object(agent, "get_mood_directive",
+                             return_value=agent.FRUSTRATION_DIRECTIVE):
             prompt = agent._build_plan_prompt("watch Cherry", "")
         self.assertLess(len(prompt) / 4, MAX_PROMPT_TOKENS)
 

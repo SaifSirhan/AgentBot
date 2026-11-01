@@ -1139,11 +1139,6 @@ MOOD_LOCK = _threading.RLock()
 MOOD_MAX = 10
 FRUSTRATION_THRESHOLD = 3
 
-LATE_NIGHT_DIRECTIVE = (
-    "It is late at night. The user is up late. Be brief, and gently suggest "
-    "they get some rest."
-)
-MORNING_DIRECTIVE = "It is morning. Greet the user warmly."
 FRUSTRATION_DIRECTIVE = (
     "You are currently frustrated because tools are failing. Express slight "
     "annoyance to the user."
@@ -1233,16 +1228,6 @@ def get_mood_directive(mood=None):
     if mood.get("frustration", 0) >= FRUSTRATION_THRESHOLD:
         return FRUSTRATION_DIRECTIVE
     return ""
-
-
-def day_part(hour=None):
-    """Classify an hour into 'late', 'morning', or 'day'."""
-    hour = datetime.datetime.now().hour if hour is None else hour
-    if hour >= 23 or hour < 5:
-        return "late"
-    if 5 <= hour < 12:
-        return "morning"
-    return "day"
 
 
 # ---------------------------
@@ -1492,17 +1477,20 @@ def _build_plan_prompt(user_request, context, correction=None):
     time_block = f"\nCURRENT DATE AND TIME: {now_str} (use this; never guess)\n"
 
     persona_lines = []
-    part = day_part()
-    if part == "late":
-        persona_lines.append(LATE_NIGHT_DIRECTIVE)
-    elif part == "morning":
-        persona_lines.append(MORNING_DIRECTIVE)
     mood_line = get_mood_directive()
     if mood_line:
         persona_lines.append(mood_line)
     persona_block = (
         "\n" + "\n".join(persona_lines) + "\n" if persona_lines else ""
     )
+
+    # A psychological profile is personal context; group chats never see it.
+    user_model_block = ""
+    if not GROUP_MODE:
+        try:
+            user_model_block = memory.get_user_model_block()
+        except Exception:
+            user_model_block = ""
 
     group_block = ""
     if GROUP_MODE:
@@ -1547,7 +1535,7 @@ def _build_plan_prompt(user_request, context, correction=None):
         instructions = f"{TOOL_DESCRIPTIONS}\n{CORE_RULES}"
 
     prompt = f"""{skill_catalog}{skill_directive}{instructions}
-{CORE_PERSONA}{learned_block}{group_block}{time_block}{persona_block}{facts_block}
+{CORE_PERSONA}{learned_block}{group_block}{time_block}{persona_block}{user_model_block}{facts_block}
 Context (recent conversation and tool results):
 {context}
 
