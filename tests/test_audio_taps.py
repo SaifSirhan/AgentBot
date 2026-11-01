@@ -46,7 +46,7 @@ class KokoroTapTests(unittest.TestCase):
                 mock.patch.object(voice_output, "_load_backend_status", return_value=(True, "")), \
                 mock.patch.object(voice_output, "_load_tts_config", return_value=("af_heart", "1.0", "a", True)), \
                 mock.patch.object(voice_output, "_load_max_chars", return_value=10000), \
-                mock.patch.object(voice_output, "_clean_for_speech", side_effect=lambda text: text), \
+                mock.patch.object(voice_output, "sanitize_for_speech", side_effect=lambda text: text), \
                 mock.patch.object(voice_output, "_split_for_tts", return_value=["hello"]), \
                 mock.patch.object(voice_output, "_get_pipeline", return_value=pipeline), \
                 mock.patch.object(voice_output, "sd") as fake_sd:
@@ -71,7 +71,7 @@ class KokoroTapTests(unittest.TestCase):
         with mock.patch.object(voice_output, "_load_backend_status", return_value=(True, "")), \
                 mock.patch.object(voice_output, "_load_tts_config", return_value=("af_heart", "1.0", "a", True)), \
                 mock.patch.object(voice_output, "_load_max_chars", return_value=10000), \
-                mock.patch.object(voice_output, "_clean_for_speech", side_effect=lambda text: text), \
+                mock.patch.object(voice_output, "sanitize_for_speech", side_effect=lambda text: text), \
                 mock.patch.object(voice_output, "_split_for_tts", return_value=["hello"]), \
                 mock.patch.object(voice_output, "_get_pipeline", return_value=pipeline), \
                 mock.patch.object(voice_output, "sd") as fake_sd:

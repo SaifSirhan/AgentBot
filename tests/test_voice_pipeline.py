@@ -225,7 +225,7 @@ class VoiceOutputInterruptTests(unittest.TestCase):
                 return_value=("af_heart", 1.0, "a", True)),
             mock.patch.object(voice_output, "_load_max_chars", return_value=10000),
             mock.patch.object(
-                voice_output, "_clean_for_speech", side_effect=lambda t: t),
+                voice_output, "sanitize_for_speech", side_effect=lambda t: t),
             mock.patch.object(
                 voice_output, "_split_for_tts", return_value=["hello"]),
         ]
@@ -253,7 +253,14 @@ class VoiceOutputInterruptTests(unittest.TestCase):
         self.assertFalse(voice_output.is_speaking())
 
     def test_speak_blocking_stops_after_an_interrupt(self):
-        stream = AbortableStream()
+        first_chunk_played = threading.Event()
+
+        class SignalingStream(AbortableStream):
+            def write(self, data):
+                super().write(data)
+                first_chunk_played.set()
+
+        stream = SignalingStream()
         seen_streams = []
         chunks = [
             (None, None, np.array([0.1], dtype=np.float32)),
@@ -263,8 +270,12 @@ class VoiceOutputInterruptTests(unittest.TestCase):
         def pipeline(piece, voice=None, speed=None):
             seen_streams.append(voice_output._active_stream)
             yield chunks[0]
+            # Synthesize sentence 1 ahead of playback, then interrupt only
+            # after the consumer has actually played it.
+            saw_playback = first_chunk_played.wait(2.0)
             voice_output.stop()
-            yield chunks[1]
+            if saw_playback:
+                yield chunks[1]
 
         with mock.patch.object(voice_output.sd, "OutputStream",
                                return_value=stream), \
@@ -274,6 +285,8 @@ class VoiceOutputInterruptTests(unittest.TestCase):
 
         self.assertIs(seen_streams[0], stream)
         self.assertEqual(len(stream.written), 1)
+        self.assertEqual(stream.aborted, 1)
+        self.assertEqual(stream.closed, 1)
         self.assertTrue(voice_output._cancel_event.is_set())
 
     def test_stop_waits_for_an_in_flight_write_before_touching_the_stream(self):

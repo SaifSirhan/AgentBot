@@ -3,8 +3,8 @@ Text-to-speech via Kokoro-82M (local, offline, high quality).
 
 - Persistent worker thread (safe from GUI daemon threads)
 - Model warmup at app startup so first reply is instant
-- Streaming playback: speaks the first sentence in ~1s, rest follows
-- Auto-strips markdown so TTS doesn't read "asterisk asterisk"
+- Sanitizes markdown, file paths, URLs, and slashes before synthesis
+- Prefetches audio chunks: synthesis runs ahead of playback in a small queue
 - Splits long text into short chunks so CPU synthesis keeps up
 
 Requires:
@@ -76,76 +76,118 @@ LANG  = "a"          # 'a' = American English, 'b' = British English
 # =============================================================
 # Text cleanup
 # =============================================================
-def _clean_for_speech(text):
-    """Turn LLM markdown output into something a human would actually say aloud."""
+# A Windows drive/UNC path. Segments cannot contain whitespace: allowing it
+# lets the intermediate group swallow prose before a later slash. The final
+# segment stops at a word boundary so trailing prose is not swallowed. The
+# lookbehind keeps it from matching the "C:" inside a URL or a word.
+_WINDOWS_PATH_RE = re.compile(
+    r"(?<![\w:/])(?:[A-Za-z]:[\\/]|\\\\)"
+    r"(?:[^\\/:*?\"<>|\r\n\s]+[\\/])*"
+    r"[^\\/:*?\"<>|\r\n\s]*?"
+    r"(?=$|[\s,;:!?])"
+)
+# Unix absolute path such as /usr/bin/python.
+_POSIX_PATH_RE = re.compile(
+    r"(?<![\w:])/(?:[A-Za-z0-9._@+-]+/)+[A-Za-z0-9._@+-]*"
+)
+_URL_RE = re.compile(r"\b(?:https?://|www\.)\S+", re.IGNORECASE)
+
+
+def sanitize_for_speech(text):
+    """Turn LLM markdown/output into text that is safe and natural to speak.
+
+    Code blocks and URLs are removed, file paths become "the file", markdown
+    punctuation is stripped, and any remaining slash is spoken as "slash".
+    """
     if not text:
         return ""
 
-    s = text.strip()
+    s = str(text).strip()
     if s.startswith("AI: "):
         s = s[4:]
 
-    # Strip [From: C:\...] source tags
+    # [From: C:\...] source tags
     s = re.sub(r"\[From:[^\]]*\]", "", s)
 
-    # Code blocks — replace with a spoken marker
-    s = re.sub(r"```[a-zA-Z0-9_+-]*\n.*?```", " code block ", s, flags=re.DOTALL)
+    # Fenced code blocks: drop the code and the fences entirely.
+    s = re.sub(r"```.*?```", " ", s, flags=re.DOTALL)
+    s = s.replace("```", " ")
 
-    # Inline code: keep words, drop backticks
+    # Inline code: keep the words, drop the backticks.
     s = re.sub(r"`([^`]*)`", r"\1", s)
 
-    # Markdown emphasis
-    s = s.replace("**", "").replace("__", "").replace("~~", "")
-    s = re.sub(r"(?<!\w)\*([^*\n]+)\*(?!\w)", r"\1", s)
-    s = re.sub(r"(?<!\w)_([^_\n]+)_(?!\w)", r"\1", s)
+    # Markdown links and images: keep the label, discard the target.
+    s = re.sub(r"!?\[([^\]]+)\]\([^)]+\)", r"\1", s)
 
-    # Headers
+    # Bare URLs are not worth reading aloud.
+    s = _URL_RE.sub(" ", s)
+
+    # Paths are spoken as a single phrase instead of character by character.
+    s = _WINDOWS_PATH_RE.sub(" the file ", s)
+    s = _POSIX_PATH_RE.sub(" the file ", s)
+
+    # Markdown emphasis/header markers.
+    s = re.sub(r"[*#_~`]+", "", s)
+
+    # Headers, bullets, numbered lines, blockquotes, and horizontal rules.
     s = re.sub(r"^#{1,6}\s*", "", s, flags=re.MULTILINE)
-
-    # Markdown links [text](url) -> text
-    s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)
-
-    # Bare URLs -> "link"
-    s = re.sub(r"https?://\S+", "link", s)
-
-    # Emojis
-    s = re.sub(r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]+", "", s)
-
-    # Bullets, numbers, blockquotes, horizontal rules
     s = re.sub(r"^\s*[-*+]\s+", "", s, flags=re.MULTILINE)
     s = re.sub(r"^\s*\d+\.\s+", "", s, flags=re.MULTILINE)
     s = re.sub(r"^\s*>\s?", "", s, flags=re.MULTILINE)
     s = re.sub(r"^\s*[-*_]{3,}\s*$", "", s, flags=re.MULTILINE)
 
-    # Any leftover stray markers
-    s = s.replace("*", "").replace("#", "")
+    # Anything that still looks like a slash is spoken, not skipped.
+    s = re.sub(r"[\\/]+", " slash ", s)
 
-    # Whitespace
+    # Emojis.
+    s = re.sub(
+        r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF"
+        r"\U0001F1E6-\U0001F1FF]+", "", s)
+
+    # Whitespace and line breaks.
     s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{2,}", ". ", s)
+    s = re.sub(r"\s*\n\s*", ". ", s)
+    s = re.sub(r"\.\s*\.", ".", s)
+    s = re.sub(r"\s+", " ", s).strip()
 
-    return s.strip()
+    if not re.search(r"[A-Za-z0-9]", s):
+        return ""
+    return s
 
 
-def _split_for_tts(text, max_chars=90):
-    """Split into small chunks — easier for Kokoro on CPU to keep up."""
-    parts = re.split(r"(?<=[.!?])\s+", text)
+def _split_for_tts(text, max_chars=150):
+    """Split text into chunks of about max_chars, preferring sentence breaks."""
     out = []
-    for part in parts:
-        if len(part) > max_chars:
-            sub = re.split(r"(?<=[,;—])\s+", part)
-            buf = ""
-            for piece in sub:
-                if len(buf) + len(piece) + 1 <= max_chars:
-                    buf = (buf + " " + piece).strip()
-                else:
-                    if buf:
-                        out.append(buf)
-                    buf = piece
-            if buf:
-                out.append(buf)
-        else:
-            out.append(part)
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if len(sentence) <= max_chars:
+            out.append(sentence)
+            continue
+        # Prefer clause boundaries, then hard-wrap anything still too long.
+        buf = ""
+        for piece in re.split(r"(?<=[,;—])\s+", sentence):
+            piece = piece.strip()
+            while len(piece) > max_chars:
+                if buf:
+                    out.append(buf)
+                    buf = ""
+                cut = piece.rfind(" ", 0, max_chars + 1)
+                if cut <= 0:
+                    cut = max_chars
+                out.append(piece[:cut].strip())
+                piece = piece[cut:].strip()
+            if not piece:
+                continue
+            if len(buf) + len(piece) + 1 <= max_chars:
+                buf = (buf + " " + piece).strip()
+            else:
+                if buf:
+                    out.append(buf)
+                buf = piece
+        if buf:
+            out.append(buf)
     return [c.strip() for c in out if c.strip()]
 
 
@@ -355,6 +397,13 @@ _stream_lock = threading.Lock()
 _cancel_event = threading.Event()
 _speech_generation = 0
 _generation_lock = threading.Lock()
+# Playback keeps at most three synthesized chunks queued ahead of the audio
+# device, enough to cover synthesis without eating reply latency.
+_AUDIO_QUEUE_MAXSIZE = 3
+_AUDIO_SENTINEL = object()
+# A cancelled producer can still be finishing a Kokoro call when the next reply
+# starts, so pipeline use is serialized across replies.
+_synthesis_lock = threading.Lock()
 
 
 def _current_generation() -> int:
@@ -389,7 +438,7 @@ def _worker_loop():
 
 
 def _speak_blocking(text, generation=None):
-    """Stream audio: play each chunk as it's generated."""
+    """Speak one reply with synthesis and playback running concurrently."""
     global _active_stream
     _cancel_event.clear()
 
@@ -412,7 +461,7 @@ def _speak_blocking(text, generation=None):
         print("[tts] disabled in settings")
         return
 
-    cleaned = _clean_for_speech(text)
+    cleaned = sanitize_for_speech(text)
     if not cleaned:
         print("[tts] nothing to speak after cleanup")
         return
@@ -444,49 +493,93 @@ def _speak_blocking(text, generation=None):
     with _active_stream_lock:
         _active_stream = stream
 
+    audio_queue = queue.Queue(maxsize=_AUDIO_QUEUE_MAXSIZE)
+    producer_stop = threading.Event()
+
+    def synthesize():
+        """Producer: turn sentences into audio chunks ahead of playback."""
+        error = None
+        try:
+            with _synthesis_lock:
+                for piece in _split_for_tts(cleaned):
+                    if cancelled() or producer_stop.is_set():
+                        return
+                    for chunk in pipeline(piece, voice=voice, speed=speed):
+                        if cancelled() or producer_stop.is_set():
+                            return
+                        try:
+                            audio = chunk[2]
+                        except (IndexError, TypeError):
+                            continue
+                        if audio is None:
+                            continue
+                        if hasattr(audio, "detach"):
+                            audio = audio.detach().cpu().numpy()
+                        audio = np.ascontiguousarray(
+                            audio, dtype=np.float32).reshape(-1, 1)
+                        if audio.size == 0:
+                            continue
+                        while not (cancelled() or producer_stop.is_set()):
+                            try:
+                                audio_queue.put(audio, timeout=0.1)
+                                break
+                            except queue.Full:
+                                continue
+                        if cancelled() or producer_stop.is_set():
+                            return
+        except Exception as e:
+            error = e
+        finally:
+            try:
+                audio_queue.put_nowait(_AUDIO_SENTINEL)
+            except queue.Full:
+                # The consumer drains until it sees the producer exit.
+                pass
+            if error is not None:
+                _report_error(f"speech failed: {error}")
+
+    producer = threading.Thread(
+        target=synthesize, daemon=True, name="TTS-Synth")
+    producer.start()
+
     chunk_count = 0
     interrupted = False
     try:
-        for piece in _split_for_tts(cleaned):
+        while True:
             if cancelled():
                 interrupted = True
                 break
-            for chunk in pipeline(piece, voice=voice, speed=speed):
+            try:
+                audio = audio_queue.get(timeout=0.1)
+            except queue.Empty:
+                if not producer.is_alive():
+                    break
+                continue
+            if audio is _AUDIO_SENTINEL:
+                break
+            if cancelled():
+                interrupted = True
+                break
+            audio_bus.publish(audio, "tts")
+            with _stream_lock:
                 if cancelled():
                     interrupted = True
                     break
                 try:
-                    audio = chunk[2]
-                except (IndexError, TypeError):
-                    continue
-                if audio is None:
-                    continue
-                if hasattr(audio, "detach"):
-                    audio = audio.detach().cpu().numpy()
-                audio = np.ascontiguousarray(
-                    audio, dtype=np.float32).reshape(-1, 1)
-                if audio.size == 0:
-                    continue
-                audio_bus.publish(audio, "tts")
-                with _stream_lock:
+                    stream.write(audio)
+                except Exception:
                     if cancelled():
                         interrupted = True
                         break
-                    try:
-                        stream.write(audio)
-                    except Exception:
-                        if cancelled():
-                            interrupted = True
-                            break
-                        raise
-                chunk_count += 1
-            if interrupted:
-                break
+                    raise
+            chunk_count += 1
         if interrupted:
             print(f"[tts] interrupted ({chunk_count} chunks played)")
         else:
             print(f"[tts] done ({chunk_count} chunks played)")
     finally:
+        producer_stop.set()
+        producer.join(timeout=2.0)
         with _active_stream_lock:
             if _active_stream is stream:
                 _active_stream = None
@@ -529,7 +622,7 @@ def speak(text):
                 "and sounddevice")
         return False
 
-    cleaned = _clean_for_speech(text)
+    cleaned = sanitize_for_speech(text)
     if not cleaned:
         return False
 
