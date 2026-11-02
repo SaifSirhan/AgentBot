@@ -33,6 +33,7 @@ AgentBot is not just a wrapper around a chatbot; it is a true computer-use agent
 - **Python:** 3.11 (developed on 3.11.9 via `pyenv-win`).
 - **System binaries:** [MPV](https://mpv.io/) (for media playback), [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki), and a Chromium/Chrome browser.
 - **API keys** for whichever LLM providers you want to use.
+- **Tests:** run them with that same pyenv 3.11.9 interpreter, not `.venv` — see [TESTING.md](TESTING.md).
 
 ## Installation
 
