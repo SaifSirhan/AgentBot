@@ -48,38 +48,45 @@ python -m venv .venv
 
 # 3. Install dependencies
 pip install -r requirements.txt
-Configuration
-AgentBot reads configuration from %APPDATA%\AgentBot\config.json and from environment variables. Secrets should be provided as environment variables so they are never written to disk.
+```
 
-Variable	Purpose
-DEEPSEEK_API_KEY	DeepSeek provider (Primary)
-GROQ_API_KEY	Groq provider (Fallback)
-GEMINI_API_KEY	Google Gemini
-AGENT_BRAIN_PRIORITY	Comma-separated provider order
-Usage
-bash
-# Launch the PySide6 Terminal GUI
-python agent_gui_qt.py
-Type a request in the terminal prompt and press Enter. Type /help for the list of slash commands.
+## Configuration
 
-Tech Stack
-GUI: PySide6 (Qt)
+AgentBot reads configuration from %APPDATA%\AgentBot\config.json and from
+environment variables. Secrets should be provided as environment variables so
+they are never written to disk.
 
-AI/Agentic Architecture: OpenAI SDK (DeepSeek), ReAct Loop, ExpeL
+| Variable | Purpose |
+| --- | --- |
+| `GROQ_API_KEY` | Groq provider (Fallback) |
+| `DEEPSEEK_API_KEY` | DeepSeek provider (Primary) |
+| `GEMINI_API_KEY` | Google Gemini |
+| `OPENROUTER_API_KEY` | OpenRouter |
+| `MISTRAL_API_KEY` | Mistral |
+| `HUGGINGFACE_API_KEY` | Hugging Face inference |
+| `COHERE_API_KEY` | Cohere |
+| `META_AI_API_KEY` | Meta AI |
+| `OLLAMA_URL` / `OLLAMA_MODEL` | Local Ollama endpoint and model |
+| `AGENT_BRAIN_PRIORITY` | Comma-separated provider order (overrides the built-in default) |
 
-Automation: PyAutoGUI, Playwright, PyGetWindow, MSS
-
-Memory/RAG: ChromaDB, SQLite, Sentence-Transformers
-
-Audio: faster-whisper, Kokoro, openWakeWord
+## Usage
 
 ```bash
+# Launch the PySide6 Terminal GUI
 python agent_gui_qt.py
 ```
 
 Type a request in the chat box and press Enter. Type `/help` for the list of
 slash commands. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how a
 request flows through the system.
+
+## Tech Stack
+
+- **GUI:** PySide6 (Qt)
+- **AI/Agentic Architecture:** OpenAI SDK (DeepSeek), ReAct Loop, ExpeL
+- **Automation:** PyAutoGUI, Playwright, PyGetWindow, MSS
+- **Memory/RAG:** ChromaDB, SQLite, Sentence-Transformers
+- **Audio:** faster-whisper, Kokoro, openWakeWord
 
 ## Project layout
 
