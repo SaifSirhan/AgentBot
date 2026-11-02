@@ -118,5 +118,40 @@ class MessageColumnTests(unittest.TestCase):
                 self.assertEqual(self._column(message).x(), 0)
 
 
+    def test_one_line_messages_reserve_one_line_of_height(self):
+        """The wrapped label's height hint was measured at its minimum width,
+        so a single line asked for 252px and the body grew into a void."""
+        messages = self._add(*[
+            g.UserMessage(f"line {i}: the quick brown fox jumps over the dog")
+            for i in range(12)
+        ])
+        for message in messages:
+            with self.subTest(height=message.sizeHint().height()):
+                self.assertLessEqual(message.sizeHint().height(),
+                                     message.height() + 4)
+
+    def test_scroll_bottom_lands_on_the_last_message(self):
+        """The scrollbar maximum must match the last rendered message, not a
+        phantom body height. Enough lines to overflow the viewport, or the
+        content simply sits at the top and the check means nothing."""
+        messages = self._add(*[
+            g.UserMessage(f"line {i}: the quick brown fox jumps over the dog")
+            for i in range(60)
+        ])
+        chat = self.window.chat
+        self.assertGreater(chat._body.height(), chat.viewport().height(),
+                           "test needs overflowing content")
+        bar = chat.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        self.app.processEvents()
+        last = messages[-1]
+        bottom = last.mapTo(chat.viewport(), QPoint(0, last.height())).y()
+        self.assertLessEqual(
+            abs(bottom - chat.viewport().height()),
+            chat.BOTTOM_EPSILON + 4,
+            "scrolling to the end left %d px of void below the last message"
+            % (chat.viewport().height() - bottom))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

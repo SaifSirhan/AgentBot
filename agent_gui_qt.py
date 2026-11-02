@@ -41,8 +41,10 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     Qt,
+    QBuffer,
     QEasingCurve,
     QEvent,
+    QIODevice,
     QObject,
     QPropertyAnimation,
     QRect,
@@ -110,12 +112,13 @@ from hud_core import ReactorHud
 from window_chrome import FramelessChrome
 
 # --------------------------- palette ---------------------------
-# Holographic dark: near-black canvas, lifted slate surfaces, neon cyan accent.
-# Kept as constants because a lot of the existing widgets style themselves
-# inline (icon tints can't come from QSS); themes/*.qss owns the structural and
-# tone rules. These values track themes/holographic_dark.qss — the default.
-COLOR_BG         = "#0E1116"
-COLOR_BG_ALT     = "#0B0E13"
+# Pure-terminal palette: matte black canvas, lifted slate surfaces, neon cyan
+# accent. Kept as constants because a lot of the existing widgets style
+# themselves inline (icon tints can't come from QSS); themes/*.qss owns the
+# structural and tone rules. These values track
+# themes/holographic_dark.qss — the default.
+COLOR_BG         = "#0B0E13"
+COLOR_BG_ALT     = "#0E1116"
 COLOR_SIDEBAR    = "#0B0E13"
 COLOR_RAISED     = "#1A1D24"
 COLOR_CODE_BG    = "#12161D"
@@ -160,6 +163,9 @@ _fonts_resolved = False
 
 HEADER_H = 48
 TITLEBAR_H = 34
+# Qt has no reverse-video block cursor in QPlainTextEdit; a wide blinking bar at
+# the caret is the closest terminal look without custom painting.
+CURSOR_FLASH_MS = 530
 
 # The frameless shell is implemented with Win32 native messages, so it exists
 # only where those messages do: on Linux/macOS the OS title bar stays and no
@@ -1082,9 +1088,43 @@ def _icon_button(icon: str, tooltip: str = "", size: int = 30,
     return btn
 
 
+class ScanlineLayer(QWidget):
+    """Faint horizontal holographic lines behind the chat body.
+
+    Parented to the chat viewport beside the background HUD and lowered under
+    the message body, which is how the HUD already stays behind text.
+    """
+
+    PERIOD = 4
+    ALPHA = 10
+    WIDTH = 1
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName("scanlineLayer")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        if not painter.isActive():
+            return
+        color = QColor(COLOR_ACCENT)
+        color.setAlpha(self.ALPHA)
+        pen = QPen(color)
+        pen.setWidth(self.WIDTH)
+        painter.setPen(pen)
+        y = 0
+        while y < self.height():
+            painter.drawLine(0, y, self.width(), y)
+            y += self.PERIOD
+        painter.end()
+
+
 class TitleBar(QFrame):
-    """Thin custom window bar for the frameless shell: drag surface, title,
-    settings and the three window controls.
+    """Thin custom window bar for the frameless shell: drag surface, title and
+    the three window controls.
 
     Dragging runs through the native move loop (`startSystemMove`), which is
     what keeps Aero Snap working when the bar is pulled against a screen edge.
@@ -1115,11 +1155,6 @@ class TitleBar(QFrame):
         row.addWidget(self.title_label)
         row.addStretch(1)
 
-        self.settings_button = self._control("settings", "Settings",
-                                             "titleBarButton", 13)
-        self.settings_button.clicked.connect(self._open_settings)
-        row.addWidget(self.settings_button)
-
         self.min_button = self._control("win_min", "Minimize",
                                         "titleBarButton", 12)
         self.min_button.clicked.connect(self._window.showMinimized)
@@ -1146,9 +1181,6 @@ class TitleBar(QFrame):
             # without a stylesheet rule the button's inline style would veto.
             btn._icon_hover = COLOR_DANGER
         return btn
-
-    def _open_settings(self):
-        self._window.open_settings()
 
     def sync_state(self):
         """Mirror window title and maximised state after any window change."""
@@ -1188,26 +1220,6 @@ class TitleBar(QFrame):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
-
-
-def _circle_style(btn: QPushButton, fill: str, hover: str) -> None:
-    """Make an icon button a filled disc with a knocked-out glyph.
-
-    Applied on the widget because an app stylesheet can never outrank the
-    inline sheet _icon_button already installs on it.
-    """
-    radius = max(btn.height(), btn.width()) // 2
-    btn.setStyleSheet(
-        f"""
-        QPushButton {{
-            background: {fill};
-            border: none;
-            border-radius: {radius}px;
-        }}
-        QPushButton:hover {{ background: {hover}; }}
-        QPushButton:pressed {{ background: {fill}; }}
-        """
-    )
 
 
 # ----------------------------------------------------------------------
@@ -1582,11 +1594,43 @@ class MessageBase(ShrinkableWidget):
         row = zero_layout(QHBoxLayout(self))
         row.addWidget(self._column, 1)
 
+    def _height_at_width(self):
+        """Height the column needs at the width it actually gets.
+
+        Qt asks a word-wrapped label for its hint at the *minimum* width, so a
+        one-line message reported 252px and a long chat grew a scroll void
+        below the last message. Measuring at the real width removes it.
+        """
+        parent = self.parentWidget()
+        width = 0
+        for candidate in (self._column.width(), self.width(),
+                          parent.width() if parent else 0):
+            if candidate > 1:
+                width = candidate
+                break
+        if width <= 1:
+            # Nothing has sized this row yet. The old width-agnostic hint is
+            # better than zero, which would stop the body growing at all; the
+            # exact number arrives with the first resize.
+            return self._col_layout.sizeHint().height()
+        total = 0
+        for index in range(self._col_layout.count()):
+            widget = self._col_layout.itemAt(index).widget()
+            if widget is None:
+                continue
+            hinted = (widget.heightForWidth(width)
+                      if widget.hasHeightForWidth()
+                      else widget.sizeHint().height())
+            total += max(hinted, widget.minimumSizeHint().height())
+        return total
+
+    def sizeHint(self):
+        return QSize(0, self._height_at_width())
+
     def minimumSizeHint(self):
-        # QWidgetItem promotes minimumSizeHint into the layout's size hint.
-        # The wrapped-label minimum is computed before the column gets its real
-        # width, which would leave a blank tail in the scroll area.
-        return QSize(0, self.sizeHint().height())
+        # Width 0: QWidgetItem promotes this into the layout's hint, and the
+        # column's real width comes from the viewport, never from the label.
+        return QSize(0, self._height_at_width())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2308,6 +2352,10 @@ class ChatView(QScrollArea):
         self.background_hud = ReactorHud(
             parent=self.viewport(), opacity=0.15)
         self.background_hud.setFixedSize(800, 800)
+        self.scanlines = ScanlineLayer(self.viewport())
+        self.scanlines.setGeometry(
+            0, 0, self.viewport().width(), self.viewport().height())
+        self.scanlines.lower()
         self._body.raise_()
         self._center_background_hud()
 
@@ -2318,6 +2366,11 @@ class ChatView(QScrollArea):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._center_background_hud()
+        layer = getattr(self, "scanlines", None)
+        if layer is not None:
+            layer.resize(self.viewport().size())
+            layer.lower()
+            self._body.raise_()
 
     def _center_background_hud(self):
         hud = getattr(self, "background_hud", None)
@@ -2366,6 +2419,12 @@ class ChatView(QScrollArea):
             self._gap_items[id(widget)] = gap
         self._layout.insertWidget(
             self._layout.count() - 1, widget)
+        # The message reports its height at the width it will get, which is not
+        # known until the body lays it out. Nudge the chain so the body grows
+        # now instead of waiting for a resize.
+        widget.updateGeometry()
+        self._body.updateGeometry()
+        self._layout.invalidate()
 
         # Record for Copy all / Export chat (Phase 5d), mirroring the old GUI's
         # bubble_log. kind is "user" or "agent".
@@ -3321,9 +3380,12 @@ class AgentWindow(QMainWindow):
     _voice_event = Signal(str)       # recording/transcription status from worker
     _weather_ready = Signal(str)     # parsed weather text (from worker thread)
     _gui_visibility_request = Signal(bool, object)  # (show, completion event)
+    _gui_capture_request = Signal(object, object)   # (event, result holder)
     _wake_word_detected = Signal(float)   # wake word score (from mic thread)
     _wake_word_error = Signal(str)        # listener startup/runtime error
     _tts_error = Signal(str)              # speech engine error (TTS thread)
+
+    NOTICE_MS = 2000                      # transient terminal notices
     _spontaneous_message = Signal(str)    # proactive observation (worker thread)
     _spontaneous_finished = Signal()      # worker done; clear the busy flag
     _preload_ready = Signal(str)          # a heavy module finished importing
@@ -3437,6 +3499,7 @@ class AgentWindow(QMainWindow):
         self._voice_event.connect(self._on_voice_event)
         self._weather_ready.connect(self._on_weather_ready)
         self._gui_visibility_request.connect(self._apply_gui_visibility)
+        self._gui_capture_request.connect(self._apply_gui_capture)
         self._wake_word_detected.connect(self._on_wake_word)
         self._wake_word_error.connect(self._on_wake_word_error)
         self._tts_error.connect(self._on_tts_error)
@@ -3949,16 +4012,14 @@ class AgentWindow(QMainWindow):
         self.attach_strip.setVisible(False)
         self._input_col_layout.addWidget(self.attach_strip)
 
-        # Permanent shell prefix + borderless editor. Enter is the only
-        # submit path; the row carries no controls, padding, or separator.
+        # One flat full-width prompt line: prefix, editor, nothing else. Enter
+        # submits, Ctrl+C interrupts, and /settings opens settings.
         self.input_pill = QFrame()
         self.input_pill.setObjectName("promptRow")
         self.input_pill.setContentsMargins(0, 0, 0, 0)
         pill_row = QHBoxLayout(self.input_pill)
-        # Inset the contents so the fully rounded ends of the pill never clip
-        # the prompt prefix or the send disc.
-        pill_row.setContentsMargins(14, 4, 6, 4)
-        pill_row.setSpacing(6)
+        pill_row.setContentsMargins(0, 4, 0, 4)
+        pill_row.setSpacing(0)
 
         self.prompt_prefix = QLabel("root@agent:~# ")
         self.prompt_prefix.setObjectName("promptPrefix")
@@ -3997,21 +4058,6 @@ class AgentWindow(QMainWindow):
         text_col.addStretch(1)
         pill_row.addWidget(text_host, 1)
 
-        # Settings is always one click away; /settings still works.
-        self.settings_button = _icon_button(
-            "settings", "Settings", size=INPUT_LINE_H, icon_size=13)
-        self.settings_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.settings_button.clicked.connect(self.open_settings)
-        pill_row.addWidget(self.settings_button, 0, Qt.AlignmentFlag.AlignTop)
-
-        # Send doubles as Stop while a turn is running (red square, Esc too).
-        self.send_button = _icon_button("send", "Send (Enter)",
-                                        size=INPUT_LINE_H, icon_size=13)
-        self.send_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.send_button.clicked.connect(self._on_send_or_stop)
-        pill_row.addWidget(self.send_button, 0, Qt.AlignmentFlag.AlignTop)
-        self._update_send_button()
-
         self._input_col_layout.addWidget(self.input_pill)
         col.addWidget(holder)
         return outer
@@ -4028,12 +4074,6 @@ class AgentWindow(QMainWindow):
     def _on_input_changed(self):
         self._autogrow_input()
 
-    def _on_send_or_stop(self):
-        if self._processing:
-            self._request_stop()
-        else:
-            self.send()
-
     def _request_stop(self):
         """Ask the running agent turn to abort; it exits at its next boundary."""
         if not (self._processing and self._turn_cancellable):
@@ -4043,23 +4083,6 @@ class AgentWindow(QMainWindow):
         self._stop_requested = True
         self._stop_event.set()
         self.set_status("Stopping…", busy=True)
-
-    def _update_send_button(self):
-        # The send control is a filled accent disc, so the glyph is knocked out
-        # in the canvas colour; Stop takes the same shape in danger red.
-        if self._processing and self._turn_cancellable:
-            name, tip = "stop", "Stop (Esc)"
-            fill, fill_hover = COLOR_DANGER, COLOR_DANGER_HOVER
-        else:
-            name, tip = "send", "Send (Enter)"
-            fill, fill_hover = COLOR_ACCENT, COLOR_ACCENT_HOVER
-        btn = self.send_button
-        btn._icon_name = name
-        btn._icon_color = COLOR_BG
-        btn._icon_hover = COLOR_BG
-        btn.setIcon(_svg_icon(name, 13, COLOR_BG))
-        btn.setToolTip(tip)
-        _circle_style(btn, fill, fill_hover)
 
     def _autogrow_input(self):
         doc = self.input_field.document()
@@ -4144,6 +4167,8 @@ class AgentWindow(QMainWindow):
     def eventFilter(self, obj, event):
         # Enter sends, Shift+Enter inserts a newline.
         if obj is self.input_field and event.type() == QKeyEvent.Type.KeyPress:
+            if self._is_ctrl_c(event):
+                return self._on_ctrl_c()
             if (event.key() == Qt.Key.Key_Escape
                     and self._processing):
                 self._request_stop()
@@ -4154,6 +4179,27 @@ class AgentWindow(QMainWindow):
                 self.send()
                 return True
         return super().eventFilter(obj, event)
+
+    @staticmethod
+    def _is_ctrl_c(event):
+        modifiers = event.modifiers()
+        return (event.key() == Qt.Key.Key_C
+                and bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                and not modifiers & (Qt.KeyboardModifier.AltModifier
+                                     | Qt.KeyboardModifier.ShiftModifier))
+
+    def _on_ctrl_c(self):
+        """Shell interrupt: copy wins over interrupting when text is selected."""
+        if self.input_field.textCursor().hasSelection():
+            return False
+        if self._processing:
+            if not self._turn_cancellable:
+                return False
+            self._request_stop()
+        else:
+            self.input_field.clear()
+        self.chat.add_message(SystemMessage("^C"))
+        return True
 
     # ------------------------------------------------------------------
     # Send / receive
@@ -4358,7 +4404,6 @@ class AgentWindow(QMainWindow):
         self._stop_event = threading.Event()
         self._processing = True
         self._turn_cancellable = True
-        self._update_send_button()
         self.input_field.setEnabled(False)
         self.set_status("Reading attachments…" if attached_paths else "Thinking…",
                         busy=True)
@@ -4406,7 +4451,6 @@ class AgentWindow(QMainWindow):
             if getattr(item, "_thread", None) is not None
             and item._thread.is_alive()
         ]
-        self._update_send_button()
         self.input_field.setEnabled(True)
         self.input_field.setFocus()
         self.set_status("Ready", busy=False)
@@ -4829,7 +4873,6 @@ class AgentWindow(QMainWindow):
         """Run a blocking command off the GUI thread; post the result back."""
         self._processing = True
         self._turn_cancellable = False
-        self._update_send_button()
         self.input_field.setEnabled(False)
         self.chat.add_message(AssistantMessage(busy_msg))
         self.set_status("Working…", busy=True)
@@ -5404,10 +5447,25 @@ class AgentWindow(QMainWindow):
     def copy_all(self):
         """Copy the whole conversation to the clipboard."""
         if not self.chat.chat_log:
-            self.chat.add_message(AssistantMessage("Nothing to copy"))
+            self.show_notice("Nothing to copy")
             return
         QApplication.clipboard().setText(self._chat_as_text())
-        self.chat.add_message(AssistantMessage("\U0001f4cb Copied to clipboard"))
+        self.show_notice("Copied to clipboard")
+
+    def show_notice(self, text: str):
+        """Dim terminal notice that removes itself.
+
+        Housekeeping like a clipboard ack is not conversation: it would pile up
+        in the transcript, the scroll range and every "Copy all" export.
+        """
+        message = SystemMessage(text)
+        self.chat.add_message(message, fade=False)
+
+        def dismiss(widget=message):
+            if widget.parent() is not None:
+                self.chat.remove_message(widget)
+
+        QTimer.singleShot(self.NOTICE_MS, dismiss)
 
     def export_conversation(self):
         """Export the conversation through export_tools."""
@@ -5701,6 +5759,7 @@ class AgentWindow(QMainWindow):
                 self._hide_gui_for_screenshot,
                 self._show_gui_after_screenshot,
             )
+            os_control.set_gui_capture_handler(self._capture_gui_window)
             os_control.ensure_kill_switch()
             try:
                 import browser_agent
@@ -5723,6 +5782,37 @@ class AgentWindow(QMainWindow):
         event = threading.Event()
         self._gui_visibility_request.emit(True, event)
         event.wait(timeout=1.5)
+
+    def _capture_gui_window(self):
+        """Called from the agent worker; blocks until Qt has grabbed the window.
+
+        Returns (png_bytes, width, height) in physical pixels, or None when the
+        window is not mapped. Only this window is captured, never the desktop,
+        so the agent can actually see its own GUI.
+        """
+        event = threading.Event()
+        holder = []
+        self._gui_capture_request.emit(event, holder)
+        if not event.wait(timeout=2.5):
+            raise RuntimeError("GUI capture timed out")
+        return holder[0] if holder else None
+
+    def _apply_gui_capture(self, event, holder):
+        try:
+            handle = self.windowHandle()
+            screen = handle.screen() if handle is not None else None
+            screen = screen or QApplication.primaryScreen()
+            if screen is None or not self.isVisible():
+                return
+            shot = screen.grabWindow(int(self.winId()))
+            if shot.isNull():
+                return
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            shot.save(buffer, "PNG")
+            holder.append((bytes(buffer.data()), shot.width(), shot.height()))
+        finally:
+            event.set()
 
     def _apply_gui_visibility(self, visible: bool, event):
         try:
@@ -6569,6 +6659,7 @@ class AgentWindow(QMainWindow):
             import os_control
             os_control.stop_kill_switch()
             os_control.set_gui_visibility_handlers(None, None)
+            os_control.set_gui_capture_handler(None)
         except Exception:
             pass
         self._os_control = None
@@ -6905,8 +6996,8 @@ def main():
     install_crash_logging()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    # A terminal cursor is a steady block, not a blinking hairline.
-    app.setCursorFlashTime(0)
+    # A terminal caret blinks; setCursorWidth(8) gives it the block weight.
+    app.setCursorFlashTime(CURSOR_FLASH_MS)
     app.setFont(terminal_font())
     theme = read_theme_name()
     try:

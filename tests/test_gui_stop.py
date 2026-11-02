@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QKeyEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 import agent_gui_qt as g  # noqa: E402
 
@@ -78,41 +78,54 @@ class GuiStopTests(unittest.TestCase):
     def _start_processing(self, cancellable=True):
         self.window._processing = True
         self.window._turn_cancellable = cancellable
-        self.window._update_send_button()
 
-    def test_button_starts_as_send(self):
-        btn = self.window.send_button
-        self.assertEqual(btn._icon_name, "send")
-        self.assertEqual(btn.toolTip(), "Send (Enter)")
-        self.assertFalse(self.window._stop_requested)
-        # An accent disc with the glyph knocked out in the canvas colour.
-        self.assertIn(f"background: {g.COLOR_ACCENT}", btn.styleSheet())
-        self.assertEqual(btn._icon_color, g.COLOR_BG)
+    def _ctrl_c(self):
+        return self.window.eventFilter(
+            self.window.input_field,
+            QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_C,
+                      Qt.KeyboardModifier.ControlModifier))
 
-    def test_button_switches_to_stop_while_a_turn_runs(self):
+    def test_ctrl_c_in_the_input_interrupts_and_echoes(self):
+        """The stop button is gone; Ctrl+C is the keyboard equivalent and the
+        shell echoes it the way a terminal does."""
         self._start_processing()
-        btn = self.window.send_button
-        self.assertEqual(btn._icon_name, "stop")
-        self.assertEqual(btn.toolTip(), "Stop (Esc)")
-        # The red moved from the glyph tint to the disc fill.
-        self.assertIn(f"background: {g.COLOR_DANGER}", btn.styleSheet())
-        self.assertEqual(btn._icon_color, g.COLOR_BG)
-
-    def test_clicking_stop_sets_flag_and_event(self):
-        self._start_processing()
-        self.window.send_button.click()
+        with mock.patch.object(self.window.chat, "add_message") as posted:
+            consumed = self._ctrl_c()
+        self.assertTrue(consumed)
         self.assertTrue(self.window._stop_requested)
         self.assertTrue(self.window._stop_event.is_set())
-        self.assertIn("Stopping", self.window.windowTitle())
+        echoed = any(
+            "^C" in (msg.findChild(QLabel).text()
+                     if msg.findChild(QLabel) else "")
+            for call in posted.call_args_list for msg in [call.args[0]])
+        self.assertTrue(echoed, "Ctrl+C must print ^C to the terminal")
 
-    def test_second_click_is_a_no_op(self):
+    def test_ctrl_c_copies_when_text_is_selected(self):
+        self._start_processing()
+        self.window.input_field.setPlainText("copy me")
+        self.window.input_field.selectAll()
+        with mock.patch.object(self.window.chat, "add_message"):
+            consumed = self._ctrl_c()
+        self.assertFalse(consumed, "selection must still copy")
+        self.assertFalse(self.window._stop_event.is_set())
+
+    def test_ctrl_c_at_an_idle_prompt_clears_the_line(self):
+        self.window.input_field.setPlainText("half-typed")
+        with mock.patch.object(self.window.chat, "add_message") as posted:
+            consumed = self._ctrl_c()
+        self.assertTrue(consumed)
+        self.assertEqual(self.window.input_field.toPlainText(), "")
+        self.assertFalse(self.window._stop_requested)
+        self.assertTrue(posted.called)
+
+    def test_second_ctrl_c_is_a_no_op(self):
         called = []
         self._start_processing()
         self.window._stop_requested = True
         self.window._stop_event.set()
         with mock.patch.object(self.window, "set_status",
                                side_effect=lambda *a, **k: called.append(a)):
-            self.window.send_button.click()
+            self._ctrl_c()
         self.assertEqual(called, [])
 
     def test_escape_on_the_window_requests_stop(self):
@@ -130,10 +143,9 @@ class GuiStopTests(unittest.TestCase):
         self.assertTrue(consumed)
         self.assertTrue(self.window._stop_event.is_set())
 
-    def test_non_cancellable_work_keeps_the_send_icon(self):
+    def test_non_cancellable_work_ignores_ctrl_c(self):
         self._start_processing(cancellable=False)
-        self.assertEqual(self.window.send_button._icon_name, "send")
-        self.window.send_button.click()
+        self._ctrl_c()
         self.assertFalse(self.window._stop_requested)
         self.assertFalse(self.window._stop_event.is_set())
 
@@ -151,12 +163,10 @@ class GuiStopTests(unittest.TestCase):
         self.assertFalse(self.window._stop_requested)
         self.assertTrue(self.window._turn_cancellable)
         self.assertTrue(worker.started)
-        self.assertEqual(self.window.send_button._icon_name, "stop")
 
         self.window._end_turn()
         self.assertFalse(self.window._processing)
         self.assertFalse(self.window._turn_cancellable)
-        self.assertEqual(self.window.send_button._icon_name, "send")
 
     def test_worker_forwards_the_stop_event_to_the_agent(self):
         event = g.threading.Event()

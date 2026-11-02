@@ -96,8 +96,9 @@ class MemoryManagerTests(unittest.TestCase):
         self.assertIn("/memories", self.g.HELP_TEXT)
         self.assertIn("/memories", self.g.SLASH_COMMANDS)
 
-    def test_settings_gear_button_is_present(self):
-        self.assertEqual(self.window.settings_button.toolTip(), "Settings")
+    def test_settings_is_a_command_not_a_button(self):
+        self.assertIn("/settings", self.g.SLASH_COMMANDS)
+        self.assertFalse(hasattr(self.window, "settings_button"))
 
 
 if __name__ == "__main__":

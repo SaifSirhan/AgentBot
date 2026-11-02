@@ -20,11 +20,11 @@ QWidget {
 }
 
 QMainWindow, QDialog {
-    background-color: #0E1116;
+    background-color: #0B0E13;
 }
 
 QWidget#central {
-    background-color: #0E1116;
+    background-color: #0B0E13;
 }
 
 QToolTip {
@@ -125,13 +125,14 @@ QPlainTextEdit:focus, QLineEdit:focus {
    trailing buttons. The editor itself is chrome-less inside it, so the pill
    reads as a single control instead of three boxed widgets. */
 QFrame#promptRow {
-    background-color: #1A1D24;
-    border: 1px solid #263041;
-    border-radius: 999px;
+    background-color: transparent;
+    border: none;
+    border-top: 1px solid #263041;
+    border-radius: 0px;
 }
 
 QFrame#promptRow:focus, QFrame#promptRow:hover {
-    border-color: #00E5FF;
+    border-top-color: #00E5FF;
 }
 
 QLabel#promptPrefix {

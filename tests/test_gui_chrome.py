@@ -61,13 +61,14 @@ class TitleBarPresenceTests(unittest.TestCase):
             self.skipTest("frameless chrome is Windows-only")
         self.assertEqual(bar.mapTo(self.window, QPoint(0, 0)).y(), 0)
 
-    def test_bar_carries_settings_and_the_three_window_controls(self):
+    def test_bar_carries_the_three_window_controls(self):
         bar = self.window._title_bar
         if bar is None:
             self.skipTest("frameless chrome is Windows-only")
-        for name in ("settings_button", "min_button", "max_button",
-                     "close_button"):
+        for name in ("min_button", "max_button", "close_button"):
             self.assertTrue(hasattr(bar, name), name)
+        self.assertFalse(hasattr(bar, "settings_button"),
+                         "settings moved to the /settings command")
         self.assertEqual(bar.close_button.objectName(), "titleBarClose")
 
     def test_window_still_has_its_controls_when_the_bar_is_absent(self):
@@ -144,10 +145,10 @@ class TitleBarButtonTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(self.window.isHidden())
 
-    def test_settings_button_opens_settings(self):
+    def test_settings_command_opens_settings(self):
         calls = []
         self.window.open_settings = lambda: calls.append(True)
-        self.bar.settings_button.click()
+        self.window._handle_slash_command("/settings")
         self.assertEqual(calls, [True])
 
     def test_double_click_on_the_bar_toggles_maximise(self):

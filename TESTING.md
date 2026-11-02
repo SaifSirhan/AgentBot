@@ -40,9 +40,9 @@ project modules under test become importable.
 
 | | |
 |---|---|
-| Tests | **1235** |
-| Duration | ~95 s |
-| Outcome | `Ran 1235 tests in ...` then `OK`, exit code 0 |
+| Tests | **1291** |
+| Duration | ~110 s |
+| Outcome | `Ran 1291 tests in ...` then `OK`, exit code 0 |
 
 The voice/wake/TTS modules open real microphones and audio devices, so the run
 prints non-fatal lines such as `[voice] mic open failed (1/2): device busy` and
@@ -52,8 +52,12 @@ paths; judge the run only by the final `Ran N tests` / `OK` / `FAILED` summary.
 One known flake: `tests/test_uia_control.py:109`
 (`LiveWindowTests.test_uia_type_writes_text_that_can_be_read_back`) types into a
 live window, so under load it can drop or interleave keystrokes and fail with
-`'hello from UIA' not found in 'hello from UIcAan'`. Re-run to confirm; it is a
-timing artifact of the real desktop, not a code regression.
+`'hello from UIA' not found in 'hello from UIcAan'`, or the keystrokes can land
+nowhere and fail with `'hello from UIA' not found in ''` while `uia_type` still
+reports success. Both are timing/focus artifacts of the real desktop, not code
+regressions. Re-running does not always clear it — if it fails repeatedly,
+confirm against a clean checkout (`git worktree add ../head HEAD`) before
+treating it as a regression.
 
 ## `pytest tests` is not supported here
 
