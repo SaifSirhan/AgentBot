@@ -10,7 +10,6 @@ the result is summarised back to the user.
 | --- | --- |
 | `agent.py` | Core: LLM provider routing + failover, tool dispatch, and the multi-step agent turn loop. Also holds the tool-description prompt the model uses to choose tools. |
 | `agent_gui_qt.py` | PySide6 desktop UI — chat view, sidebar, input pill, settings overlay, tray, hotkeys, mic. |
-| `gui_widgets.py` | Shared rich widgets: Markdown text, code blocks, activity chips, PIL-rendered icons. |
 | `rag_tool.py` | Indexes local documents into ChromaDB with Sentence-Transformers embeddings; semantic search for retrieval-augmented answers. |
 | `memory.py` | Persistent user facts recalled across conversations. |
 | `telegram_user.py` | Telethon wrapper for a Telegram **user** account (send/receive as you). |

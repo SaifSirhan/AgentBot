@@ -11,7 +11,6 @@ a = Analysis(
 hiddenimports=[
     'pystray._win32',
     'PIL._tkinter_finder',
-    'customtkinter',
 
     # TTS / audio
     'edge_tts',

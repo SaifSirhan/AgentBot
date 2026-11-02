@@ -87,7 +87,6 @@ request flows through the system.
 | --- | --- |
 | `agent.py` | LLM routing, tool dispatch, and the agent turn loop |
 | `agent_gui_qt.py` | PySide6 desktop UI |
-| `gui_widgets.py` | Shared rich chat widgets (Markdown, code blocks, icons) |
 | `rag_tool.py` | Document indexing and semantic search |
 | `memory.py` | Persistent user facts |
 | `telegram_user.py` | Telethon user-account bridge |

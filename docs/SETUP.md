@@ -24,7 +24,7 @@ python --version    # -> Python 3.11.9
 
 > **Tip:** run AgentBot from a normal PowerShell window where the `pyenv` shims
 > resolve correctly. Some IDE-integrated terminals pick the wrong interpreter and
-> fail to import `customtkinter`.
+> fail to import `PySide6`.
 
 ## 3. Clone and install dependencies
 
@@ -101,7 +101,7 @@ This prints each provider's status in priority order.
 
 | Symptom | Fix |
 | --- | --- |
-| `ModuleNotFoundError: customtkinter` | Wrong Python interpreter. Use the pyenv 3.11.9 shell and `pip install -r requirements.txt`. |
+| `ModuleNotFoundError: PySide6` | Wrong Python interpreter. Use the pyenv 3.11.9 shell and `pip install -r requirements.txt`. |
 | `All brains unavailable` | No valid API key set, or every provider is cooling/dead. Check env vars and `list_brains()`. |
 | OCR fails | Tesseract not installed or not on `PATH`. |
 | Selenium fails | No Chrome/Chromium installed, or driver mismatch. |

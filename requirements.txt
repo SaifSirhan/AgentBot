@@ -3,7 +3,6 @@
 # dependencies are pulled in automatically by pip.
 
 # --- GUI ---
-customtkinter
 PySide6
 pillow
 pystray
