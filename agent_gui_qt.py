@@ -107,6 +107,7 @@ except Exception:
 
 import memory
 from hud_core import ReactorHud
+from window_chrome import FramelessChrome
 
 # --------------------------- palette ---------------------------
 # Holographic dark: near-black canvas, lifted slate surfaces, neon cyan accent.
@@ -158,6 +159,12 @@ _MONO_FAMILIES = ("JetBrains Mono", "Cascadia Mono", "Consolas",
 _fonts_resolved = False
 
 HEADER_H = 48
+TITLEBAR_H = 34
+
+# The frameless shell is implemented with Win32 native messages, so it exists
+# only where those messages do: on Linux/macOS the OS title bar stays and no
+# custom bar is built (a half-ported chrome would leave the window undraggable).
+_FRAMELESS_SUPPORTED = sys.platform == "win32"
 
 # Phase 6a — right panel geometry + auto-hide breakpoints. MIN_W is far enough
 # above HIDE_BELOW that the hidden->shown transition has hysteresis (a resize
@@ -257,6 +264,13 @@ _ICON_SVGS = {
             'fill="{c}" stroke="none"/>',
     "mic": '<rect x="9" y="3" width="6" height="11" rx="3"/>'
            '<path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21M9 21h6"/>',
+    # custom title-bar window controls (frameless chrome)
+    "win_min": '<path d="M7 12.5h10"/>',
+    "win_max": '<rect x="7" y="7" width="10" height="10" rx="1.6"/>',
+    "win_restore": '<rect x="5.5" y="8.5" width="8.5" height="8.5" rx="1.6"/>'
+                   '<path d="M9 8.5V6.6a1.1 1.1 0 0 1 1.1-1.1h7.3'
+                   'a1.1 1.1 0 0 1 1.1 1.1v7.3a1.1 1.1 0 0 1-1.1 1.1H14"/>',
+    "win_close": '<path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/>',
 }
 
 
@@ -1066,6 +1080,114 @@ def _icon_button(icon: str, tooltip: str = "", size: int = 30,
     btn.enterEvent = _enter
     btn.leaveEvent = _leave
     return btn
+
+
+class TitleBar(QFrame):
+    """Thin custom window bar for the frameless shell: drag surface, title,
+    settings and the three window controls.
+
+    Dragging runs through the native move loop (`startSystemMove`), which is
+    what keeps Aero Snap working when the bar is pulled against a screen edge.
+    Resize borders are re-claimed in AgentWindow.nativeEvent instead — a bare
+    FramelessWindowHint would have dropped WS_THICKFRAME and lost them, plus
+    taskbar-aware maximise, in one go.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.setObjectName("titleBar")
+        self.setFixedHeight(TITLEBAR_H)
+        self._window = window
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 3, 4, 3)
+        row.setSpacing(4)
+
+        mark = QLabel("◈")
+        mark.setProperty("tone", "hi")
+        row.addWidget(mark)
+
+        self.title_label = QLabel(window.windowTitle())
+        self.title_label.setObjectName("titleBarText")
+        self.title_label.setMinimumWidth(0)
+        self.title_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        row.addWidget(self.title_label)
+        row.addStretch(1)
+
+        self.settings_button = self._control("settings", "Settings",
+                                             "titleBarButton", 13)
+        self.settings_button.clicked.connect(self._open_settings)
+        row.addWidget(self.settings_button)
+
+        self.min_button = self._control("win_min", "Minimize",
+                                        "titleBarButton", 12)
+        self.min_button.clicked.connect(self._window.showMinimized)
+        row.addWidget(self.min_button)
+
+        self.max_button = self._control("win_max", "Maximize",
+                                        "titleBarButton", 12)
+        self.max_button.clicked.connect(self._window.toggle_maximize)
+        row.addWidget(self.max_button)
+
+        self.close_button = self._control("win_close", "Close",
+                                         "titleBarClose", 12)
+        # close() keeps the existing contract: hide to tray, do not exit.
+        self.close_button.clicked.connect(self._window.close)
+        row.addWidget(self.close_button)
+
+    def _control(self, icon, tooltip, object_name, icon_size) -> QPushButton:
+        btn = _icon_button(icon, tooltip, size=TITLEBAR_H - 10,
+                           icon_size=icon_size)
+        btn.setObjectName(object_name)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        if object_name == "titleBarClose":
+            # The hover closure reads this attribute, so the glyph reddens
+            # without a stylesheet rule the button's inline style would veto.
+            btn._icon_hover = COLOR_DANGER
+        return btn
+
+    def _open_settings(self):
+        self._window.open_settings()
+
+    def sync_state(self):
+        """Mirror window title and maximised state after any window change."""
+        maximised = self._window.isMaximized()
+        name = "win_restore" if maximised else "win_max"
+        if self.max_button._icon_name != name:
+            self.max_button._icon_name = name
+            self.max_button.setToolTip("Restore" if maximised else "Maximize")
+            self.max_button.setIcon(
+                _svg_icon(name, self.max_button.iconSize().width(),
+                          self.max_button._icon_color))
+        self._refresh_title()
+
+    def _refresh_title(self):
+        text = self._window.windowTitle() or ""
+        width = self.title_label.width()
+        if width > 0:
+            text = QFontMetrics(self.title_label.font()).elidedText(
+                text, Qt.TextElideMode.ElideRight, width)
+        self.title_label.setText(text)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_title()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            handle = self._window.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window.toggle_maximize()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 def _circle_style(btn: QPushButton, fill: str, hover: str) -> None:
@@ -3209,6 +3331,10 @@ class AgentWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         resolve_fonts()
+        # Native-message handler for the frameless shell; None where the OS
+        # title bar stays (non-Windows), so nativeEvent() is a straight passthrough.
+        self._chrome = FramelessChrome(self) if _FRAMELESS_SUPPORTED else None
+        self._title_bar = None
         self.setWindowTitle("Agent")
         self.resize(1380, 720)
         self.setMinimumWidth(900)
@@ -3339,7 +3465,12 @@ class AgentWindow(QMainWindow):
             "border: 2px solid transparent; }")
         self._drop_overlay.setGeometry(central.rect())
         self._drop_overlay.hide()
-        root = zero_layout(QHBoxLayout(central))
+        root = zero_layout(QVBoxLayout(central))
+        if _FRAMELESS_SUPPORTED:
+            # The caption is collapsed into the client area by nativeEvent, so
+            # this bar is the only way to move the window or reach the controls.
+            self._title_bar = TitleBar(self)
+            root.addWidget(self._title_bar)
 
         # Chat and the info panel share a splitter; the chat keeps the stretch.
         self.right_panel = self._build_right_panel()
@@ -4057,6 +4188,26 @@ class AgentWindow(QMainWindow):
                 "transcribing", "browsing", "stopping"))
         hud.set_state("THINKING" if busy else "IDLE")
 
+    def nativeEvent(self, event_type, message):
+        """Collapse the Win32 caption and re-claim the resize borders.
+
+        Handled messages are the ones that make the frameless shell behave like
+        a normal window: WM_NCCALCSIZE gives us the client area, WM_NCHITTEST
+        turns the edge pixels back into resize grips. Everything else goes to
+        Qt's own Windows back end untouched.
+        """
+        if self._chrome is not None:
+            handled, result = self._chrome.handle(event_type, message)
+            if handled:
+                return True, result
+        return super().nativeEvent(event_type, message)
+
+    def toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
     # ------------------------------------------------------------------
     # Phase 6c performance guard — pause motion while minimized
     # ------------------------------------------------------------------
@@ -4067,6 +4218,10 @@ class AgentWindow(QMainWindow):
                 self._stop_pass_a_anims()
                 # Minimise to the tray, not the taskbar.
                 QTimer.singleShot(0, self._hide_minimized_to_tray)
+        if (event.type() in (QEvent.Type.WindowStateChange,
+                             QEvent.Type.WindowTitleChange)
+                and self._title_bar is not None):
+            self._title_bar.sync_state()
         super().changeEvent(event)
 
     def _hide_minimized_to_tray(self):

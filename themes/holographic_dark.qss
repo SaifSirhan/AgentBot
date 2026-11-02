@@ -179,6 +179,34 @@ QPushButton:disabled {
     background-color: transparent;
 }
 
+/* Custom window bar: thin, slightly deeper than the canvas, hairline rim. */
+QFrame#titleBar {
+    background-color: #0B0E13;
+    border-bottom: 1px solid #1E2632;
+    border-radius: 0px;
+}
+
+QLabel#titleBarText {
+    background-color: transparent;
+    color: #8FA0B0;
+    font-size: 12px;
+}
+
+QPushButton#titleBarButton {
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 0px;
+}
+
+QPushButton#titleBarButton:hover {
+    background-color: #1E2632;
+}
+
+QPushButton#titleBarButton:pressed {
+    background-color: #24303F;
+}
+
 /* Slim rounded scrollbars that don't fight the dark canvas. */
 QScrollBar:vertical {
     background-color: transparent;
