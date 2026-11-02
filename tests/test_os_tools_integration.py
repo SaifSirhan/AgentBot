@@ -217,6 +217,17 @@ class ScreenshotVisionTests(unittest.TestCase):
         self.assertIn("do not invent coordinates", out)
         self.assertIn("C:\\tmp\\screen.png", out)
 
+    def test_a_dict_input_is_rejected_not_crashed(self):
+        """The autonomous spec used to advertise args as "string or object", so
+        a dict reached tools that parse "title|question" and raised
+        AttributeError: 'dict' object has no attribute 'strip'."""
+        for tool in ("analyze_screenshot", "describe_image"):
+            with self.subTest(tool=tool):
+                out = agent.execute_tool(
+                    {"tool": tool, "input": {"path": "shot.png"}})
+                self.assertIsInstance(out, str)
+                self.assertTrue(out.startswith("ERROR:"), out)
+
     def test_failed_capture_skips_vision(self):
         fake = FakeOSControl("ABORTED: kill switch is latched")
         with mock.patch.object(agent, "_os_control_module",

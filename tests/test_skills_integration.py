@@ -173,6 +173,16 @@ class SkillIntegrationTests(unittest.TestCase):
             len(prompt) / 4, 2000,
             f"prompt is {len(prompt)} chars (~{len(prompt) / 4:.0f} tokens)")
 
+    def test_prompt_bans_tool_inventory_and_unseen_visual_claims(self):
+        """Both rules must survive into the assembled prompt, and the old
+        instruction that told the model to explain its limitations must not."""
+        with mock.patch.object(
+                agent.memory, "get_user_model_block", return_value=""):
+            prompt = agent._build_plan_prompt("hello", "")
+        self.assertIn("name the tools you have or lack", prompt)
+        self.assertIn("colors or layout from its source code", prompt)
+        self.assertNotIn("otherwise explain the limitation", prompt)
+
     def test_execute_tool_loads_skill_and_reports_errors(self):
         with self.patched():
             content = agent.execute_tool(

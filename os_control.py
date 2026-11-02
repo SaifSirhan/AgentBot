@@ -251,6 +251,31 @@ def _visibility_handlers() -> Tuple[Optional[Callable], Optional[Callable]]:
 
 
 # ----------------------------------------------------------------------
+# GUI self-capture (installed by the Qt app)
+# ----------------------------------------------------------------------
+_gui_capture: Optional[Callable[[], Optional[Tuple[bytes, int, int]]]] = None
+
+
+def set_gui_capture_handler(
+    handler: Optional[Callable[[], Optional[Tuple[bytes, int, int]]]],
+) -> None:
+    """Install a callable returning (png_bytes, width, height) for the window.
+
+    Hiding the GUI and grabbing the monitor cannot show AgentBot itself, so the
+    Qt side captures its own HWND instead and the monitor path stays reserved
+    for looking at other applications.
+    """
+    global _gui_capture
+    with _gui_lock:
+        _gui_capture = handler
+
+
+def _capture_handler() -> Optional[Callable]:
+    with _gui_lock:
+        return _gui_capture
+
+
+# ----------------------------------------------------------------------
 # Screen helpers
 # ----------------------------------------------------------------------
 SCREENSHOT_DIR = (Path(_cfg.memory_path("screenshots")))
@@ -467,11 +492,40 @@ def _dpi_label() -> str:
 # ----------------------------------------------------------------------
 # Tools
 # ----------------------------------------------------------------------
+def _capture_own_window() -> Optional[str]:
+    """Capture only the AgentBot window. None when no handler is installed."""
+    capture = _capture_handler()
+    if capture is None:
+        return None
+    try:
+        result = capture()
+    except Exception as exc:
+        return f"ERROR: window capture failed: {exc}"
+    if result is None:
+        return None
+    png, width, height = result
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = SCREENSHOT_DIR / f"window_{stamp}.png"
+    path.write_bytes(png)
+    return (
+        f"Screenshot saved: {path}\n"
+        f"Image: {width}x{height} pixels (AgentBot window only)\n"
+        f"DPI: {_dpi_label()}\n"
+        "Coordinates for click_coordinates/get_pixel_color are pixels "
+        "from this image's top-left."
+    )
+
+
 def screenshot_background(title: str = "") -> str:
-    """Hide the GUI, focus an optional target window, capture the monitor."""
+    """Capture the AgentBot window, or the monitor when a target is named."""
     hide_attempted = False
     try:
         _guard()
+        if not title:
+            own_window = _capture_own_window()
+            if own_window is not None:
+                return own_window
         mss_module = _load_mss()  # fail before hiding the window
         hide, _ = _visibility_handlers()
         hide_note = "no GUI handler"

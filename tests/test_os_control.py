@@ -93,6 +93,7 @@ class OSControlTests(unittest.TestCase):
     def tearDown(self):
         oc.reset_kill_switch()
         oc.set_gui_visibility_handlers(None, None)
+        oc.set_gui_capture_handler(None)
         oc.stop_kill_switch()
         with oc._kill_lock:
             oc._kill_callbacks.clear()
@@ -263,6 +264,40 @@ class OSControlTests(unittest.TestCase):
         self.assertTrue(path.exists())
         self.assertEqual(path.read_bytes(), b"PNG:(100, 50)")
         self.assertEqual(self.fake_mss.sct.grabs[0]["width"], 100)
+
+    def test_no_title_captures_the_agentbot_window_not_the_desktop(self):
+        """Self-inspection used to hide the GUI and grab the monitor, so the
+        agent saw its own desktop instead of its own window."""
+        calls = self.mock_gui()
+        captured = []
+
+        def capture():
+            captured.append("capture")
+            return b"PNG:WINDOW", 640, 480
+
+        oc.set_gui_capture_handler(capture)
+        with mock.patch.object(oc.time, "sleep"):
+            out = oc.screenshot_background()
+
+        self.assertEqual(captured, ["capture"])
+        self.assertEqual(calls, [], "the GUI was hidden for a self-capture")
+        self.assertEqual(self.fake_mss.sct.grabs, [], "the monitor was grabbed")
+        self.assertIn("Image: 640x480", out)
+        self.assertIn("AgentBot window", out)
+        match = re.search(r"Screenshot saved: (.+)", out)
+        self.assertEqual(Path(match.group(1)).read_bytes(), b"PNG:WINDOW")
+
+    def test_named_window_still_uses_the_monitor_capture(self):
+        calls = self.mock_gui()
+        oc.set_gui_capture_handler(
+            lambda: self.fail("a named target must not take the window path"))
+        with mock.patch.object(oc, "_focus_window_by_title",
+                               return_value=(1234, "Stremio")):
+            with mock.patch.object(oc.time, "sleep"):
+                out = oc.screenshot_background("Stremio")
+
+        self.assertEqual(calls, ["hide", "show"])
+        self.assertIn("focused Stremio", out)
 
     def test_screenshot_focuses_named_window_before_capture(self):
         calls = self.mock_gui()

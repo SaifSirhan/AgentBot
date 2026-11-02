@@ -132,10 +132,24 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("click_coordinates", names)
         self.assertIn("type_text", names)
 
-    def test_core_rules_forbid_tool_inventory_talk(self):
-        self.assertIn(
-            "Never tell the user which tools you have or lack",
-            pr.CORE_RULES)
+    def test_image_path_in_request_pins_the_vision_tools(self):
+        """A request that names an image file must be able to look at it."""
+        tools = pc.build_tools(
+            frozenset(pc.OS_TOOLS)
+            | frozenset({"analyze_screenshot", "describe_image"}))
+        for name in ("shot.png", "shot.jpg", "shot.jpeg"):
+            with self.subTest(name=name):
+                result = pr.build_dynamic_prompt(
+                    f"what colours are in C:\\Users\\USER\\Downloads\\{name}",
+                    tools, count_tokens=words, max_tokens=7800,
+                    fallback_tools=pc.FALLBACK_TOOLS)
+                names = {tool.name for tool in result.tools}
+                self.assertIn("describe_image", names)
+                self.assertIn("analyze_screenshot", names)
+
+    def test_core_rules_do_not_ask_the_model_to_explain_gaps(self):
+        """The inventory ban itself lives in agent.CORE_RULES, which reaches
+        every prompt variant; this one copy keeps the routed rules short."""
         self.assertNotIn("otherwise explain the limitation", pr.CORE_RULES)
 
     def test_budget_drops_tools_but_keeps_required_rules(self):

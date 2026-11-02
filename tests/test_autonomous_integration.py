@@ -366,6 +366,13 @@ class AutonomousIntegrationTests(unittest.TestCase):
             step_log = agent._run_autonomous_goal("do the task")
         self.assertIn("LLM failed", "\n".join(step_log))
 
+    def test_autonomous_spec_advertises_string_input_only(self):
+        """Advertising "string or object" is what made the model send a dict to
+        a tool that parses "title|question"."""
+        spec = agent._autonomous_tool_spec("analyze_screenshot")
+        self.assertIn('args: {"input": string}', spec)
+        self.assertNotIn("or object", spec)
+
 
 class AutonomousPermissionTests(unittest.TestCase):
     def run_loop(self, reply, *, tools=None, authorize=None, execute=None):

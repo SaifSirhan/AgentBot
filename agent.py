@@ -5247,7 +5247,7 @@ If the user says pause, skip, next, or stop the music, you MUST use media_contro
 If the user asks to queue a song, use queue_on_ytm, NOT media_control or play_on_youtube.
 NEVER say a song is queued, paused, or playing unless you have successfully run media_control, play_on_youtube, or queue_on_ytm and verified the result. Do not guess.
 
-NEVER name the tools you have or lack; state the outcome, or ask one question."""
+NEVER name the tools you have or lack. If you cannot see an image, say so — never describe colors or layout from its source code."""
 
 # ---------------------------
 # TOOL REGISTRY
@@ -6077,6 +6077,10 @@ def _live_tool_func(func):
     return live if callable(live) else func
 
 
+# Tools whose input is a structured envelope rather than a "a|b" string.
+OBJECT_INPUT_TOOLS = frozenset({"edit_docx_safe"})
+
+
 def _execute_tool_impl(action):
     tool = action.get('tool')
     inp = action.get('input', '')
@@ -6102,6 +6106,14 @@ def _execute_tool_impl(action):
         if tool == "write_file":
             return _live_tool_func(spec.func)(inp, folder)
         return _live_tool_func(spec.func)(inp)
+
+    if inp is None:
+        inp = ""
+    if not isinstance(inp, str) and tool not in OBJECT_INPUT_TOOLS:
+        # The legacy chain below parses "title|question" strings. A dict used
+        # to reach it and raise AttributeError mid-turn, killing the chain.
+        return (f"ERROR: {tool} needs a string input, not "
+                f"{type(inp).__name__}.")
 
     if tool == 'chat':                     return f"AI: {inp}"
     elif tool == 'google_search_and_open': return google_search_and_open(inp)
@@ -6337,7 +6349,7 @@ def _autonomous_tool_spec(name):
         return (f"{_router_tool_description(name)} "
                 'args: {"prompt": string, "goal": string}')
     return (f"{_router_tool_description(name)} "
-            'args: {"input": string or object}')
+            'args: {"input": string}')
 
 
 _TASK_SNAPSHOT_PREFIX = "System: Autonomous task snapshot: "
