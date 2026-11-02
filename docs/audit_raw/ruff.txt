@@ -1,0 +1,23 @@
+agent.py:33:5: F401 [*] `tool_registry.BATCH_EFFECT_ERROR` imported but unused
+agent.py:139:40: F401 `winotify.audio` imported but unused; consider using `importlib.util.find_spec` to test for availability
+agent.py:2085:5: F841 Local variable `user` is assigned to but never used
+agent.py:2222:25: F401 [*] `pathlib.Path` imported but unused
+agent.py:3217:9: F841 Local variable `fire_at` is assigned to but never used
+agent.py:5603:16: F401 [*] `re` imported but unused
+document_tools.py:6:24: F401 [*] `tempfile` imported but unused
+document_tools.py:107:27: F401 [*] `pptx.util.Inches` imported but unused
+document_tools.py:137:12: F401 [*] `io` imported but unused
+evals.py:11:23: F401 [*] `os` imported but unused
+export_tools.py:7:8: F401 [*] `os` imported but unused
+gateway.py:16:8: F401 [*] `os` imported but unused
+gmail_tool.py:16:8: F401 [*] `json` imported but unused
+rag_tool.py:11:8: F401 [*] `glob` imported but unused
+telegram_user.py:30:8: F401 [*] `time` imported but unused
+telegram_user.py:38:35: F401 `telethon.tl.types.User` imported but unused; consider using `importlib.util.find_spec` to test for availability
+tests\test_macro_engine.py:10:8: F401 [*] `types` imported but unused
+tests\test_self_curriculum.py:6:22: F401 [*] `unittest.mock` imported but unused
+verification_adapter.py:15:5: F401 [*] `verification_engine.ERROR_REPLY` imported but unused
+wake_word.py:23:8: F401 [*] `os` imported but unused
+whatsapp_tool.py:13:8: F401 [*] `os` imported but unused
+Found 21 errors.
+[*] 17 fixable with `--fix` (2 unsafe fixes available with `--fix --unsafe-fixes`).

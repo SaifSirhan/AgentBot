@@ -1,0 +1,76 @@
+# Raw evidence for non-scan claims in docs/AUDIT_2026-11-02.md
+# Generated 2026-11-02 on branch audit/simplify-20261102 @ 23812cf
+
+## STEP 1 — branch / HEAD verification
+# NOTE: this `git status` was captured after docs/AUDIT_2026-11-02.md and
+# docs/audit_raw/ were written, so it lists them as untracked. The STEP 1 check
+# ran before any file was written and reported: "nothing to commit, working tree
+# clean". No tracked file was modified by this audit.
+$ git status
+On branch audit/simplify-20261102
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	docs/AUDIT_2026-11-02.md
+	docs/audit_raw/
+
+nothing added to commit but untracked files present (use "git add" to track)
+$ git rev-parse HEAD
+23812cf50d0b2d96e578682b2c3cc31a9140448e
+$ git fetch origin && git rev-parse origin/main
+23812cf50d0b2d96e578682b2c3cc31a9140448e
+$ git rev-list --left-right --count origin/main...audit/simplify-20261102   (left=origin ahead, right=audit ahead)
+0	0
+
+## simulation_harness.py — never tracked
+$ git log --all --oneline -- simulation_harness.py
+  (empty above = root path never tracked)
+$ git log --all --oneline -- tests/simulation_harness.py
+  (empty above = the path the deleted test actually imported, also never tracked)
+$ git log --all --oneline -- tests/test_simulation_harness.py
+990bf80 chore: retire Tkinter GUI remnants
+927f470 feat: sticky router, scratchpad memory, semantic verification
+$ git log --all --diff-filter=D --oneline -- tests/test_simulation_harness.py
+990bf80 chore: retire Tkinter GUI remnants
+import line of the deleted test:
+import tempfile
+import unittest
+from pathlib import Path
+
+from tests import simulation_harness as harness
+
+$ git grep -c simulation_harness 23812cf -- .   (exit 1 = no match in tracked tree)
+exit=1
+$ git log --all --oneline -- tests/__init__.py
+  (empty above = tests/ was never a package, so 'from tests import ...' could not resolve)
+
+## Test suite — full run
+$ python -m unittest discover -s tests -t tests -p "test_*.py"   (pyenv 3.11.9)
+Ran 1169 tests in 55.239s
+OK
+
+## Test suite — the .venv+pytest path that CANNOT run it (F16 evidence)
+$ .venv/Scripts/python.exe -m pytest tests   (tail of output)
+ModuleNotFoundError: No module named 'requests'
+ERROR tests\test_audio_taps.py  ... (35 collection errors)
+Interrupted: 35 errors during collection !
+=> 0 tests executed
+
+## Interpreter dependency probe
+pyenv 3.11.9 : requests OK | pytest MISS | telethon OK | PySide6 OK | openai OK | pyautogui OK | sounddevice OK | numpy OK
+.venv        : requests MISS | pytest OK(9.2.0) | telethon MISS | PySide6 OK | openai MISS | pyautogui MISS | sounddevice MISS | numpy OK
+
+## Scan scope
+all .py under . (excl .git)              : 1876
+.py excluding .venv/build/dist/__pycache__ : 148
+dir sizes: .venv 760M | build 751M | dist 347M
+vendored paths leaked into any output file: 0 (grep -c .venv on each output = 0)
+
+## Tool versions
+vulture 2.16
+6.0.1
+ruff 0.17.3
+
+## ruff rule breakdown
+F401: 19 | F841: 2 | F811: 0
+Found 21 errors.
+[*] 17 fixable with `--fix` (2 unsafe fixes available with `--fix --unsafe-fixes`).
