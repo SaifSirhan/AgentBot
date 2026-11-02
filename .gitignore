@@ -2,6 +2,7 @@
 .session
 *.session
 *.session-journal
+*.session.lock
 credentials.json
 config.json
 config.json.bak*
@@ -15,12 +16,15 @@ tokens.json
 ig_session.json
 ig_state.json
 ig_activity.log
+APIs.txt
 
 # ---- Local data / caches ----
 rag_db/
 AgentMemory/
 *.log
 research_*.md
+# Unreviewed agent-written SKILL.md drafts from self_curriculum.py
+skill_quarantine/
 # Timestamped backups written next to a file by document_tools before editing.
 *.bak_*
 
@@ -42,6 +46,7 @@ Thumbs.db
 
 # ---- Local mockup artifacts ----
 _gui_mockup*.png
+scratch/
 
 # ---- Local / non-source / sensitive artifacts (kept out of the repo) ----
 # APIs.txt likely holds API keys; check-fk.php / sha512_sum are stray scratch

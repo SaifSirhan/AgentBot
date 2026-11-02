@@ -474,13 +474,14 @@ def describe_telegram_image(path, question):
 # ---------------------------
 # Run a turn (blocking, safe for the telegram thread)
 # ---------------------------
-def run_agent_for_telegram(user_input):
+def run_agent_for_telegram(user_input, *, group_mode=False):
     """Runs agent.run_agent_turn and returns (reply_text, generated_image_paths)."""
     log_capture = io.StringIO()
     with turn_lock:
         conversation_history.append(f"User: {user_input}")
         with contextlib.redirect_stdout(log_capture):
-            step_log = agent.run_agent_turn(user_input, conversation_history)
+            step_log = agent.run_agent_turn(
+                user_input, conversation_history, group_mode=group_mode)
 
     # Extract final reply from step log (same logic as the GUI)
     final = None
@@ -737,12 +738,8 @@ def handle_message(message):
     chat_type = message["chat"]["type"]
     is_group = chat_type in ("group", "supergroup")
 
-    # Set the flag before running the turn
-    agent.GROUP_MODE = is_group
-    try:
-        reply, gen_images = run_agent_for_telegram(text)
-    finally:
-        agent.GROUP_MODE = False   # always reset
+    # The application-wide turn lock owns the temporary group context.
+    reply, gen_images = run_agent_for_telegram(text, group_mode=is_group)
     print(f"[Telegram] AI: {reply[:100]}...")
     send_message(chat_id, reply)
     for img in gen_images:

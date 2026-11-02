@@ -27,12 +27,13 @@ except Exception:
     _INSTAGRAPI_OK = False
 
 import agent as _agent
+import config as _cfg
 
-_IG_SESSION = Path(os.environ.get("LOCALAPPDATA", "")) / "AgentMemory" / "ig_session.json"
-_IG_STATE   = Path(os.environ.get("LOCALAPPDATA", "")) / "AgentMemory" / "ig_state.json"
-_IG_LOG     = Path(os.environ.get("LOCALAPPDATA", "")) / "AgentMemory" / "ig_activity.log"
+_IG_SESSION = Path(_cfg.memory_path("ig_session.json"))
+_IG_STATE   = Path(_cfg.memory_path("ig_state.json"))
+_IG_LOG     = Path(_cfg.memory_path("ig_activity.log"))
 
-_IG_HISTORY = Path(os.environ.get("LOCALAPPDATA", "")) / "AgentMemory" / "conversation_instagram.json"
+_IG_HISTORY = Path(_cfg.memory_path("conversation_instagram.json"))
 _IG_HISTORY_CAP = 40  # matches agent.MAX_HISTORY_ENTRIES
 
 _active_adapter = None

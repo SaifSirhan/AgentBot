@@ -4,6 +4,7 @@
 
 # --- GUI ---
 customtkinter
+PySide6
 pillow
 pystray
 keyboard
@@ -18,6 +19,7 @@ feedparser
 serpapi-search-tools # structured web search (serpapi_tool.serp_search); optional, falls back to search_web
 
 # --- LLM / RAG ---
+PyYAML>=6.0.3,<7      # skill_manager.py frontmatter parsing
 chromadb
 sentence-transformers
 pypdf
@@ -29,26 +31,38 @@ python-pptx          # PowerPoint editing (document_tools.edit_pptx)
 reportlab            # PDF creation (document_tools.edit_pdf)
 pytesseract          # also requires the Tesseract binary installed on the system
 
+# --- Native Office automation (desktop Word/Excel COM) ---
+pywin32              # office_control.py: Word language + text via COM
+
 # --- GIF / short video frame extraction (Telegram animations) ---
 imageio
 imageio-ffmpeg       # bundles an ffmpeg binary; no system install needed
+
+# --- Media streaming ---
+yt-dlp               # stream_media: resolves page/search URLs to direct streams
 
 # --- Voice (TTS / STT) & audio ---
 kokoro
 faster-whisper
 sounddevice
 numpy
+openwakeword         # local wake-word detection (wake_word.py)
+pyaudio              # microphone capture for the wake-word listener
 pycaw                # Windows volume control
 comtypes             # required by pycaw
 
 # --- System / process ---
 psutil
 pyautogui
+mss                  # fast primary-monitor screenshots (os_control.py)
+pywinauto            # grounded Windows UI Automation (uia_control.py)
 schedule
 
 # --- Browser automation ---
 selenium
 webdriver-manager
+playwright            # Section 4 browser agent; run "python -m playwright install chromium" once
+jsonschema            # validates model-proposed browser actions
 
 # --- Messaging integrations ---
 telethon             # Telegram user account
