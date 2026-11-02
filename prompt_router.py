@@ -188,6 +188,22 @@ def requested_tool_names(user_request: str, available_names: Iterable[str]) -> t
         rf"(?<!\w){re.escape(name)}(?!\w)", text, re.I)))
 
 
+USE_VERBS = r"(?:use|using|used|call|calling|invoke|invoking|run|running|execute|executing|via)"
+
+
+def explicitly_requested_tool_names(user_request: str,
+                                    available_names: Iterable[str]) -> tuple[str, ...]:
+    """Tools the user asked to be used, so an ordinary verb like "notify" is not one."""
+    text = positive_tool_request(user_request)
+    requested = []
+    for name in available_names:
+        pattern = (rf"(?<!\w){re.escape(name)}(?!\w)" if "_" in name else
+                   rf"\b{USE_VERBS}\b[^.!?\n]{{0,60}}?(?<!\w){re.escape(name)}(?!\w)")
+        if re.search(pattern, text, re.I):
+            requested.append(name)
+    return tuple(sorted(requested))
+
+
 def build_dynamic_prompt(
     user_request: str,
     available_tools: Sequence[Tool],

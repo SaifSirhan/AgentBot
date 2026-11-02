@@ -6350,7 +6350,7 @@ _TASK_SNAPSHOT_PREFIX = "System: Autonomous task snapshot: "
 
 
 def _explicit_autonomous_tools(goal):
-    return prompt_router.requested_tool_names(
+    return prompt_router.explicitly_requested_tool_names(
         goal, VALID_TOOLS - autonomous_engine.CONTROL_TOOLS - {"chat"})
 
 

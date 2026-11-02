@@ -518,6 +518,43 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("otherwise ask for clarification", result.system_prompt)
 
 
+class ExplicitToolRequestTests(unittest.TestCase):
+    NAMES = ("notify", "weather", "remember", "watch_system_condition")
+
+    def test_prose_that_collides_with_a_tool_name_is_not_a_request(self):
+        for request in (
+            "notify me when RAM reaches 80%",
+            "remember that I prefer evening runs",
+            "check the weather tomorrow",
+        ):
+            with self.subTest(request=request):
+                self.assertEqual(
+                    pr.explicitly_requested_tool_names(request, self.NAMES), ())
+
+    def test_use_verbs_make_a_tool_required(self):
+        cases = (
+            ("use notify when the build finishes", ("notify",)),
+            ("call the notify tool once the download ends", ("notify",)),
+            ("tell me the weather; use weather for it", ("weather",)),
+            ("Use `notify` when done", ("notify",)),
+        )
+        for request, expected in cases:
+            with self.subTest(request=request):
+                self.assertEqual(
+                    pr.explicitly_requested_tool_names(request, self.NAMES), expected)
+
+    def test_snake_case_names_are_unambiguous_identifiers(self):
+        self.assertEqual(
+            pr.explicitly_requested_tool_names(
+                "watch_system_condition for ram at 80", self.NAMES),
+            ("watch_system_condition",))
+
+    def test_avoided_tools_stay_unrequired(self):
+        self.assertEqual(
+            pr.explicitly_requested_tool_names(
+                "do not use notify; use weather instead", self.NAMES), ("weather",))
+
+
 class ReactLoopClassificationTests(unittest.TestCase):
     def test_complex_requests_require_the_react_loop(self):
         for request in (

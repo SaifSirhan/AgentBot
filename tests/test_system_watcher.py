@@ -139,7 +139,7 @@ class SystemWatcherTests(unittest.TestCase):
         replies = iter([
             '{"tool":"watch_system_condition","input":"ram|80|RAM is high"}',
             'DONE',
-            '{"achieved":true,"evidence":"Background RAM watch registered"}',
+            '{"goal_met":true,"reason":"Background RAM watch registered"}',
         ])
         with mock.patch.object(agent, "GROUP_MODE", False), \
                 mock.patch.object(agent, "ask_llm_direct", side_effect=lambda _: next(replies)), \
@@ -148,7 +148,7 @@ class SystemWatcherTests(unittest.TestCase):
             step_log = agent.run_agent_turn("/task notify me when RAM reaches 80%", [])
             self.wait_for_watch()
         self.assertIn("Watching ram for 80%", "\n".join(step_log))
-        self.assertIn("Goal independently verified", "\n".join(step_log))
+        self.assertIn("Execution and goal checks passed", "\n".join(step_log))
         self.notification.return_value.show.assert_called_once_with()
 
     def test_battery_disappearing_stops_and_logs_error(self):
