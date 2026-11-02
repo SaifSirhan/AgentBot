@@ -87,6 +87,44 @@ class StickyToolTests(unittest.TestCase):
         )
         self.assertNotIn("rag_search", fourth_allowed[0])
 
+    def test_tool_used_before_an_aborted_turn_stays_pinned(self):
+        """A chain that dies mid-way must not lose the tools it already used.
+
+        Sticky tools were only recorded on the normal exit path, so a turn that
+        raised left the follow-up with nothing carried. The tool is deliberately
+        outside FALLBACK_TOOLS, which would otherwise hide the regression.
+        """
+        history = []
+        sequence = iter([
+            {"tool": "screenshot_background", "input": ""},
+            RuntimeError("provider died"),
+        ])
+
+        def planner(_input, _context):
+            item = next(sequence)
+            if isinstance(item, Exception):
+                raise item
+            return item, None
+
+        with mock.patch.object(
+                agent, "get_valid_action", side_effect=planner), \
+                mock.patch.object(
+                    agent, "execute_tool",
+                    side_effect=lambda action: "Saved: shot.png"), \
+                mock.patch("rag_tool.search_documents", return_value=""):
+            with self.assertRaises(RuntimeError):
+                agent._run_agent_turn_impl(
+                    "take a screenshot of the screen", history)
+
+        followup_allowed = []
+        self.run_turn(
+            "yeah",
+            [{"tool": "chat", "input": "ok"}],
+            history,
+            followup_allowed,
+        )
+        self.assertIn("screenshot_background", followup_allowed[0])
+
     def test_requested_tool_carries_into_the_followup(self):
         history = []
         self.run_turn(

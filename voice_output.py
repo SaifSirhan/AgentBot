@@ -252,12 +252,13 @@ def _load_backend_status():
 
 
 def _load_max_chars():
+    """Characters to speak per reply. Zero or less means no limit."""
     try:
         import config
         cfg = config.load_config()
-        return max(80, int(str(cfg.get("TTS_MAX_CHARS", "2000")).strip()))
+        return int(str(cfg.get("TTS_MAX_CHARS", "2000")).strip())
     except Exception:
-        return 2000
+        return 0
 
 
 # =============================================================
@@ -472,8 +473,11 @@ def _speak_blocking(text, generation=None):
         return
 
     max_chars = _load_max_chars()
-    if len(cleaned) > max_chars:
-        cleaned = cleaned[:max_chars] + "..."
+    if max_chars > 0 and len(cleaned) > max_chars:
+        # Break on a word boundary and never append an ellipsis: the old
+        # `[:n] + "..."` read as a reply that stopped mid-syllable.
+        trimmed = cleaned[:max_chars].rsplit(" ", 1)[0]
+        cleaned = trimmed if trimmed else cleaned[:max_chars]
 
     print(f"[tts] generating ({len(cleaned)} chars, voice={voice}, speed={speed})")
 

@@ -273,5 +273,47 @@ class PrefetchTests(unittest.TestCase):
         self.assertEqual(text, "Hi at the file")
 
 
+class MaxCharsSpeechTests(unittest.TestCase):
+    """TTS_MAX_CHARS used to slice the reply mid-word and append "...", which
+    is what made long answers stop after a sentence or two."""
+
+    def spoken(self, text, max_chars):
+        stream = _BlockingStream()
+        stream.release.set()
+        received = []
+
+        def pipeline(piece, voice=None, speed=None):
+            received.append(piece)
+            return iter(())
+
+        with mock.patch.multiple(
+                voice_output,
+                _load_backend_status=mock.Mock(return_value=(True, "")),
+                _load_tts_config=mock.Mock(
+                    return_value=("af_heart", 1.0, "a", True)),
+                _load_max_chars=mock.Mock(return_value=max_chars),
+                _get_pipeline=mock.Mock(return_value=pipeline),
+                _split_for_tts=mock.Mock(side_effect=lambda t: [t]),
+                sanitize_for_speech=mock.Mock(side_effect=lambda t: t),
+                sd=mock.Mock(OutputStream=mock.Mock(return_value=stream))):
+            voice_output._speak_blocking(text)
+        return received
+
+    def test_zero_limit_speaks_the_whole_reply(self):
+        text = "This is a sentence. " * 40
+        self.assertEqual(self.spoken(text, 0), [text])
+
+    def test_a_positive_limit_breaks_at_a_word_boundary(self):
+        text = ("The quick brown fox jumps over the lazy dog while the "
+                "cat watches quietly from the windowsill")
+        spoken = self.spoken(text, 40)[0]
+        self.assertTrue(text.startswith(spoken))
+        self.assertFalse(spoken.endswith("..."), "cut with an ellipsis")
+        self.assertLessEqual(len(spoken), 40)
+        self.assertGreaterEqual(len(spoken), 30, "threw away too much")
+        following = text[len(spoken):len(spoken) + 1]
+        self.assertIn(following, (" ", "."), "sliced through a word")
+
+
 if __name__ == "__main__":
     unittest.main()

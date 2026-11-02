@@ -1389,12 +1389,6 @@ def _route_prompt(user_request, carry_tools=()):
         '"input": "tool_input"}. Never write tool("arg") or XML.',
     )
     load_skill = next(tool for tool in tools if tool.name == "load_skill")
-    if not selected:
-        prompt = prompt.replace(
-            "No relevant tools are exposed. Answer without tools when "
-            "possible; otherwise ask for clarification.",
-            "Available tools:",
-        )
     if load_skill not in selected:
         selected.append(load_skill)
         prompt += "\n\n- load_skill: " + load_skill.description
@@ -5251,7 +5245,9 @@ When a user provides an exact absolute file path (e.g., C:\Users\USER\Downloads\
 
 If the user says pause, skip, next, or stop the music, you MUST use media_control (global media keys), NOT play_on_youtube.
 If the user asks to queue a song, use queue_on_ytm, NOT media_control or play_on_youtube.
-NEVER say a song is queued, paused, or playing unless you have successfully run media_control, play_on_youtube, or queue_on_ytm and verified the result. Do not guess."""
+NEVER say a song is queued, paused, or playing unless you have successfully run media_control, play_on_youtube, or queue_on_ytm and verified the result. Do not guess.
+
+NEVER name the tools you have or lack; state the outcome, or ask one question."""
 
 # ---------------------------
 # TOOL REGISTRY
@@ -7206,6 +7202,10 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
         tool_executions_this_turn.append((tool, inp, output))
         print(f"\n{output}")
         step_log.append(f"Action: {tool}({inp}) -> Result: {output}")
+        # Pin as it runs, not at the end of the turn: a chain that dies on a
+        # provider error never reaches the end-of-turn bookkeeping, and the
+        # follow-up then loses the tool that was doing the work.
+        _remember_sticky_tools(sticky_history, (tool,))
         print(f"  [step {step+1} took {time.time()-step_start:.1f}s]")
 
         # Run any extra tool calls the LLM packed into the same response

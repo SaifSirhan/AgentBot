@@ -118,6 +118,26 @@ class RoutingTests(unittest.TestCase):
             [f"file_tool_{i}" for i in range(5)],
         )
 
+    def test_search_and_click_exposes_the_whole_ui_toolset(self):
+        """A multi-step request must not leave the model able to search but
+        unable to type or click. The UI siblings are selected as one set."""
+        tools = pc.build_tools(
+            frozenset(pc.OS_TOOLS) | frozenset({"search_web", "serp_search"}))
+        result = pr.build_dynamic_prompt(
+            "search the web for the newest reviews and click the first result",
+            tools, count_tokens=words, max_tokens=7800,
+            fallback_tools=pc.FALLBACK_TOOLS)
+        names = {tool.name for tool in result.tools}
+        self.assertIn("search_web", names)
+        self.assertIn("click_coordinates", names)
+        self.assertIn("type_text", names)
+
+    def test_core_rules_forbid_tool_inventory_talk(self):
+        self.assertIn(
+            "Never tell the user which tools you have or lack",
+            pr.CORE_RULES)
+        self.assertNotIn("otherwise explain the limitation", pr.CORE_RULES)
+
     def test_budget_drops_tools_but_keeps_required_rules(self):
         tools = [
             pr.Tool(f"file_tool_{i}", f"Edit file {i}.", ("python",), ("file",))
