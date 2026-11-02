@@ -8,7 +8,7 @@ against the expected tool, and nothing is executed.
 Not an LLM-facing tool. Exposed via GUI slash commands only.
 """
 from __future__ import annotations
-import hashlib, json, os, re, time, uuid
+import hashlib, json, re, time, uuid
 from datetime import datetime
 from pathlib import Path
 

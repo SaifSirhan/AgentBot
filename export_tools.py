@@ -4,7 +4,6 @@ Requires:
   pip install reportlab python-docx
 """
 
-import os
 import datetime
 
 

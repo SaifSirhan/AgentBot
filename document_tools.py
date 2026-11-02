@@ -3,7 +3,7 @@ Document editing tools for AgentBot.
 Edit DOCX, XLSX, PPTX, and PDF files based on natural-language instructions.
 """
 from __future__ import annotations
-import os, re, shutil, tempfile
+import os, re, shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -104,7 +104,6 @@ def edit_pptx(path: str, instruction: str) -> str:
     """Edit a PowerPoint presentation. Instruction is natural language.
     Supported: add slide, add text to slide, change title."""
     from pptx import Presentation
-    from pptx.util import Inches
     if not os.path.exists(path):
         return f"ERROR: file not found: {path}"
     _backup(path)
@@ -134,7 +133,6 @@ def edit_pdf(path: str, instruction: str) -> str:
     """Edit or create a PDF. Instruction is natural language.
     Supported: extract text, merge, split, add watermark, create from text."""
     from pypdf import PdfReader, PdfWriter
-    import io
 
     inst = instruction.lower()
 

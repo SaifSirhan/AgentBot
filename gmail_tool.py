@@ -13,7 +13,6 @@ Requires: pip install google-auth google-auth-oauthlib google-auth-httplib2 goog
 
 import os
 import base64
-import json
 from datetime import datetime
 
 from google.auth.transport.requests import Request

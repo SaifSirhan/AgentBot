@@ -30,7 +30,6 @@ import scheduler
 import memory
 import artifact_store
 from tool_registry import (
-    BATCH_EFFECT_ERROR,
     InputValidationError,
     ToolRegistry,
     ToolSpec,
@@ -2219,7 +2218,6 @@ def write_file(filename, content, folder=None):
 
 def read_file(path):
     import os
-    from pathlib import Path
 
     path = (path or "").strip().strip('"').strip("'")
     if not path:
@@ -5600,7 +5598,7 @@ def search_group_chat(input_str):
 def grep_group_chat(input_str):
     """Exact substring search in the group chat export.
     Format: "keyword" or "keyword|year" or "keyword|YYYY-MM" """
-    import os, re
+    import os
     parts = input_str.split("|", 1)
     keyword = parts[0].strip().lower()
     date_filter = parts[1].strip() if len(parts) > 1 else None

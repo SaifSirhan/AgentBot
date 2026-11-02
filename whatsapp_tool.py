@@ -10,7 +10,6 @@ Requires: selenium, webdriver-manager, and the SAME Chrome profile used
 by agent.py's other Selenium tools (AgentBrowserProfile).
 """
 
-import os
 import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys

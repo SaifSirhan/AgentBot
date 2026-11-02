@@ -3,7 +3,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 import self_curriculum as curriculum
 from autonomous_loop import LoopResult, RecordedAction, ToolResult, Verification

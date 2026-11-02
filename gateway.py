@@ -13,7 +13,7 @@ This module owns its own conversation history, separate from the GUI's
 conversation.json, so Instagram DMs never mix with the desktop chat.
 """
 from __future__ import annotations
-import os, json, time, threading, traceback
+import json, time, threading, traceback
 from pathlib import Path
 from datetime import datetime
 

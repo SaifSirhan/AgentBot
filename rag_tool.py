@@ -8,7 +8,6 @@ Rank Fusion so exact names, IDs and filenames are not lost to vector search.
 
 import os
 import json
-import glob
 import itertools
 import re
 import sqlite3
