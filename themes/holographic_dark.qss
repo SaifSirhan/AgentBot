@@ -1,0 +1,347 @@
+/* Holographic dark: near-black base, lifted slate surfaces, neon cyan accent.
+   Structural and colour rules live here; widgets declare semantic tone
+   (tone="hi|dim|warn|danger") and this file decides what that looks like.
+   Fonts stay under code control (terminal_font() / FONT_UI / FONT_MONO) so no
+   rule here sets a family on the base widget — that would desync QFontMetrics
+   from the widths the layout maths depends on. */
+
+/* The base widget paints nothing: an opaque QWidget rule would make every
+   unnamed container (a prompt row's text host, a card's body) cover the surface
+   colour of the panel it sits in. Surfaces are named explicitly instead. */
+QWidget {
+    background-color: transparent;
+    color: #D7E2EB;
+    border: none;
+    border-radius: 0px;
+    margin: 0px;
+    padding: 0px;
+    selection-background-color: #00E5FF;
+    selection-color: #061014;
+}
+
+QMainWindow, QDialog {
+    background-color: #0E1116;
+}
+
+QWidget#central {
+    background-color: #0E1116;
+}
+
+QToolTip {
+    background-color: #151A22;
+    color: #D7E2EB;
+    border: 1px solid #263041;
+    border-radius: 6px;
+    padding: 4px 6px;
+}
+
+/* The chat canvas sits behind the HUD, so it must stay see-through. */
+QScrollArea#chatScroll, QWidget#chatViewport, QWidget#chatContent {
+    background-color: transparent;
+    border: none;
+}
+
+QWidget#rightPanel, QWidget#panelContent, QWidget#memoryPanel {
+    background-color: #0B0E13;
+}
+
+QFrame {
+    border: none;
+    margin: 0px;
+    padding: 0px;
+}
+
+/* Floating cards: soft surface, 1px cool rim, no hard outline. */
+QFrame[panel="true"] {
+    background-color: #151A22;
+    border: 1px solid #232B37;
+    border-radius: 12px;
+}
+
+QFrame#codeBlock {
+    background-color: #12161D;
+    border: 1px solid #232B37;
+    border-radius: 10px;
+}
+
+QFrame#chipHeader {
+    background-color: #151A22;
+    border: 1px solid #232B37;
+    border-radius: 10px;
+}
+
+QFrame#chipHeader:hover {
+    border-color: #00E5FF;
+}
+
+QPlainTextEdit#chipBody {
+    background-color: #12161D;
+    color: #8FA0B0;
+    border: 1px solid #232B37;
+    border-radius: 10px;
+    padding: 6px;
+    font-size: 11px;
+}
+
+/* Semantic label tones: the theme owns every text colour. */
+QLabel[tone="hi"] {
+    color: #00E5FF;
+}
+
+QLabel[tone="dim"] {
+    color: #8FA0B0;
+}
+
+QLabel[tone="warn"] {
+    color: #FFC857;
+}
+
+QLabel[tone="danger"] {
+    color: #FF6B81;
+}
+
+QLabel[role="heading"] {
+    color: #8FA0B0;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+/* Editors. */
+QPlainTextEdit, QLineEdit {
+    background-color: #12161D;
+    color: #D7E2EB;
+    border: 1px solid #232B37;
+    border-radius: 10px;
+    padding: 4px 6px;
+    selection-background-color: #00E5FF;
+    selection-color: #061014;
+}
+
+QPlainTextEdit:focus, QLineEdit:focus {
+    border: 1px solid #00E5FF;
+}
+
+/* Prompt: one lifted pill holding the shell prefix, the editor and the
+   trailing buttons. The editor itself is chrome-less inside it, so the pill
+   reads as a single control instead of three boxed widgets. */
+QFrame#promptRow {
+    background-color: #1A1D24;
+    border: 1px solid #263041;
+    border-radius: 999px;
+}
+
+QFrame#promptRow:focus, QFrame#promptRow:hover {
+    border-color: #00E5FF;
+}
+
+QLabel#promptPrefix {
+    background-color: transparent;
+    color: #00E5FF;
+    border: none;
+}
+
+QPlainTextEdit#commandInput {
+    background-color: transparent;
+    border: none;
+    border-radius: 0px;
+    padding: 0px;
+    color: #E8F1F7;
+    selection-background-color: #00E5FF;
+    selection-color: #061014;
+}
+
+QPlainTextEdit#commandInput:focus {
+    border: none;
+}
+
+/* Buttons stay flat with an accent wash; no default 3D chrome. */
+QPushButton {
+    background-color: transparent;
+    color: #D7E2EB;
+    border: none;
+    border-radius: 8px;
+    padding: 4px 8px;
+    text-align: center;
+}
+
+QPushButton:hover {
+    background-color: #1E2632;
+    color: #00E5FF;
+}
+
+QPushButton:pressed {
+    background-color: #24303F;
+    color: #7DF3FF;
+}
+
+QPushButton:disabled {
+    color: #55606D;
+    background-color: transparent;
+}
+
+/* Slim rounded scrollbars that don't fight the dark canvas. */
+QScrollBar:vertical {
+    background-color: transparent;
+    border: none;
+    width: 10px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #2A3543;
+    min-height: 24px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical:hover,
+QScrollBar::handle:vertical:pressed {
+    background-color: #00E5FF;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0px;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: none;
+}
+
+QScrollBar:horizontal {
+    background-color: transparent;
+    border: none;
+    height: 10px;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal {
+    background-color: #2A3543;
+    min-width: 24px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:horizontal:hover,
+QScrollBar::handle:horizontal:pressed {
+    background-color: #00E5FF;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0px;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: none;
+}
+
+QSplitter::handle {
+    background-color: transparent;
+}
+
+QSplitter#mainSplitter::handle:horizontal {
+    background-color: transparent;
+    width: 6px;
+}
+
+QSplitter#mainSplitter::handle:horizontal:hover {
+    background-color: #0E3A44;
+    border-radius: 3px;
+}
+
+QMenu {
+    background-color: #151A22;
+    color: #D7E2EB;
+    border: 1px solid #263041;
+    border-radius: 10px;
+    padding: 6px;
+}
+
+QMenu::item {
+    background-color: transparent;
+    border-radius: 6px;
+    padding: 5px 18px;
+}
+
+QMenu::item:selected {
+    background-color: #1E2632;
+    color: #00E5FF;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: #232B37;
+    margin: 4px 6px;
+}
+
+QTabWidget#settingsTabs::pane {
+    background-color: transparent;
+    border: none;
+}
+
+QTabBar::tab {
+    background-color: transparent;
+    color: #8FA0B0;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 6px 10px;
+}
+
+QTabBar::tab:selected {
+    color: #00E5FF;
+    border-bottom: 2px solid #00E5FF;
+}
+
+QTabBar::tab:hover {
+    color: #D7E2EB;
+}
+
+QCheckBox {
+    background-color: transparent;
+    color: #D7E2EB;
+    spacing: 8px;
+}
+
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border: 1px solid #2A3543;
+    border-radius: 4px;
+    background-color: #12161D;
+}
+
+QCheckBox::indicator:checked {
+    border-color: #00E5FF;
+    background-color: #00E5FF;
+}
+
+/* Attachment chips: compact pills inside the prompt column. */
+QFrame#attachChip {
+    background-color: #1A1D24;
+    border: 1px solid #263041;
+    border-radius: 999px;
+}
+
+/* Untrusted external content is visually quarantined. */
+QFrame#browserApproval {
+    background-color: #151A22;
+    border: 1px solid #0E3A44;
+    border-radius: 12px;
+}
+
+QFrame#logPanel, QFrame#memoryCard, QFrame#telegramEntry {
+    background-color: #12161D;
+    border: 1px solid #232B37;
+    border-radius: 10px;
+}
+
+QWidget#settingsPanel {
+    background-color: #0E1116;
+    border: 1px solid #263041;
+    border-radius: 12px;
+}

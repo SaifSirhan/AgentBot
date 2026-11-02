@@ -73,13 +73,14 @@ class DragDropTests(unittest.TestCase):
         self.assertEqual(event.dropAction(), Qt.DropAction.CopyAction)
         self.assertTrue(self.window._drop_highlighted)
         self.assertFalse(self.window._drop_overlay.isHidden())
-        self.assertIn("#70FFD4", self.window._drop_overlay.styleSheet())
+        self.assertIn(g.COLOR_ACCENT, self.window._drop_overlay.styleSheet())
 
         leave = QDragLeaveEvent()
         self.window.dragLeaveEvent(leave)
         self.assertFalse(self.window._drop_highlighted)
         self.assertTrue(self.window._drop_overlay.isHidden())
-        self.assertNotIn("#70FFD4", self.window._drop_overlay.styleSheet())
+        self.assertNotIn(g.COLOR_ACCENT,
+                         self.window._drop_overlay.styleSheet())
 
     def test_drop_inserts_path_into_command_input(self):
         path = self.tmp_path("a.txt")

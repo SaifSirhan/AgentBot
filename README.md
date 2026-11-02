@@ -1,6 +1,6 @@
 # AgentBot
 
-A highly capable, autonomous personal AI assistant for Windows. AgentBot turns natural-language requests into actions on your PC — controlling applications, editing documents, managing files, and navigating the web — wrapped in a custom PySide6 brutalist terminal interface.
+A highly capable, autonomous personal AI assistant for Windows. AgentBot turns natural-language requests into actions on your PC — controlling applications, editing documents, managing files, and navigating the web — wrapped in a custom PySide6 holographic-dark terminal interface.
 
 <img width="1716" height="898" alt="image" src="https://github.com/user-attachments/assets/69e783c9-b905-4f45-9d5e-f105080e458c" />
 

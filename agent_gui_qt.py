@@ -109,30 +109,31 @@ import memory
 from hud_core import ReactorHud
 
 # --------------------------- palette ---------------------------
-# Section 1 terminal theme: black surfaces, mint foreground, dim mint
-# secondary. Kept as constants because a lot of the existing widgets style
-# themselves inline; themes/*.qss handles the structural and color rules.
-COLOR_BG         = "#000000"
-COLOR_BG_ALT     = "#000000"
-COLOR_SIDEBAR    = "#000000"
-COLOR_RAISED     = "#0a1a15"
-COLOR_CODE_BG    = "#000000"
-COLOR_INPUT_BG   = "#000000"
-COLOR_BORDER     = "#23483D"
-COLOR_HOVER      = "#0e241d"
-COLOR_SELECTED   = "#123026"
-COLOR_TEXT_HI    = "#70FFD4"
-COLOR_TEXT_USER  = "#D5FFF0"
-COLOR_TEXT_MID   = "#8AA99F"
-COLOR_TEXT_LOW   = "#8AA99F"
+# Holographic dark: near-black canvas, lifted slate surfaces, neon cyan accent.
+# Kept as constants because a lot of the existing widgets style themselves
+# inline (icon tints can't come from QSS); themes/*.qss owns the structural and
+# tone rules. These values track themes/holographic_dark.qss — the default.
+COLOR_BG         = "#0E1116"
+COLOR_BG_ALT     = "#0B0E13"
+COLOR_SIDEBAR    = "#0B0E13"
+COLOR_RAISED     = "#1A1D24"
+COLOR_CODE_BG    = "#12161D"
+COLOR_INPUT_BG   = "#1A1D24"
+COLOR_BORDER     = "#263041"
+COLOR_HOVER      = "#1E2632"
+COLOR_SELECTED   = "#24303F"
+COLOR_TEXT_HI    = "#00E5FF"
+COLOR_TEXT_USER  = "#E8F1F7"
+COLOR_TEXT_MID   = "#8FA0B0"
+COLOR_TEXT_LOW   = "#8FA0B0"
 
-COLOR_WARN       = "#ffd166"
-COLOR_DANGER     = "#FF8F9C"
-COLOR_DANGER_HOVER = "#ff6b7c"
+COLOR_WARN       = "#FFC857"
+COLOR_DANGER     = "#FF6B81"
+COLOR_DANGER_HOVER = "#ff8ea0"
 
-COLOR_ACCENT       = "#70FFD4"
-COLOR_ACCENT_HOVER = "#8CFFE0"
-COLOR_ACCENT_DIM   = "#23483D"
+COLOR_ACCENT       = "#00E5FF"
+COLOR_ACCENT_HOVER = "#7DF3FF"
+COLOR_ACCENT_DIM   = "#0E3A44"
 
 # Inline labels declare a semantic tone; the theme QSS owns the actual color.
 _TONE_BY_COLOR = {
@@ -145,8 +146,16 @@ _TONE_BY_COLOR = {
     COLOR_DANGER: "danger",
 }
 
-FONT_UI = "Consolas"
-FONT_MONO = "Consolas"
+# Preferred families, re-pinned by resolve_fonts() once a QApplication exists.
+# They are read by inline-stylesheet f-strings at call time, so a name set here
+# propagates everywhere; the literal values are only the pre-resolution guess.
+FONT_UI = "Inter"
+FONT_MONO = "JetBrains Mono"
+
+_UI_FAMILIES = ("Inter", "SF Pro Text", "Noto Sans", "DejaVu Sans", "Roboto")
+_MONO_FAMILIES = ("JetBrains Mono", "Cascadia Mono", "Consolas",
+                  "DejaVu Sans Mono")
+_fonts_resolved = False
 
 HEADER_H = 48
 
@@ -279,14 +288,42 @@ def _svg_icon(name: str, size: int, color: str) -> QIcon:
     return QIcon(_svg_pixmap(name, size, color))
 
 
+def _first_family(candidates, available):
+    for family in candidates:
+        if family in available:
+            return family
+    return None
+
+
+def resolve_fonts() -> tuple[str, str]:
+    """Pin FONT_UI / FONT_MONO to families that are actually installed.
+
+    Needs a QApplication (QFontDatabase is app-scoped), so main() and
+    AgentWindow call it before any widget is built. A desktop without any
+    preferred face downgrades to the platform fixed font, never to a named
+    family Qt cannot resolve. With no font database at all — the offscreen
+    platform reports none — the preferred names stay, because an empty list
+    says nothing about what a real display would resolve.
+    """
+    global FONT_UI, FONT_MONO, _fonts_resolved
+    if _fonts_resolved:
+        return FONT_UI, FONT_MONO
+    available = set(QFontDatabase.families())
+    if available:
+        FONT_MONO = (_first_family(_MONO_FAMILIES, available)
+                     or QFontDatabase.systemFont(
+                         QFontDatabase.SystemFont.FixedFont).family())
+        # Terminal-first: with no Inter-class face, keep the monospace body.
+        FONT_UI = _first_family(_UI_FAMILIES, available) or FONT_MONO
+    _fonts_resolved = True
+    return FONT_UI, FONT_MONO
+
+
 def terminal_font() -> QFont:
     """Platform-safe monospace font for the terminal theme."""
-    available = set(QFontDatabase.families())
-    for family in ("Cascadia Mono", "Consolas", "DejaVu Sans Mono"):
-        if family in available:
-            return QFont(family, 11)
-    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-    font.setPointSize(11)
+    resolve_fonts()
+    font = QFont(FONT_MONO, 11)
+    font.setStyleHint(QFont.StyleHint.Monospace)
     return font
 
 
@@ -299,15 +336,21 @@ def zero_layout(layout):
 
 _CODE_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+.-]*)\n?(.*?)```", re.DOTALL)
 
-# CSS injected into QTextDocument HTML so the markdown typography matches the
-# design spec (body 15px/1.6, scaled headers, inline code pill).
-_MD_CSS = f"""
-p {{ margin: 0 0 10px 0; }}
+
+def md_css() -> str:
+    """CSS injected into QTextDocument HTML so markdown typography matches the
+    design spec (body 15px with breathing room, scaled headers, inline code).
+
+    Built per call, not at import: it interpolates the font family, which only
+    becomes final once resolve_fonts() has run against a live QApplication.
+    """
+    return f"""
+p {{ margin: 0 0 12px 0; }}
 h1 {{ font-size: 22px; font-weight: 600; margin: 18px 0 10px 0; }}
 h2 {{ font-size: 18px; font-weight: 600; margin: 16px 0 8px 0; }}
 h3 {{ font-size: 16px; font-weight: 600; margin: 14px 0 6px 0; }}
-ul, ol {{ margin: 0 0 10px 0; -qt-list-indent: 1; }}
-li {{ margin: 2px 0; }}
+ul, ol {{ margin: 0 0 12px 0; -qt-list-indent: 1; }}
+li {{ margin: 3px 0; }}
 code {{ font-family: "{FONT_MONO}"; font-size: 13px; }}
 a {{ color: {COLOR_ACCENT}; }}
 """
@@ -655,19 +698,22 @@ def read_config_file_raw():
 
 
 THEMES_DIR = Path(__file__).resolve().with_name("themes")
-THEME_NAMES = ("brutalist", "crt_green")
+# holographic_dark is the default; brutalist and crt_green stay selectable and
+# are untouched by the new look.
+DEFAULT_THEME = "holographic_dark"
+THEME_NAMES = ("holographic_dark", "brutalist", "crt_green")
 
 
 def read_theme_name() -> str:
     try:
-        name = str(read_config_file_raw().get("GUI_THEME", "brutalist")).strip()
+        name = str(read_config_file_raw().get("GUI_THEME", DEFAULT_THEME)).strip()
     except Exception:
-        name = "brutalist"
-    return name if name in THEME_NAMES else "brutalist"
+        name = DEFAULT_THEME
+    return name if name in THEME_NAMES else DEFAULT_THEME
 
 
 def theme_stylesheet(name: str) -> str:
-    name = name if name in THEME_NAMES else "brutalist"
+    name = name if name in THEME_NAMES else DEFAULT_THEME
     return (THEMES_DIR / f"{name}.qss").read_text(encoding="utf-8")
 
 
@@ -1022,6 +1068,26 @@ def _icon_button(icon: str, tooltip: str = "", size: int = 30,
     return btn
 
 
+def _circle_style(btn: QPushButton, fill: str, hover: str) -> None:
+    """Make an icon button a filled disc with a knocked-out glyph.
+
+    Applied on the widget because an app stylesheet can never outrank the
+    inline sheet _icon_button already installs on it.
+    """
+    radius = max(btn.height(), btn.width()) // 2
+    btn.setStyleSheet(
+        f"""
+        QPushButton {{
+            background: {fill};
+            border: none;
+            border-radius: {radius}px;
+        }}
+        QPushButton:hover {{ background: {hover}; }}
+        QPushButton:pressed {{ background: {fill}; }}
+        """
+    )
+
+
 # ----------------------------------------------------------------------
 # Panel card content widgets (Phase 6b)
 # ----------------------------------------------------------------------
@@ -1156,7 +1222,7 @@ def markdown_to_html(text: str) -> str:
     html = doc.toHtml()
     # Replace the generated <style> block with our own so typography matches
     # the design spec instead of QTextDocument's 9pt defaults.
-    html = re.sub(r"<style type=\"text/css\">.*?</style>", f"<style>{_MD_CSS}</style>",
+    html = re.sub(r"<style type=\"text/css\">.*?</style>", f"<style>{md_css()}</style>",
                   html, count=1, flags=re.DOTALL)
     return html
 
@@ -1381,17 +1447,18 @@ class MessageBase(ShrinkableWidget):
     def __init__(self):
         super().__init__()
         self._column = QWidget()
+        # Ignored, not Fixed: the column must accept whatever width the layout
+        # hands it. Under a Fixed policy it demanded the label's unwrapped
+        # width, and the stretch pair below then centred it mid-row.
         self._column.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum
         )
         self._col_layout = QVBoxLayout(self._column)
         self._col_layout.setContentsMargins(0, 0, 0, 0)
         self._col_layout.setSpacing(0)
 
         row = zero_layout(QHBoxLayout(self))
-        row.addStretch(1)
-        row.addWidget(self._column, 0)
-        row.addStretch(1)
+        row.addWidget(self._column, 1)
 
     def minimumSizeHint(self):
         # QWidgetItem promotes minimumSizeHint into the layout's size hint.
@@ -1400,8 +1467,6 @@ class MessageBase(ShrinkableWidget):
         return QSize(0, self.sizeHint().height())
 
     def resizeEvent(self, event):
-        # The two stretches above starve the column, so drive its width here.
-        self._column.setFixedWidth(self.width())
         super().resizeEvent(event)
         # Word-wrapped labels change height with width; without this the parent
         # layout keeps the pre-resize height and the scroll area grows a blank
@@ -1484,7 +1549,7 @@ class BannerMessage(MessageBase):
         view.setContentsMargins(0, 0, 0, 0)
         view.viewport().setContentsMargins(0, 0, 0, 0)
         view.document().setDocumentMargin(8)
-        banner_font = QFont("Consolas")
+        banner_font = QFont(FONT_MONO)
         banner_font.setStyleHint(QFont.StyleHint.Monospace)
         banner_font.setFixedPitch(True)
         banner_font.setPixelSize(18)
@@ -1989,7 +2054,7 @@ class ChatView(QScrollArea):
     """
 
     BOTTOM_EPSILON = 5
-    MESSAGE_GAP = 12
+    MESSAGE_GAP = 16
 
     def __init__(self):
         super().__init__()
@@ -2073,7 +2138,7 @@ class ChatView(QScrollArea):
     # -- messages -------------------------------------------------------
     def add_message(self, widget: QWidget, fade: bool = True):
         was_pinned = self._pinned
-        # One consistent 12px block gap, never a trailing gap.
+        # One consistent MESSAGE_GAP block gap, never a trailing gap.
         has_messages = self._layout.count() > 1
         if has_messages:
             gap = QSpacerItem(
@@ -3048,6 +3113,7 @@ class AgentWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        resolve_fonts()
         self.setWindowTitle("Agent")
         self.resize(1380, 720)
         self.setMinimumWidth(900)
@@ -3662,7 +3728,11 @@ class AgentWindow(QMainWindow):
         self.input_pill = QFrame()
         self.input_pill.setObjectName("promptRow")
         self.input_pill.setContentsMargins(0, 0, 0, 0)
-        pill_row = zero_layout(QHBoxLayout(self.input_pill))
+        pill_row = QHBoxLayout(self.input_pill)
+        # Inset the contents so the fully rounded ends of the pill never clip
+        # the prompt prefix or the send disc.
+        pill_row.setContentsMargins(14, 4, 6, 4)
+        pill_row.setSpacing(6)
 
         self.prompt_prefix = QLabel("root@agent:~# ")
         self.prompt_prefix.setObjectName("promptPrefix")
@@ -3749,18 +3819,21 @@ class AgentWindow(QMainWindow):
         self.set_status("Stopping…", busy=True)
 
     def _update_send_button(self):
+        # The send control is a filled accent disc, so the glyph is knocked out
+        # in the canvas colour; Stop takes the same shape in danger red.
         if self._processing and self._turn_cancellable:
-            name, color, hover, tip = (
-                "stop", COLOR_DANGER, COLOR_DANGER_HOVER, "Stop (Esc)")
+            name, tip = "stop", "Stop (Esc)"
+            fill, fill_hover = COLOR_DANGER, COLOR_DANGER_HOVER
         else:
-            name, color, hover, tip = (
-                "send", COLOR_TEXT_MID, COLOR_TEXT_HI, "Send (Enter)")
+            name, tip = "send", "Send (Enter)"
+            fill, fill_hover = COLOR_ACCENT, COLOR_ACCENT_HOVER
         btn = self.send_button
         btn._icon_name = name
-        btn._icon_color = color
-        btn._icon_hover = hover
-        btn.setIcon(_svg_icon(name, 13, color))
+        btn._icon_color = COLOR_BG
+        btn._icon_hover = COLOR_BG
+        btn.setIcon(_svg_icon(name, 13, COLOR_BG))
         btn.setToolTip(tip)
+        _circle_style(btn, fill, fill_hover)
 
     def _autogrow_input(self):
         doc = self.input_field.document()
@@ -6115,7 +6188,7 @@ class AgentWindow(QMainWindow):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(COLOR_ACCENT))
         painter.drawEllipse(4, 4, 56, 56)
-        font = QFont("Consolas")
+        font = QFont(FONT_MONO)
         font.setPixelSize(34)
         font.setBold(True)
         painter.setFont(font)

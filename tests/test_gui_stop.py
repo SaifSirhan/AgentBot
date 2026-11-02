@@ -85,13 +85,18 @@ class GuiStopTests(unittest.TestCase):
         self.assertEqual(btn._icon_name, "send")
         self.assertEqual(btn.toolTip(), "Send (Enter)")
         self.assertFalse(self.window._stop_requested)
+        # An accent disc with the glyph knocked out in the canvas colour.
+        self.assertIn(f"background: {g.COLOR_ACCENT}", btn.styleSheet())
+        self.assertEqual(btn._icon_color, g.COLOR_BG)
 
     def test_button_switches_to_stop_while_a_turn_runs(self):
         self._start_processing()
         btn = self.window.send_button
         self.assertEqual(btn._icon_name, "stop")
-        self.assertEqual(btn._icon_color, g.COLOR_DANGER)
         self.assertEqual(btn.toolTip(), "Stop (Esc)")
+        # The red moved from the glyph tint to the disc fill.
+        self.assertIn(f"background: {g.COLOR_DANGER}", btn.styleSheet())
+        self.assertEqual(btn._icon_color, g.COLOR_BG)
 
     def test_clicking_stop_sets_flag_and_event(self):
         self._start_processing()
