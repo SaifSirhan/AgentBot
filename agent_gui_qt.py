@@ -1829,13 +1829,65 @@ def _paste_image_path():
         return os.path.join(base, "AgentMemory", "temp_paste.png")
 
 
+HISTORY_LIMIT = 50
+
+
+class CommandHistory:
+    """Up/Down recall over submitted prompts, with shell semantics.
+
+    `entries` is oldest-first and the cursor sits one past the newest entry
+    while the user types, so Down from the top of a recall returns the draft they
+    had in place instead of dropping it. Consecutive repeats are not stored twice.
+    """
+
+    def __init__(self, limit=HISTORY_LIMIT):
+        self.limit = limit
+        self.entries = []
+        self._index = 0
+        self._draft = ""
+
+    def add(self, text):
+        """Record a submission and drop back to the bottom of the list."""
+        text = (text or "").strip()
+        if not text:
+            return
+        if text != (self.entries[-1] if self.entries else None):
+            self.entries.append(text)
+            if self.limit > 0:
+                del self.entries[:-self.limit]
+        self.reset()
+
+    def reset(self):
+        self._index = len(self.entries)
+        self._draft = ""
+
+    def prev(self, current=""):
+        """One entry older, or None when already at the oldest."""
+        if self._index == 0:
+            return None
+        if self._index == len(self.entries):
+            self._draft = current
+        self._index -= 1
+        return self.entries[self._index]
+
+    def next(self, current=""):
+        """One entry newer, or None when already back at the live prompt."""
+        if self._index >= len(self.entries):
+            return None
+        self._index += 1
+        return self._draft if self._index == len(self.entries) else self.entries[self._index]
+
+
 class TerminalInput(QPlainTextEdit):
-    """Prompt editor with inline ghost completion.
+    """Prompt editor with inline ghost completion and Up/Down history.
 
     Prefix matches paint the missing suffix after the caret, so Right accepts
     by appending it. Subsequence ("fuzzy") matches cannot be appended without
     corrupting the typed query, so they paint the full command as a dim hint
     and Right replaces the prompt with it. Tab cycles either kind.
+
+    Up/Down walk previously submitted prompts, but only from the first or last
+    line so a multi-line draft keeps ordinary cursor movement.
     """
 
     GHOST_OPACITY = 0.6
@@ -1847,6 +1899,7 @@ class TerminalInput(QPlainTextEdit):
         self._matches = []
         self._match_index = 0
         self._replace = False
+        self.history = CommandHistory()
         self.textChanged.connect(lambda: self._refresh_ghost(reset=True))
         self.cursorPositionChanged.connect(
             lambda: self._refresh_ghost(reset=False))
@@ -1930,6 +1983,38 @@ class TerminalInput(QPlainTextEdit):
         else:
             self.insertPlainText(self._ghost)
 
+    def _history_wants(self, key) -> bool:
+        """Take the arrow only when it cannot be moving the caret.
+
+        A multi-line prompt keeps normal cursor movement between its lines, so
+        recall fires only from the first block (Up) or the last (Down).
+        """
+        if not self.history.entries:
+            return False
+        block = self.textCursor().blockNumber()
+        if key == Qt.Key.Key_Up:
+            return block == 0
+        return block == self.document().blockCount() - 1
+
+    def _try_history(self, event) -> bool:
+        """Recall on Up/Down. True once the arrow has been consumed."""
+        key = event.key()
+        if not self._history_wants(key):
+            return False
+        current = self.toPlainText()
+        text = (self.history.prev(current) if key == Qt.Key.Key_Up
+                else self.history.next(current))
+        if text is None:
+            # Nothing left in that direction: fall through to normal movement
+            # rather than beeping at the end of the list.
+            return False
+        self.setPlainText(text)
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.setTextCursor(cursor)
+        event.accept()
+        return True
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Right and self._ghost:
             self._accept_completion()
@@ -1941,6 +2026,16 @@ class TerminalInput(QPlainTextEdit):
                 self._cycle_completion()
             event.accept()
             return
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            if self._try_history(event):
+                return
+        elif (event.text().strip()
+                and not event.modifiers() & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.AltModifier
+                    | Qt.KeyboardModifier.MetaModifier)):
+            # A fresh keystroke abandons whatever was recalled.
+            self.history.reset()
         super().keyPressEvent(event)
 
     # -- context menu ---------------------------------------------------
@@ -4039,6 +4134,8 @@ class AgentWindow(QMainWindow):
         attached = list(self.attachments)
         if not text and not attached:
             return
+        # Every submission joins the prompt history, slash commands included.
+        self.input_field.history.add(text)
 
         # A new command cuts the assistant off mid-sentence and stops the
         # hands-free mic; the reply will re-arm it when the turn finishes.
