@@ -13,9 +13,8 @@ CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 DEFAULTS = {
     "TRIGGERS": [],
     "RAG_AUTO_INDEX_FOLDERS": [
-        "C:\\Users\\USER\\Downloads\\Fire Writing",
-        "C:\\Users\\USER\\Downloads\\AgentBot",
-        "C:\\Users\\USER\\Downloads\\sistem-dc-v2"
+        
+        
         
     ],
     # Where conversation/facts/mood/RAG/state live. Empty = %LOCALAPPDATA%\AgentMemory.
