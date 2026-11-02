@@ -73,7 +73,6 @@ Memory/RAG: ChromaDB, SQLite, Sentence-Transformers
 
 Audio: faster-whisper, Kokoro, openWakeWord
 
-<<<<<<< HEAD
 ```bash
 python agent_gui_qt.py
 ```
@@ -87,8 +86,12 @@ request flows through the system.
 | File | Role |
 | --- | --- |
 | `agent.py` | LLM routing, tool dispatch, and the agent turn loop |
-| `agent_gui_qt.py` | PySide6 desktop UI |
-| `rag_tool.py` | Document indexing and semantic search |
+| `agent_gui_qt.py` | PySide6 Terminal UI |
+| `verification_engine.py` | Anti-hallucination gate |
+| `macro_engine.py` | Self-learning macro generator and runner |
+| `prompt_router.py` | Dynamic token-saving prompt router |
+| `rag_tool.py` | Document indexing and hybrid search |
+| `skills/` | Progressive Disclosure tool manuals |
 | `memory.py` | Persistent user facts |
 | `telegram_user.py` | Telethon user-account bridge |
 | `scheduler.py` | Reminders and scheduled tasks |
@@ -98,16 +101,3 @@ request flows through the system.
 ## License
 
 MIT — see [LICENSE](LICENSE).
-=======
-Project layout
-File	Role
-agent.py	LLM routing, tool dispatch, and the agent turn loop
-agent_gui_qt.py	PySide6 Terminal UI
-verification_engine.py	Anti-hallucination gate
-macro_engine.py	Self-learning macro generator and runner
-prompt_router.py	Dynamic token-saving prompt router
-rag_tool.py	Document indexing and hybrid search
-skills/	Progressive Disclosure tool manuals
-License
-MIT — see LICENSE.
->>>>>>> ba7ec6939597f4f10dd17f6675e89f111a25a170
