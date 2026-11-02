@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from threading import Event
 
 from verification_engine import (
-    ERROR_REPLY,
+    ERROR_REPLY,  # noqa: F401  re-export: agent.py, tests/test_provider_stop.py, tests/test_verification_turn.py read verification_adapter.ERROR_REPLY
     ToolResult,
     ToolSpec,
     VerificationEngine,
