@@ -77,7 +77,7 @@ are never requested from outside; the pet chooses them.
 ```
 assets/pet/
   frames/
-    idle/       idle_1.png  idle_2.png  idle_1_blink.png
+    idle/       idle_1.png  idle_1_blink.png
     walking/    walking_1.png … walking_4.png  walking_1_blink.png
     flying/     flying_1.png … flying_3.png   flying_1_blink.png
     thinking/   thinking_1.png thinking_2.png thinking_1_blink.png
@@ -86,7 +86,7 @@ assets/pet/
     sleeping/   sleeping_1.png
 ```
 
-22 files. Frame lists are discovered by globbing `<pose>_<n>.png` in sorted
+21 files. Frame lists are discovered by globbing `<pose>_<n>.png` in sorted
 numeric order; blink twins are excluded from the cycle.
 
 Timing is a code table, mirroring how `ReactorHud._STYLES` already works, so
@@ -94,13 +94,20 @@ there is no new configuration surface:
 
 | Pose | Frames | fps | Blink twin |
 |---|---|---|---|
-| idle | 2 | 1.5 | yes |
+| idle | 1 | — | yes |
 | walking | 4 | 6 | yes |
 | flying | 3 | 8 | yes |
 | thinking | 2 | 2 | yes |
 | reading | 2 | 2 | yes |
 | speaking | 2 | 6 | yes |
 | sleeping | 1 | — | no |
+
+**Amended at approval.** `idle_2` was cut. A two-frame idle at 1.5 fps is a
+1.5 s hard swap between near-identical drawings, which reads as a stutter rather
+than as breathing; the bob already carries the breathing. Idle is one pose plus
+its blink twin. `flying_1_blink` was kept as generated even though it matches
+pose 2's wing angle rather than pose 1's: at 8 fps the 0.18 s blink is inside one
+flap, and regenerating it produced a standing wing-raise, which is worse.
 
 **Migration.** The seven existing flat PNGs in `assets/pet/` become generation
 references only. Once `frames/` is approved, the loader reads `frames/`
@@ -122,6 +129,20 @@ Measured on batch 1 after head-width normalisation: mean head width idle 108.7 p
 against walk 109.5 px, a 0.8% difference, with every frame's feet landing on rows
 284–285.
 
+**Amended during batch 2.** Batch 1 was in fact built with a per-sheet
+*bounding-box* fit, and that head agreement was a property of two similar sheets,
+not of the method. With props in the frame — a laptop, a book, sound waves — and
+with horizontal poses, bbox fit put `reading_1` at 303 px on a 286 px canvas and
+clipped the crest. Normalising each frame by its own head was worse: a raised
+wing sits in the head band, so `flying_3` measured 121 against its siblings'
+145–217 and came out 40% too big. The rule is now **one scale per sheet** — the
+generator drew every pose of a cycle at one scale inside one image, so a
+per-frame scale would reintroduce the wobble — and the head *median* of a sheet
+is what matches that sheet to the others. One global target of 86.7 px head
+width, the largest that lets all 21 frames fit the canvas, re-cuts batch 1 about
+15% smaller than it shipped so every pose agrees. Feet still land on rows
+284–285.
+
 The build step is:
 
 1. Matte the key field to alpha (flood fill from the edges, feathered — the
@@ -136,7 +157,14 @@ The build step is:
    **300×300** canvas, horizontally centred, with the bbox bottom edge resting on
    a fixed baseline at y = 286. Feet-anchored, so legs and wings move while the
    bird stays planted.
-5. Record the baseline offset in the frame table.
+5. Clamp every visible pixel to the chat canvas colour as a per-channel floor.
+   The pet composites `SourceOver` at 0.85 opacity, so a pixel darker than
+   `#0E1116` pulls the background down at *any* alpha — the "adds light, never
+   darkens" rule can only hold if no such pixel exists. The generated feather
+   outlines broke it on 0.07–1.8% of each frame's visible pixels, some fully
+   black. Clamping costs nothing visible, because those pixels sit on a canvas
+   that is already that dark.
+6. Record the baseline offset in the frame table.
 
 `PET_HEIGHT` (190) then scales the common canvas down at draw time, so every
 pose occupies the same footprint and the corner anchor does not shift when the

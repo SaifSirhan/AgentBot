@@ -17,6 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np  # noqa: E402
+from PIL import Image  # noqa: E402
 from PySide6.QtCore import QPoint, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget  # noqa: E402
@@ -24,12 +25,14 @@ from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget  # noqa: E402
 from audio_bus import AudioBus  # noqa: E402
 from hud_core import (  # noqa: E402
     PARTICLE_CAP,
-    PET_ASSET_DIR,
     PET_BLINK_DURATION,
     PET_BLINK_GAP,
     PET_BOB_AMPLITUDE,
+    PET_CANVAS,
+    PET_FPS,
+    PET_FRAMES_DIR,
     PET_MARGIN,
-    PET_STATES,
+    PET_POSES,
     PET_WANDER_AFTER,
     PET_WANDER_DURATION,
     Particle,
@@ -39,16 +42,29 @@ from hud_core import (  # noqa: E402
     SpikeDetector,
     burst_count,
     pet_bob,
+    pet_frame_index,
 )
 
 STATES = (
     "IDLE", "LISTENING", "CONTINUOUS", "THINKING", "SPEAKING", "ERROR")
-# Every sprite committed under assets/pet/. The five the GUI can ask for plus
-# blinking and walking, which the pet layers over its own idle time.
-SHIPPED_PET_ART = ("idle", "thinking", "sleeping", "speaking", "reading",
-                   "blinking", "walking")
+# Every frame committed under assets/pet/frames/: the cycle frames per pose, and
+# the poses that ship a blink twin. This is the table the permanent asset guard
+# reads, so adding a pose to the engine without adding its art fails there
+# rather than showing up as a blank corner at runtime.
+SHIPPED_PET_FRAMES = {
+    "idle": [1],
+    "walking": [1, 2, 3, 4],
+    "flying": [1, 2, 3],
+    "thinking": [1, 2],
+    "reading": [1, 2],
+    "speaking": [1, 2],
+    "sleeping": [1],
+}
+SHIPPED_PET_TWINS = ("idle", "walking", "flying", "thinking", "reading",
+                     "speaking")
 HAS_PET_ART = all(
-    (PET_ASSET_DIR / ("%s.png" % name)).is_file() for name in SHIPPED_PET_ART)
+    (PET_FRAMES_DIR / pose / ("%s_%d.png" % (pose, number))).is_file()
+    for pose, numbers in SHIPPED_PET_FRAMES.items() for number in numbers)
 
 
 class _CanvasParent(QWidget):
@@ -442,25 +458,38 @@ class HolographicLayerTests(unittest.TestCase):
             Qt.WidgetAttribute.WA_TransparentForMouseEvents))
 
 
-def _write_sprite(asset_dir, name):
-    """One solid opaque PNG at a known size, so a test can see exactly where it
-    landed. Returns the path."""
-    pixmap = QPixmap(100, 100)
+def _write_frame(frames_dir, pose, key):
+    """One solid opaque PNG at the shipped canvas size, so a test can see exactly
+    where it landed. Returns the path."""
+    pixmap = QPixmap(PET_CANVAS, PET_CANVAS)
     pixmap.fill(QColor("#25F2FF"))
-    path = Path(asset_dir) / ("%s.png" % name)
+    path = Path(frames_dir) / pose / ("%s_%s.png" % (pose, key))
+    path.parent.mkdir(parents=True, exist_ok=True)
     pixmap.save(str(path), "PNG")
     return path
 
 
-def _make_sprite_dir(root, *names):
-    asset_dir = Path(root)
-    for name in names:
-        _write_sprite(asset_dir, name)
-    return asset_dir
+def _make_sprite_dir(root, *specs):
+    """An assets dir whose frames/ tree holds `specs`, each written "pose:key"."""
+    frames_dir = Path(root) / "frames"
+    for spec in specs:
+        pose, key = spec.split(":")
+        _write_frame(frames_dir, pose, key)
+    return Path(root)
+
+
+def _all_pose_specs():
+    """Every pose with two cycle frames and a twin, so playback and blink always
+    have something to find in a synthetic fixture. Sleeping is the exception the
+    shipped set also has: one frame, eyes already shut, no twin."""
+    specs = ["%s:%s" % (pose, key) for pose in PET_POSES
+             for key in ("1", "2", "1_blink")]
+    return [spec for spec in specs if not spec.startswith("sleeping:")] + \
+           ["sleeping:1"]
 
 
 class PetSpriteTests(unittest.TestCase):
-    """State selection and the missing-file fallback, against synthetic art."""
+    """Pose selection, frame discovery and the fallbacks, against synthetic art."""
 
     @classmethod
     def setUpClass(cls):
@@ -469,7 +498,8 @@ class PetSpriteTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.asset_dir = _make_sprite_dir(
-            self._tmp.name, "idle", "thinking")
+            self._tmp.name, "idle:1", "idle:1_blink", "thinking:1",
+            "thinking:2")
         self.pet = PetWidget(parent=None, asset_dir=self.asset_dir)
         self.pet.resize(400, 400)
 
@@ -478,38 +508,46 @@ class PetSpriteTests(unittest.TestCase):
         self._tmp.cleanup()
         self.app.processEvents()
 
-    def test_the_pet_state_set_matches_the_committed_sprites(self):
-        self.assertEqual(PET_STATES, SHIPPED_PET_ART)
+    def test_the_pose_set_matches_the_committed_frames(self):
+        self.assertEqual(sorted(PET_POSES), sorted(SHIPPED_PET_FRAMES))
 
-    def test_a_named_state_loads_its_sprite(self):
+    def test_a_named_pose_loads_its_first_frame(self):
         self.pet.set_state("thinking")
         self.assertEqual(self.pet.pet_state, "thinking")
+        self.assertEqual(self.pet.frame_index, 0)
         self.assertIsNotNone(self.pet.sprite)
 
-    def test_state_names_are_case_insensitive(self):
+    def test_pose_names_are_case_insensitive(self):
         self.pet.set_state("  THINKING ")
         self.assertEqual(self.pet.pet_state, "thinking")
 
-    def test_unknown_state_falls_back_to_idle(self):
+    def test_unknown_pose_falls_back_to_idle(self):
         self.pet.set_state("dancing")
         self.assertEqual(self.pet.pet_state, "idle")
 
-    def test_a_missing_sprite_falls_back_to_idle(self):
-        # sleeping.png was never written to this fixture directory.
+    def test_blinking_is_no_longer_a_pose_name(self):
+        """The old model drew blinking.png as a state. It is a flag now, so the
+        name means nothing to the loader and falls back like any typo."""
+        self.pet.set_state("blinking")
+        self.assertEqual(self.pet.pet_state, "idle")
+        self.assertEqual(self.pet.requested_state, "idle")
+
+    def test_a_missing_pose_directory_falls_back_to_idle(self):
+        # thinking/ was never written to this fixture directory.
         self.pet.set_state("sleeping")
         self.assertEqual(self.pet.pet_state, "idle")
         self.assertEqual(self.pet.requested_state, "sleeping")
 
-    def test_a_new_sprite_is_picked_up_without_a_code_change(self):
-        """The promise behind the fallback: a state name already in PET_STATES
-        draws idle while its file is absent and resolves to it on its own once
-        the file lands. Only a new PetWidget instance is needed, because the
-        missing-file result is cached for the life of the widget."""
+    def test_a_new_frame_is_picked_up_without_a_code_change(self):
+        """The promise behind the fallback: a pose the engine knows draws idle
+        while its art is absent and resolves on its own once the file lands. Only
+        a new PetWidget instance is needed, because discovery is cached for the
+        life of the widget."""
         self.pet.set_state("speaking")
         self.assertEqual(self.pet.pet_state, "idle")
         self.assertEqual(self.pet.requested_state, "speaking")
 
-        _write_sprite(self.asset_dir, "speaking")
+        _write_frame(self.asset_dir / "frames", "speaking", 1)
         fresh = PetWidget(parent=None, asset_dir=self.asset_dir)
         try:
             fresh.set_state("speaking")
@@ -527,23 +565,132 @@ class PetSpriteTests(unittest.TestCase):
         self.assertIsNone(pet.sprite)
         pet.deleteLater()
 
+    def test_frame_discovery_is_numeric_and_excludes_the_twin(self):
+        """Sorting by name would put walking_10 before walking_2, and the blink
+        twin is not part of the cycle."""
+        deep = _make_sprite_dir(tempfile.mkdtemp(), *(
+            ["walking:%d" % n for n in (1, 2, 3, 4, 10, 11)]
+            + ["walking:1_blink"]))
+        pet = PetWidget(parent=None, asset_dir=deep)
+        try:
+            self.assertEqual(pet._cycle("walking"), [1, 2, 3, 4, 10, 11])
+            self.assertTrue(pet._twin("walking"))
+            self.assertFalse(pet._twin("idle"))
+        finally:
+            pet.deleteLater()
+
     def test_sprites_are_scaled_to_the_pet_height(self):
         sprite = self.pet.sprite
         dpr = sprite.devicePixelRatio() or 1.0
         self.assertAlmostEqual(sprite.height() / dpr, self.pet.HEIGHT,
                                places=3)
 
-    @unittest.skipUnless(HAS_PET_ART, "assets/pet/*.png not present")
-    def test_the_shipped_art_loads_for_every_committed_sprite(self):
-        pet = PetWidget(parent=None, asset_dir=PET_ASSET_DIR)
+    @unittest.skipUnless(HAS_PET_ART, "assets/pet/frames/ not present")
+    def test_the_shipped_art_loads_for_every_committed_pose(self):
+        pet = PetWidget(parent=None, asset_dir=PET_FRAMES_DIR.parent)
         try:
-            for state in SHIPPED_PET_ART:
-                with self.subTest(state=state):
-                    pet.set_state(state)
-                    self.assertEqual(pet.pet_state, state)
-                    self.assertIsNotNone(pet.sprite)
+            for pose, numbers in sorted(SHIPPED_PET_FRAMES.items()):
+                with self.subTest(pose=pose):
+                    pet.set_state(pose)
+                    for index in range(len(numbers)):
+                        pet._frame_index = index
+                        pet._refresh()
+                        self.assertEqual(pet.pet_state, pose)
+                        self.assertIsNotNone(pet.sprite)
         finally:
             pet.deleteLater()
+
+
+class PetAssetGuardTests(unittest.TestCase):
+    """Permanent, and deliberately not skippable when a file is missing.
+
+    Twice in this work art arrived that looked fine and was not: JPEG sources with
+    no alpha channel at all, then a generator that painted the transparency
+    checkerboard into the pixels. Both pass a glance at a contact sheet. This is
+    the check that fails loudly instead.
+    """
+
+    def test_every_declared_frame_exists_and_is_true_alpha(self):
+        declared = 0
+        for pose, numbers in sorted(SHIPPED_PET_FRAMES.items()):
+            keys = list(numbers)
+            if pose in SHIPPED_PET_TWINS:
+                keys.append("1_blink")
+            for key in keys:
+                path = PET_FRAMES_DIR / pose / ("%s_%s.png" % (pose, key))
+                declared += 1
+                self.assertTrue(path.is_file(), "%s is missing" % path)
+                image = Image.open(path)
+                self.assertEqual(image.mode, "RGBA",
+                                 "%s is not RGBA" % path.name)
+                self.assertEqual(image.size, (PET_CANVAS, PET_CANVAS),
+                                 "%s is not on the %d px shared canvas"
+                                 % (path.name, PET_CANVAS))
+                alpha = np.asarray(image.getchannel("A"))
+                self.assertGreater((alpha == 0).sum(), 0,
+                                   "%s has no transparent pixel" % path.name)
+                self.assertGreater((alpha > 8).sum(), 1000,
+                                   "%s is nearly empty" % path.name)
+        # 15 cycle frames plus 6 blink twins.
+        self.assertEqual(declared, 21, "the shipped set changed size")
+
+    def test_no_frame_pixel_can_darken_the_chat_canvas(self):
+        """The pet composites SourceOver at 0.85 opacity, so a pixel darker than
+        #0E1116 pulls the background down at *any* alpha — the only way the
+        invariant holds is for no such pixel to exist. That includes fully
+        transparent ones: QPixmap's smooth downscale averages RGB without
+        premultiplying, so black under a transparent pixel bleeds into the
+        feathered edge and lands on screen. The generated outlines broke it on up
+        to 1.8% of a frame; the build step clamps every channel."""
+        floor = np.array((0x0E, 0x11, 0x16), dtype=np.int16)
+        for path in sorted(PET_FRAMES_DIR.glob("*/*.png")):
+            pixels = np.asarray(Image.open(path).convert("RGBA")).astype(np.int16)
+            darker = (pixels[:, :, :3] < floor).any(axis=2)
+            self.assertFalse(darker.any(),
+                             "%s has %d pixel(s) darker than the canvas"
+                             % (path.name, int(darker.sum())))
+
+    def test_a_single_frame_pose_declares_no_cycle_rate(self):
+        """An fps for a one-frame pose is a lie in the table, and a missing fps
+        for a cycling pose silently freezes it."""
+        for pose, numbers in sorted(SHIPPED_PET_FRAMES.items()):
+            with self.subTest(pose=pose):
+                if len(numbers) < 2:
+                    self.assertIsNone(PET_FPS[pose])
+                else:
+                    self.assertIsNotNone(PET_FPS[pose])
+                    self.assertGreater(PET_FPS[pose], 0.0)
+
+    def test_the_legacy_flat_sprites_are_gone(self):
+        """Spec 4: the loader reads frames/ exclusively and the flat PNGs leave in
+        the same commit, so there is never a second source of truth."""
+        strays = sorted(p.name for p in PET_FRAMES_DIR.parent.glob("*.png"))
+        self.assertEqual(strays, [])
+
+
+class PetPlaybackTests(unittest.TestCase):
+    """The frame clock: pure maths, no Qt, no wall time."""
+
+    def test_a_one_frame_pose_always_shows_frame_zero(self):
+        for fps in (None, 6.0):
+            with self.subTest(fps=fps):
+                for elapsed in (0.0, 0.5, 4.0, 60.0):
+                    self.assertEqual(pet_frame_index(elapsed, fps, 1), 0)
+
+    def test_frames_advance_at_the_declared_rate_and_wrap(self):
+        # walking is 6 fps over 4 frames, so one cycle lasts two thirds of a
+        # second: at the HUD's 30 FPS tick each frame holds for five ticks.
+        self.assertEqual([pet_frame_index(t * 0.1, 6.0, 4) for t in range(9)],
+                         [0, 0, 1, 1, 2, 3, 3, 0, 0])
+
+    def test_negative_elapsed_does_not_index_backwards(self):
+        self.assertEqual(pet_frame_index(-5.0, 6.0, 4), 0)
+
+    def test_the_pose_table_matches_the_spec(self):
+        self.assertEqual(PET_FPS, {"idle": None, "walking": 6.0,
+                                   "flying": 8.0, "thinking": 2.0,
+                                   "reading": 2.0, "speaking": 6.0,
+                                   "sleeping": None})
 
 
 class PetPaintTests(unittest.TestCase):
@@ -555,7 +702,7 @@ class PetPaintTests(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.asset_dir = _make_sprite_dir(self._tmp.name, "idle")
+        self.asset_dir = _make_sprite_dir(self._tmp.name, "idle:1")
         self.pet = PetWidget(parent=None, asset_dir=self.asset_dir)
         self.pet.resize(400, 400)
         self.pet.set_state("idle")
@@ -642,28 +789,52 @@ class PetPaintTests(unittest.TestCase):
             parent.deleteLater()
             self.app.processEvents()
 
-    @unittest.skipUnless(HAS_PET_ART, "assets/pet/*.png not present")
+    @unittest.skipUnless(HAS_PET_ART, "assets/pet/frames/ not present")
     def test_the_shipped_art_does_not_darken_the_holographic_canvas(self):
-        """The reactor layers are light-only. The falcon is not a glow, so this
-        is measured rather than assumed: every sprite is sampled over #0E1116
-        and no composited pixel may fall below that floor."""
-        pet = PetWidget(parent=None, asset_dir=PET_ASSET_DIR)
+        """The reactor layers are light-only, and the pet is not a glow.
+
+        The strict form — no pixel darker than the canvas, ever — is not
+        achievable for a feathered sprite, and that is measured, not assumed:
+        QPixmap premultiplies before it scales, so a transparent pixel carries no
+        colour at all and a filtered edge pixel arrives as alpha 4-13 with a
+        near-black colour. Painting through SourceOver then blends that black in,
+        and no clamp on the source file can prevent it (filling the transparent
+        RGB was tried; premultiplication discards it). Measured worst case over
+        the shipped set is 2 points of 765 on fewer than 60 pixels of a frame.
+
+        What must never happen is a hole: a CompositionMode_Source fill or an
+        opaque clear, which paints large areas at or near zero. So the bound is
+        the floor minus a 3-point tolerance, and the sprite's own pixels are held
+        to the strict rule separately by the asset guard.
+        """
+        tolerance = 3
+        pet = PetWidget(parent=None, asset_dir=PET_FRAMES_DIR.parent)
         pet.resize(400, 400)
         floor = 0x0E + 0x11 + 0x16
         try:
-            for state in SHIPPED_PET_ART:
-                with self.subTest(state=state):
-                    pet.set_state(state)
-                    canvas = QImage(400, 400, QImage.Format.Format_RGB32)
-                    canvas.fill(QColor("#0E1116"))
-                    pet._paint(QPainter(canvas))
-                    for y in range(0, 400, 3):
-                        for x in range(0, 400, 3):
-                            colour = canvas.pixelColor(x, y)
-                            self.assertGreaterEqual(
-                                colour.red() + colour.green() + colour.blue(),
-                                floor,
-                                "pixel (%d, %d) was darkened" % (x, y))
+            for pose, numbers in sorted(SHIPPED_PET_FRAMES.items()):
+                keys = list(numbers)
+                if pose in SHIPPED_PET_TWINS:
+                    keys.append("1_blink")
+                for key in keys:
+                    with self.subTest(frame="%s_%s" % (pose, key)):
+                        pet.set_state(pose)
+                        pet._blinking = key == "1_blink"
+                        pet._frame_index = (0 if pet._blinking
+                                            else numbers.index(key))
+                        pet._refresh()
+                        self.assertEqual(pet.pet_state, pose)
+                        canvas = QImage(400, 400, QImage.Format.Format_RGB32)
+                        canvas.fill(QColor("#0E1116"))
+                        pet._paint(QPainter(canvas))
+                        for y in range(0, 400, 3):
+                            for x in range(0, 400, 3):
+                                colour = canvas.pixelColor(x, y)
+                                self.assertGreaterEqual(
+                                    colour.red() + colour.green()
+                                    + colour.blue(),
+                                    floor - tolerance,
+                                    "pixel (%d, %d) was darkened" % (x, y))
         finally:
             pet.deleteLater()
 
@@ -677,7 +848,7 @@ class PetAnimationTests(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.asset_dir = _make_sprite_dir(self._tmp.name, *PET_STATES)
+        self.asset_dir = _make_sprite_dir(self._tmp.name, *_all_pose_specs())
         self.bus = AudioBus()
         self.hud = ReactorHud(bus=self.bus)
         self.pet = PetWidget(parent=self.hud, asset_dir=self.asset_dir)
@@ -747,7 +918,7 @@ class PetAnimationTests(unittest.TestCase):
 
 
 class PetBehaviourTests(unittest.TestCase):
-    """Blink and wander: idle-only habits driven off the HUD's tick seconds.
+    """Cycle playback, blink and wander — all driven off the HUD's tick seconds.
 
     A fixed rng and an explicit `advance(dt)` keep these deterministic — no
     wall clock and no real timer is involved.
@@ -759,7 +930,7 @@ class PetBehaviourTests(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.asset_dir = _make_sprite_dir(self._tmp.name, *PET_STATES)
+        self.asset_dir = _make_sprite_dir(self._tmp.name, *_all_pose_specs())
         self.pet = PetWidget(parent=None, asset_dir=self.asset_dir,
                              rng=random.Random(11))
         self.pet.resize(400, 400)
@@ -769,19 +940,79 @@ class PetBehaviourTests(unittest.TestCase):
         self._tmp.cleanup()
         self.app.processEvents()
 
+    def _make_pet(self, seed=5):
+        pet = PetWidget(parent=None, asset_dir=self.asset_dir,
+                        rng=random.Random(seed))
+        pet.resize(400, 400)
+        return pet
+
     def _advance(self, pet, seconds, step=0.1):
         for _tick in range(int(round(seconds / step))):
             pet.advance(step)
 
+    def _blinked_within(self, pet, seconds, step=0.1):
+        """Whether a blink happened at all, sampled every tick. A blink lasts
+        0.18 s, so a single read at the end of a run can land after it left."""
+        blinked = False
+        for _tick in range(int(round(seconds / step))):
+            pet.advance(step)
+            blinked = blinked or pet.blinking
+        return blinked
+
+    # -- playback --------------------------------------------------------
+    def test_a_pose_change_rewinds_the_cycle(self):
+        self.pet.set_state("walking")
+        self._advance(self.pet, 1.0)
+        self.assertNotEqual(self.pet.frame_index, 0)
+        self.pet.set_state("thinking")
+        self.assertEqual(self.pet.frame_index, 0)
+
+    def test_the_cycle_steps_through_its_frames_while_playing(self):
+        pet = self._make_pet()
+        pet.set_state("walking")          # 6 fps over 2 fixture frames
+        seen = set()
+        for _tick in range(20):           # 2 s, well past one 1/3 s cycle
+            pet.advance(0.1)
+            seen.add(pet.frame_index)
+        self.assertEqual(seen, {0, 1}, "the walking cycle never moved")
+
+    def test_a_single_frame_pose_holds_its_one_frame(self):
+        pet = self._make_pet()
+        pet.set_state("idle")             # idle ships no cycle rate
+        self._advance(pet, 5.0)
+        self.assertEqual(pet.frame_index, 0)
+
+    def test_a_blink_freezes_the_cycle_and_draws_the_twin(self):
+        pet = self._make_pet()
+        pet.set_state("walking")
+        self._advance(pet, 0.5)
+        frozen = pet.frame_index
+        base = pet.sprite
+        self.assertNotEqual(frozen, 0)
+        pet._blinking = True
+        pet._blink_time = 0.0
+        pet.advance(0.1)
+        self.assertTrue(pet.blinking)
+        self.assertEqual(pet.frame_index, frozen, "the cycle moved under a blink")
+        self.assertIsNot(pet.sprite, base, "the blink twin was not swapped in")
+        pet.advance(0.1)                  # 0.2 s >= 0.18 s ends it
+        self.assertFalse(pet.blinking)
+        self.assertEqual(pet.frame_index, frozen)
+        self.assertIs(pet.sprite, base, "the base frame did not come back")
+
+    # -- blink -----------------------------------------------------------
     def test_blink_lights_for_its_duration_then_returns(self):
         self.assertEqual(self.pet.pet_state, "idle")
+        self.assertFalse(self.pet.blinking)
         self._advance(self.pet, self.pet._next_blink - 0.2)
-        self.assertEqual(self.pet.pet_state, "idle", "blinked early")
+        self.assertFalse(self.pet.blinking, "blinked early")
         self._advance(self.pet, 0.3)
-        self.assertEqual(self.pet.pet_state, "blinking")
+        self.assertTrue(self.pet.blinking)
         self.assertEqual(self.pet.override, "blinking")
-        self._advance(self.pet, PET_BLINK_DURATION)
-        self.assertEqual(self.pet.pet_state, "idle")
+        self.assertEqual(self.pet.pet_state, "idle",
+                         "a blink changed the pose")
+        self._advance(self.pet, PET_BLINK_DURATION + 0.1)
+        self.assertFalse(self.pet.blinking)
         self.assertIsNone(self.pet.override)
 
     def test_the_first_blink_is_due_within_the_declared_gap(self):
@@ -796,23 +1027,35 @@ class PetBehaviourTests(unittest.TestCase):
             pet.deleteLater()
         self.app.processEvents()
 
-    def test_blinks_only_fire_while_the_pet_is_idle(self):
-        for state in ("reading", "speaking", "sleeping", "thinking"):
-            with self.subTest(state=state):
-                pet = PetWidget(parent=None, asset_dir=self.asset_dir,
-                                rng=random.Random(5))
-                pet.set_state(state)
-                self._advance(pet, 30.0)
-                self.assertEqual(pet.pet_state, state)
-                self.assertIsNone(pet.override)
-                self.assertEqual(pet.idle_time, 0.0,
-                                 "idle clock ran while not idle")
+    def test_blinks_fire_in_every_awake_pose(self):
+        """Blinking is awake behaviour, so it layers on whatever the pet is
+        doing — a thinking pet blinks too."""
+        for pose in ("idle", "thinking", "reading", "speaking", "walking",
+                     "flying"):
+            with self.subTest(pose=pose):
+                pet = self._make_pet()
+                pet.set_state(pose)
+                self.assertTrue(self._blinked_within(pet, 20.0),
+                                "the pet never blinked while %s" % pose)
+                self.assertEqual(pet.pet_state, pose)
                 pet.deleteLater()
+
+    def test_a_pose_without_a_blink_twin_simply_does_not_blink(self):
+        """Spec 8: an absent twin means no blink for that pose, not a swap to
+        something else — the pet must not flicker to idle every few seconds."""
+        pet = self._make_pet()
+        pet.set_state("sleeping")
+        self.assertFalse(pet._twin("sleeping"))
+        self._advance(pet, 30.0)
+        self.assertFalse(pet.blinking)
+        self.assertEqual(pet.pet_state, "sleeping")
+        pet.deleteLater()
 
     def test_a_state_change_drops_an_in_flight_blink(self):
         self._advance(self.pet, self.pet._next_blink + 0.1)
-        self.assertEqual(self.pet.pet_state, "blinking")
+        self.assertTrue(self.pet.blinking)
         self.pet.set_state("speaking")
+        self.assertFalse(self.pet.blinking)
         self.assertEqual(self.pet.pet_state, "speaking")
         self.assertIsNone(self.pet.override)
 
@@ -836,14 +1079,16 @@ class PetBehaviourTests(unittest.TestCase):
             quiet.deleteLater()
             noisy.deleteLater()
 
+    # -- wander ----------------------------------------------------------
     def test_the_pet_wanders_after_a_long_idle_and_returns(self):
         self._advance(self.pet, PET_WANDER_AFTER + 0.1)
         self.assertEqual(self.pet.override, "walking")
-        self.assertEqual(self.pet.pet_state, "walking")
+        self.assertEqual(self.pet.pose, "walking")
+        self.assertEqual(self.pet.requested_state, "idle")
         # A margin, not the exact duration: 0.1 s added a step at a time sums
         # to just under 12.0, and the wander ends on the tick that clears it.
         self._advance(self.pet, PET_WANDER_DURATION + 0.5)
-        self.assertEqual(self.pet.pet_state, "idle")
+        self.assertEqual(self.pet.pose, "idle")
         self.assertIsNone(self.pet.override)
 
     def test_walking_does_not_restart_on_the_tick_after_it_ends(self):
@@ -852,7 +1097,7 @@ class PetBehaviourTests(unittest.TestCase):
         self.assertLess(self.pet.idle_time, 1.0,
                         "the idle clock was not reset after the wander")
         self._advance(self.pet, 2.0)
-        self.assertNotEqual(self.pet.pet_state, "walking")
+        self.assertNotEqual(self.pet.pose, "walking")
 
     def test_the_hud_tick_is_what_drives_the_idle_behaviours(self):
         """advance() is called from ReactorHud._tick, not from a timer of the
@@ -871,15 +1116,17 @@ class PetBehaviourTests(unittest.TestCase):
         try:
             clock = [1000.0]
             hud._last_tick = clock[0]
-            seen = set()
+            blinked = False
+            poses = set()
             with mock.patch("hud_core.time.monotonic", lambda: clock[0]):
                 for _tick in range(100):        # 10 s of driven idle
                     clock[0] += 0.1
                     hud._tick()
-                    seen.add(pet.pet_state)
-            self.assertIn("blinking", seen,
-                          "the HUD tick never blinked the pet, saw %s" % seen)
-            self.assertIn("idle", seen)
+                    poses.add(pet.pet_state)
+                    blinked = blinked or pet.blinking
+            self.assertTrue(blinked,
+                            "the HUD tick never blinked the pet, saw %s" % poses)
+            self.assertIn("idle", poses)
         finally:
             pet.deleteLater()
             hud.deleteLater()

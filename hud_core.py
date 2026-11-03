@@ -56,14 +56,24 @@ TAU = 2.0 * math.pi
 
 # -- desktop pet -------------------------------------------------------
 PET_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "pet"
-# idle / thinking / sleeping / speaking / reading are what the GUI asks for.
-# blinking and walking are never requested from outside: the pet layers them
-# over its own idle time. They are listed here so they stay loadable names.
-PET_STATES = ("idle", "thinking", "sleeping", "speaking", "reading",
-              "blinking", "walking")
+# One directory per pose under frames/, holding <pose>_<n>.png cycle frames plus
+# an optional <pose>_1_blink.png twin. `blinking` used to be a state name; under
+# the animation engine it is a flag layered on a pose, so it is not a pose.
+PET_FRAMES_DIR = PET_ASSET_DIR / "frames"
+PET_POSES = ("idle", "thinking", "sleeping", "speaking", "reading",
+             "walking", "flying")
 PET_FALLBACK = "idle"
+PET_BLINK_KEY = "1_blink"
+# Cycles per second. None means the pose ships a single frame, so there is
+# nothing to advance and the pet simply holds it.
+PET_FPS = {"idle": None, "walking": 6.0, "flying": 8.0, "thinking": 2.0,
+           "reading": 2.0, "speaking": 6.0, "sleeping": None}
+# The offline alignment step builds every frame onto this canvas with the feet on
+# a fixed baseline, so the pose can change without the pet shifting. The asset
+# guard checks it: a frame at another size would move the bird mid-cycle.
+PET_CANVAS = 300
 # Idle-only micro-behaviours. Both ride the HUD's tick, so neither needs a
-# timer of its own, and both are dropped the instant another state is asked for.
+# timer of its own.
 PET_BLINK_DURATION = 0.18
 PET_BLINK_GAP = (4.0, 7.0)
 PET_WANDER_AFTER = 90.0
@@ -85,6 +95,17 @@ def pet_bob(elapsed: float, rate: float = PET_BOB_RATE,
     test can drive it from a fake tick and get an exact number.
     """
     return math.sin(max(0.0, float(elapsed)) * rate) * amplitude
+
+
+def pet_frame_index(elapsed: float, fps, frame_count: int) -> int:
+    """Which frame of a cycle shows `elapsed` seconds in.
+
+    Pure and clock-free for the same reason as `pet_bob`. A pose with no fps, or
+    with one frame, always shows frame 0 rather than dividing by zero.
+    """
+    if fps is None or frame_count < 2:
+        return 0
+    return int(max(0.0, float(elapsed)) * float(fps)) % int(frame_count)
 
 
 @dataclass
@@ -360,9 +381,9 @@ class ReactorHud(QWidget):
             pet.set_bob(self._bob)
 
     def set_pet_state(self, state: str) -> None:
-        """idle / thinking / sleeping. Unknown names and missing files -> idle."""
+        """One of PET_POSES. Unknown names and missing art fall back to idle."""
         name = str(state or "").strip().lower()
-        if name not in PET_STATES:
+        if name not in PET_POSES:
             name = PET_FALLBACK
         self._pet_requested = name
         if self._pet is not None:
@@ -795,9 +816,9 @@ class PetWidget(QWidget):
     `WA_TransparentForMouseEvents` makes that doubly true.
 
     It carries no timer. The HUD's existing tick owns the animation clock and
-    pushes each frame's bob in through `set_bob` and each frame's idle time in
-    through `advance`, which is what blinks and wanders the pet while it is
-    genuinely idle.
+    pushes each frame's bob in through `set_bob` and each frame's elapsed time in
+    through `advance`, which is what plays the pose cycles, blinks the pet
+    mid-stride and wanders it while it is genuinely idle.
     """
 
     HEIGHT = PET_HEIGHT
@@ -810,16 +831,24 @@ class PetWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAutoFillBackground(False)
-        self._asset_dir = Path(asset_dir)
+        self._frames_dir = Path(asset_dir) / "frames"
         self._opacity = max(0.0, min(1.0, float(opacity)))
         self._rng = rng if rng is not None else random.Random()
         self._requested = None
-        self._override = None
+        self._pose = None
+        self._pose_elapsed = 0.0
+        self._frame_index = 0
+        self._blinking = False
+        self._blink_time = 0.0
+        self._wandering = False
+        self._wander_time = 0.0
         self._idle_time = 0.0
-        self._override_time = 0.0
         self._next_blink = 0.0
-        self._name = None
         self._bob = 0.0
+        self._drawn = (None, None)
+        self._sprite = None
+        self._cycles = {}
+        self._twins = {}
         self._cache = {}
         # Awake from the first frame: a pet that draws nothing until the GUI
         # happens to sync would leave the corner empty at startup.
@@ -828,8 +857,8 @@ class PetWidget(QWidget):
     # -- state ----------------------------------------------------------
     @property
     def pet_state(self) -> str:
-        """The sprite actually being drawn, after fallback and idle overrides."""
-        return self._name or ""
+        """The pose actually drawn, after the fallbacks; '' when there is no art."""
+        return self._drawn[0] or ""
 
     @property
     def requested_state(self) -> str:
@@ -837,9 +866,26 @@ class PetWidget(QWidget):
         return self._requested or ""
 
     @property
+    def pose(self) -> str:
+        """The pose the animation engine is playing, fallbacks not applied."""
+        return self._pose or ""
+
+    @property
+    def frame_index(self) -> int:
+        """Position within the current pose's discovered frame list."""
+        return self._frame_index
+
+    @property
+    def blinking(self) -> bool:
+        """Whether the blink twin is standing in for the current frame."""
+        return self._blinking
+
+    @property
     def override(self):
         """The idle behaviour currently layered on, if any."""
-        return self._override
+        if self._blinking:
+            return "blinking"
+        return "walking" if self._wandering else None
 
     @property
     def idle_time(self) -> float:
@@ -851,78 +897,115 @@ class PetWidget(QWidget):
 
     @property
     def sprite(self):
-        return self._load(self._name) if self._name else None
+        return self._sprite
 
     def set_state(self, state: str) -> None:
-        """Record what the GUI wants; idle-only behaviours restart with it.
+        """Record what the GUI wants and restart that pose from frame zero.
 
         An unchanged request is ignored, so a status line that fires repeatedly
         cannot keep re-arming the blink and stop the pet from ever blinking.
         """
         name = str(state or "").strip().lower()
-        if name not in PET_STATES:
+        if name not in PET_POSES:
             name = PET_FALLBACK
         if name == self._requested:
             return
         self._requested = name
-        self._override = None
-        self._override_time = 0.0
+        self._blinking = False
+        self._blink_time = 0.0
+        self._wandering = False
+        self._wander_time = 0.0
         self._idle_time = 0.0
-        if name == PET_FALLBACK:
-            self._arm_blink()
+        self._arm_blink()
+        self._set_pose(name)
+
+    def _set_pose(self, pose: str) -> None:
+        """Switch pose and rewind its cycle."""
+        if pose == self._pose:
+            return
+        self._pose = pose
+        self._pose_elapsed = 0.0
+        self._frame_index = 0
         self._refresh()
 
     def advance(self, dt: float) -> None:
-        """Blink and wander, but only while the pet is genuinely idle.
+        """Play the cycle, blink and wander, all off the HUD's tick seconds.
 
-        A thinking or speaking pet must not break into a blink mid-sentence, so
-        any non-idle request drops the override and stops the clock. Both
-        behaviours are timed off accumulated tick seconds, never a wall clock.
+        A blink freezes the cycle instead of interrupting it: the twin stands in
+        for the current frame for `PET_BLINK_DURATION` and playback resumes where
+        it left off, so a walking pet blinks mid-stride. Blinking is awake
+        behaviour and layers on every pose that ships a twin — `sleeping` does not
+        have one, because its eyes are already shut.
         """
         dt = max(0.0, float(dt))
-        if self._requested != PET_FALLBACK:
-            return
         self._idle_time += dt
-        if self._override is not None:
-            self._override_time += dt
-            limit = (PET_WANDER_DURATION if self._override == "walking"
-                     else PET_BLINK_DURATION)
-            if self._override_time < limit:
-                return
-            finished = self._override
-            self._override = None
-            self._override_time = 0.0
-            if finished == "walking":
-                # Without this the wander would re-trigger on the next tick.
-                self._idle_time = 0.0
-            self._arm_blink()
+        if self._blinking:
+            self._blink_time += dt
+            if self._blink_time >= PET_BLINK_DURATION:
+                self._blinking = False
+                self._blink_time = 0.0
+                self._arm_blink()
             self._refresh()
             return
-        if self._idle_time >= PET_WANDER_AFTER:
-            self._override = "walking"
-        elif self._idle_time >= self._next_blink:
-            self._override = "blinking"
-        else:
+        self._pose_elapsed += dt
+        self._frame_index = pet_frame_index(
+            self._pose_elapsed, PET_FPS.get(self._pose),
+            len(self._cycle(self._pose)))
+        if self._wandering:
+            self._wander_time += dt
+            if self._wander_time >= PET_WANDER_DURATION:
+                self._wandering = False
+                self._wander_time = 0.0
+                # Without this the wander would re-trigger on the next tick.
+                self._idle_time = 0.0
+                self._arm_blink()
+                self._set_pose(self._requested)
+            else:
+                self._refresh()
             return
-        self._override_time = 0.0
+        if (self._requested == PET_FALLBACK
+                and self._idle_time >= PET_WANDER_AFTER):
+            self._wandering = True
+            self._wander_time = 0.0
+            self._set_pose("walking")
+            return
+        if self._idle_time >= self._next_blink and self._twin(self._pose):
+            self._blinking = True
+            self._blink_time = 0.0
         self._refresh()
 
     def _arm_blink(self) -> None:
         self._next_blink = self._idle_time + self._rng.uniform(*PET_BLINK_GAP)
 
-    def _resolve(self, name):
-        """The sprite to draw for `name`, falling back to idle, then to nothing."""
-        if self._load(name) is not None:
-            return name
-        if self._load(PET_FALLBACK) is not None:
-            return PET_FALLBACK
-        return None
+    def _resolve(self):
+        """(pose, frame key, pixmap) to draw, after the fallbacks in the spec.
+
+        A missing pose directory, a missing frame or an unreadable PNG falls back
+        to idle frame 1 and then to drawing nothing. A pose with no blink twin
+        simply does not blink; it is never swapped for a different sprite.
+        """
+        if self._blinking:
+            twin = self._load(self._pose, PET_BLINK_KEY)
+            if twin is not None:
+                return self._pose, PET_BLINK_KEY, twin
+        cycle = self._cycle(self._pose)
+        if cycle:
+            number = cycle[min(self._frame_index, len(cycle) - 1)]
+            frame = self._load(self._pose, number)
+            if frame is not None:
+                return self._pose, str(number), frame
+        fallback = self._load(PET_FALLBACK, 1)
+        if fallback is not None:
+            return PET_FALLBACK, "1", fallback
+        return None, None, None
 
     def _refresh(self) -> None:
-        drawn = self._resolve(self._override or self._requested)
-        if drawn != self._name:
-            self._name = drawn
-            self.update()
+        pose, key, pixmap = self._resolve()
+        if (pose, key) == self._drawn:
+            return
+        self._drawn = (pose, key)
+        self._sprite = pixmap
+        self.update()
 
     def set_bob(self, offset: float) -> None:
         """Store the current frame's vertical offset.
@@ -941,12 +1024,46 @@ class PetWidget(QWidget):
         self.setGeometry(parent.rect())
 
     # -- sprites --------------------------------------------------------
-    def _load(self, name):
-        if not name:
+    def _cycle(self, pose):
+        """Frame numbers on disk for `pose`, in numeric order, twins excluded.
+
+        Cached for the life of the widget, so a pose with no directory costs one
+        glob rather than one per frame per tick.
+        """
+        if pose is None:
+            return []
+        if pose in self._cycles:
+            return self._cycles[pose]
+        numbers = []
+        for path in (self._frames_dir / pose).glob("%s_*.png" % pose):
+            parts = path.stem.split("_")
+            if parts[-1] == "blink":
+                continue
+            try:
+                numbers.append(int(parts[-1]))
+            except ValueError:
+                continue
+        numbers.sort()
+        self._cycles[pose] = numbers
+        return numbers
+
+    def _twin(self, pose):
+        """Whether this pose ships a blink twin at all."""
+        if pose is None:
+            return False
+        if pose not in self._twins:
+            self._twins[pose] = (self._frames_dir / pose /
+                                 ("%s_%s.png" % (pose, PET_BLINK_KEY))).is_file()
+        return self._twins[pose]
+
+    def _load(self, pose, key):
+        """One frame scaled to the pet's height, cached including its misses."""
+        if pose is None or key is None:
             return None
-        if name in self._cache:
-            return self._cache[name]
-        path = self._asset_dir / ("%s.png" % name)
+        cache_key = (pose, str(key))
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        path = self._frames_dir / pose / ("%s_%s.png" % (pose, key))
         pixmap = None
         if path.is_file():
             source = QPixmap(str(path))
@@ -956,7 +1073,7 @@ class PetWidget(QWidget):
                     int(round(self.HEIGHT * dpr)),
                     Qt.TransformationMode.SmoothTransformation)
                 pixmap.setDevicePixelRatio(dpr)
-        self._cache[name] = pixmap
+        self._cache[cache_key] = pixmap
         return pixmap
 
     # -- painting -------------------------------------------------------
