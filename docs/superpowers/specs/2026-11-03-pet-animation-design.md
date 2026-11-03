@@ -47,7 +47,7 @@ values:
 
 | Field | Meaning |
 |---|---|
-| `pose` | `idle` / `walking` / `flying` / `thinking` / `reading` / `speaking` / `sleeping` |
+| `pose` | `idle` / `walking` / `flying` / `thinking` / `reading` / `speaking` / `sleeping` / `looking` |
 | `frame_index` | Which frame of that pose's cycle is showing |
 | `blinking` | Whether the current frame is being replaced by its blink twin |
 
@@ -67,6 +67,12 @@ becomes an unknown name that falls back to `idle`, and the existing
 `blinking.png` is no longer a shipped pose. `sleeping` is a pose with no twin
 because its eyes are already shut.
 
+**Amended after the v2 art review.** `thinking` and `reading` ship twins with a
+punched-out hole (in the arm over the laptop, and beside the book). Until that
+art is redrawn, `PET_BLINK_SKIP` holds their eyes open instead of flashing the
+hole every few seconds. Every other awake pose still blinks. Removing the two
+names from that tuple restores blinking the moment sound twins land.
+
 The public API keeps its current shape and names, so the tool-based mapping
 committed in `8963165` still works unchanged — with one exception, described in
 §6: the mic-sleeping timeout stops mapping to `sleeping`. `walking` and `flying`
@@ -84,9 +90,10 @@ assets/pet/
     reading/    reading_1.png reading_2.png reading_1_blink.png
     speaking/   speaking_1.png speaking_2.png speaking_1_blink.png
     sleeping/   sleeping_1.png
+    looking/    looking_1.png … looking_4.png
 ```
 
-21 files. Frame lists are discovered by globbing `<pose>_<n>.png` in sorted
+25 files. Frame lists are discovered by globbing `<pose>_<n>.png` in sorted
 numeric order; blink twins are excluded from the cycle.
 
 Timing is a code table, mirroring how `ReactorHud._STYLES` already works, so
@@ -99,8 +106,14 @@ there is no new configuration surface:
 | flying | 3 | 8 | yes |
 | thinking | 2 | 2 | yes |
 | reading | 2 | 2 | yes |
-| speaking | 2 | 6 | yes |
+| speaking | 2 | 8 | yes |
 | sleeping | 1 | — | no |
+| looking | 4 | 2 | no |
+
+**Amended after the v2 art review.** Speaking now runs at 8 fps rather than 6:
+its two frames are a mouth, and 8 fps makes the pulse beat four times a second,
+roughly the syllable rate of the TTS it trails. `looking` is the idle-variation
+cycle (§6) and ships no twin — it is already a "looking around" animation.
 
 **Amended at approval.** `idle_2` was cut. A two-frame idle at 1.5 fps is a
 1.5 s hard swap between near-identical drawings, which reads as a stutter rather
@@ -181,7 +194,23 @@ Three layers, all driven by `advance(dt)` from the existing tick.
 **Playback.** `frame_index = floor(pose_elapsed * fps) % frame_count`.
 
 **Blink.** Unchanged schedule: 4–7 s random gap (`PET_BLINK_GAP`), 0.18 s
-duration, fires in any awake pose.
+duration, fires in any awake pose whose twin is not in `PET_BLINK_SKIP`.
+
+**Idle variation.** After `PET_IDLE_VARIATION_AFTER` (120 s) without activity,
+and only while the requested state is `idle`, the pet freezes what it is doing
+(standing, pausing, or mid-walk once it is back on the ground) and plays the
+`looking` cycle for `PET_IDLE_VARIATION_DURATION` (4–7 s), then puts the pose it
+came from back. The next one is `PET_IDLE_VARIATION_GAP` (60–150 s) later.
+Roaming, sleep, a blink or any activity cancels it. It is never played while
+flying.
+
+**Floating Zzz.** While the drawn pose is `sleeping`, paint draws three Z strokes
+above the head. `pet_zzz_progress` gives each glyph its fraction through a
+`PET_ZZZ_PERIOD` (2.8 s) rise; they are staggered a third of a period apart,
+travel `PET_ZZZ_RISE` (46 px), fade in and out on `sin(pi p)`, and drift
+sideways a little. They are strokes rather than text because a font lookup
+renders as tofu when the family is missing, and the strokes cost nothing. No
+asset change: `sleeping` stays one frame.
 
 **Roaming.** Replaces the current `PET_WANDER_AFTER` / `PET_WANDER_DURATION`
 pair. After `PET_ROAM_AFTER` (45 s) without activity the pet enters roaming: it

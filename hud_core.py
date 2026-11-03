@@ -63,13 +63,16 @@ PET_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "pet"
 # the animation engine it is a flag layered on a pose, so it is not a pose.
 PET_FRAMES_DIR = PET_ASSET_DIR / "frames"
 PET_POSES = ("idle", "thinking", "sleeping", "speaking", "reading",
-             "walking", "flying")
+             "walking", "flying", "looking")
 PET_FALLBACK = "idle"
 PET_BLINK_KEY = "1_blink"
 # Cycles per second. None means the pose ships a single frame, so there is
-# nothing to advance and the pet simply holds it.
+# nothing to advance and the pet simply holds it. Speaking runs faster than the
+# other cycles because its wave is a mouth: at 8 fps the two-frame pulse beats
+# four times a second, which is about the syllable rate of the TTS it trails.
 PET_FPS = {"idle": None, "walking": 6.0, "flying": 8.0, "thinking": 2.0,
-           "reading": 2.0, "speaking": 6.0, "sleeping": None}
+           "reading": 2.0, "speaking": 8.0, "sleeping": None,
+           "looking": 2.0}
 # The offline alignment step builds every frame onto this canvas with the feet on
 # a fixed baseline, so the pose can change without the pet shifting. The asset
 # guard checks it: a frame at another size would move the bird mid-cycle.
@@ -78,6 +81,11 @@ PET_CANVAS = 300
 # timer of its own.
 PET_BLINK_DURATION = 0.18
 PET_BLINK_GAP = (4.0, 7.0)
+# Two shipped blink twins are defective: the thinking one puts a hole in the arm
+# over the laptop and the reading one puts a hole beside the book. Until that art
+# is redrawn the pet holds its eyes open in those poses rather than flashing a
+# punched-out frame every few seconds.
+PET_BLINK_SKIP = ("thinking", "reading")
 # Roaming: after this long with nothing happening the pet walks itself around
 # the bottom of the viewport. 40 px/s is about a body length a second.
 PET_ROAM_AFTER = 45.0
@@ -91,6 +99,16 @@ PET_SLEEP_AFTER = 1800.0
 PET_SLEEP_AFTER_NIGHT = 600.0
 PET_NIGHT_START = 22
 PET_NIGHT_END = 7
+# Floating Zzz: three glyphs, staggered a third of a period apart, each rising
+# PET_ZZZ_RISE px over PET_ZZZ_PERIOD s while it fades in and back out.
+PET_ZZZ_COUNT = 3
+PET_ZZZ_PERIOD = 2.8
+PET_ZZZ_RISE = 46.0
+# Idle variation: after this much quiet the pet now and then plays its `looking`
+# cycle for a few seconds — glance, peck, glance — then picks up where it was.
+PET_IDLE_VARIATION_AFTER = 120.0
+PET_IDLE_VARIATION_DURATION = (4.0, 7.0)
+PET_IDLE_VARIATION_GAP = (60.0, 150.0)
 # Cursor proximity: within this many pixels of the sprite rect the pet comes to
 # the front of the message body, and drops back after this many seconds away.
 PET_PROXIMITY_PX = 120.0
@@ -134,6 +152,21 @@ def pet_frame_index(elapsed: float, fps, frame_count: int) -> int:
     if fps is None or frame_count < 2:
         return 0
     return int(max(0.0, float(elapsed)) * float(fps)) % int(frame_count)
+
+
+def pet_zzz_progress(elapsed: float, period: float = PET_ZZZ_PERIOD,
+                     count: int = PET_ZZZ_COUNT):
+    """How far through its rise each floating Z is, as a tuple of 0..1.
+
+    Glyph i starts a `1 / count` slice after glyph i-1, which is what makes the
+    Zs trail one another instead of pulsing in lockstep. Clock-free and pure so
+    a test can drive it from a fake tick, exactly like `pet_bob`.
+    """
+    count = max(1, int(count))
+    period = max(1e-6, float(period))
+    elapsed = max(0.0, float(elapsed))
+    return tuple((elapsed / period + index / float(count)) % 1.0
+                 for index in range(count))
 
 
 @dataclass
@@ -896,6 +929,13 @@ class PetWidget(QWidget):
         self._near_time = 0.0
         self._idle_time = 0.0
         self._next_blink = 0.0
+        # Sleep is its own clock: while it is asleep the pose cycle is stopped,
+        # but the Zzz glyphs still need an elapsed time to ride up the screen.
+        self._sleep_elapsed = 0.0
+        self._variation = False
+        self._variation_left = 0.0
+        self._variation_return = None
+        self._next_variation = 0.0
         self._bob = 0.0
         self._drawn = (None, None)
         self._sprite = None
@@ -905,6 +945,7 @@ class PetWidget(QWidget):
         # Awake from the first frame: a pet that draws nothing until the GUI
         # happens to sync would leave the corner empty at startup.
         self.set_state(PET_FALLBACK)
+        self._arm_variation(PET_IDLE_VARIATION_AFTER)
 
     # -- state ----------------------------------------------------------
     @property
@@ -961,6 +1002,8 @@ class PetWidget(QWidget):
         """The idle behaviour currently layered on, if any."""
         if self._blinking:
             return "blinking"
+        if self._variation:
+            return "looking"
         if self._roaming:
             return "flying" if self._roam_flying else "walking"
         return None
@@ -992,6 +1035,7 @@ class PetWidget(QWidget):
         self._wake()
         self._idle_time = 0.0
         self._arm_blink()
+        self._arm_variation(PET_IDLE_VARIATION_AFTER)
         self._set_pose(name)
 
     def note_activity(self) -> None:
@@ -1002,17 +1046,23 @@ class PetWidget(QWidget):
         """
         self._idle_time = 0.0
         self._arm_blink()
+        self._arm_variation(PET_IDLE_VARIATION_AFTER)
         self._wake()
 
     def _wake(self) -> None:
-        """Drop sleep, blink and roaming, and go back to what was asked for."""
-        awake = self._sleeping or self._roaming or self._blinking
+        """Drop sleep, blink, roam and the idle variation, and go back to what
+        was asked for."""
+        awake = (self._sleeping or self._roaming or self._blinking
+                 or self._variation)
         self._sleeping = False
         self._blinking = False
         self._blink_time = 0.0
         self._roaming = False
         self._roam_pause = 0.0
         self._roam_y = 0.0
+        self._variation = False
+        self._variation_left = 0.0
+        self._sleep_elapsed = 0.0
         if awake:
             self._set_pose(self._requested)
 
@@ -1023,19 +1073,28 @@ class PetWidget(QWidget):
         self._pose = pose
         self._pose_elapsed = 0.0
         self._frame_index = 0
+        if pose != "sleeping":
+            self._sleep_elapsed = 0.0
         self._refresh()
 
     def advance(self, dt: float) -> None:
-        """Play the cycle, blink, roam and sleep on the HUD's tick seconds.
+        """Play the cycle, blink, roam, vary and sleep on the HUD's tick seconds.
 
         A blink freezes the cycle instead of interrupting it: the twin stands in
         for the current frame for `PET_BLINK_DURATION` and playback resumes where
         it left off, so a walking pet blinks mid-stride. Blinking is awake
         behaviour and layers on every pose that ships a twin — `sleeping` does not
-        have one, because its eyes are already shut.
+        have one, because its eyes are already shut, and the two poses in
+        `PET_BLINK_SKIP` hold their eyes open until their art is redrawn.
+
+        The idle variation is the same freeze in the other direction: after a
+        couple of quiet minutes the pet stops, plays its `looking` cycle for a
+        few seconds, and then puts back whatever pose it was in.
         """
         dt = max(0.0, float(dt))
         self._idle_time += dt
+        if self._sleeping or self._pose == "sleeping":
+            self._sleep_elapsed += dt
         self._poll_cursor(dt)
         if self._blinking:
             self._blink_time += dt
@@ -1047,6 +1106,19 @@ class PetWidget(QWidget):
             return
         if self._sleeping:
             return
+        # Bedtime outranks the flourish: a pet that has been alone long enough
+        # goes to sleep even if a variation is playing or it is mid-walk.
+        if (self._requested == PET_FALLBACK
+                and self._idle_time >= pet_sleep_after(self._hour())):
+            self._fall_asleep()
+            return
+        if self._variation:
+            self._variation_left -= dt
+            self._advance_cycle(dt)
+            if self._variation_left <= 0.0:
+                self._end_variation()
+            self._refresh()
+            return
         if self._roaming:
             self._step_roam(dt)
         else:
@@ -1056,10 +1128,12 @@ class PetWidget(QWidget):
                 self._start_roam()
                 return
         if (self._requested == PET_FALLBACK
-                and self._idle_time >= pet_sleep_after(self._hour())):
-            self._fall_asleep()
+                and not (self._roaming and self._roam_flying)
+                and self._idle_time >= self._next_variation):
+            self._start_variation()
             return
-        if self._idle_time >= self._next_blink and self._twin(self._pose):
+        if (self._idle_time >= self._next_blink and self._twin(self._pose)
+                and self._pose not in PET_BLINK_SKIP):
             self._blinking = True
             self._blink_time = 0.0
         self._refresh()
@@ -1133,6 +1207,9 @@ class PetWidget(QWidget):
         self._roaming = False
         self._roam_pause = 0.0
         self._roam_y = 0.0
+        self._variation = False
+        self._variation_left = 0.0
+        self._sleep_elapsed = 0.0
         self._set_pose("sleeping")
 
     # -- cursor proximity -----------------------------------------------
@@ -1166,6 +1243,25 @@ class PetWidget(QWidget):
 
     def _arm_blink(self) -> None:
         self._next_blink = self._idle_time + self._rng.uniform(*PET_BLINK_GAP)
+
+    def _arm_variation(self, gap: float) -> None:
+        self._next_variation = self._idle_time + max(0.0, float(gap))
+
+    def _start_variation(self) -> None:
+        """Play the `looking` cycle for a few seconds, then put the pose back."""
+        self._variation = True
+        self._variation_return = self._pose
+        self._variation_left = self._rng.uniform(*PET_IDLE_VARIATION_DURATION)
+        self._set_pose("looking")
+
+    def _end_variation(self) -> None:
+        self._variation = False
+        self._variation_left = 0.0
+        self._arm_variation(self._rng.uniform(*PET_IDLE_VARIATION_GAP))
+        # A variation can interrupt a walk, so the pose to come back to is the
+        # one that was playing when it started, not simply idle.
+        self._set_pose((self._variation_return if self._roaming
+                        else self._requested) or PET_FALLBACK)
 
     def _resolve(self):
         """(pose, frame key, pixmap) to draw, after the fallbacks in the spec.
@@ -1296,11 +1392,44 @@ class PetWidget(QWidget):
                  + self._bob + self._roam_y)
             if self._facing < 0:
                 # Facing left needs no extra art: the same blit, mirrored.
+                painter.save()
                 painter.translate(x + width, y)
                 painter.scale(-1.0, 1.0)
                 painter.drawPixmap(QPointF(0.0, 0.0), pixmap)
+                painter.restore()
             else:
                 painter.drawPixmap(QPointF(x, y), pixmap)
+            if self._drawn[0] == "sleeping":
+                self._paint_zzz(painter, x, y, width)
         finally:
             painter.end()
+
+    def _paint_zzz(self, painter, x, y, width):
+        """Three Zs drifting up off the sleeping pet's head.
+
+        Drawn rather than shipped: the sleep pose is a single frame, so a glyph
+        baked into it would sit still. The Z is three strokes, not text — a font
+        lookup depends on the host's families and renders as tofu when the
+        family is missing, while a stroked path is identical everywhere. Drawn
+        after the sprite, in the same SourceOver / true-alpha mode as everything
+        else on this layer, and only while the sleeping pose is on screen.
+        """
+        size = max(10.0, self.HEIGHT * 0.13)
+        glyph = size * 0.62
+        stroke = max(1.0, size * 0.10)
+        for index, progress in enumerate(
+                pet_zzz_progress(self._sleep_elapsed)):
+            alpha = math.sin(math.pi * progress)
+            if alpha <= 0.02:
+                continue
+            px = (x + width * 0.72 + math.cos(progress * math.pi) * width * 0.04
+                  + index * size * 0.30)
+            py = y + size * 0.6 - progress * PET_ZZZ_RISE
+            pen = QPen(QColor(150, 236, 255, int(210 * alpha)))
+            pen.setWidthF(stroke)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(px, py - size), QPointF(px + glyph, py - size))
+            painter.drawLine(QPointF(px + glyph, py - size), QPointF(px, py))
+            painter.drawLine(QPointF(px, py), QPointF(px + glyph, py))
 

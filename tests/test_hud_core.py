@@ -27,10 +27,13 @@ from hud_core import (  # noqa: E402
     PARTICLE_CAP,
     PET_BLINK_DURATION,
     PET_BLINK_GAP,
+    PET_BLINK_SKIP,
     PET_BOB_AMPLITUDE,
     PET_CANVAS,
     PET_FPS,
     PET_FRAMES_DIR,
+    PET_IDLE_VARIATION_AFTER,
+    PET_IDLE_VARIATION_DURATION,
     PET_MARGIN,
     PET_POSES,
     PET_PROXIMITY_PX,
@@ -41,6 +44,8 @@ from hud_core import (  # noqa: E402
     PET_ROAM_SPEED,
     PET_SLEEP_AFTER,
     PET_SLEEP_AFTER_NIGHT,
+    PET_ZZZ_COUNT,
+    PET_ZZZ_PERIOD,
     Particle,
     ParticleField,
     PetWidget,
@@ -51,6 +56,7 @@ from hud_core import (  # noqa: E402
     pet_frame_index,
     pet_is_night,
     pet_sleep_after,
+    pet_zzz_progress,
 )
 
 STATES = (
@@ -67,6 +73,7 @@ SHIPPED_PET_FRAMES = {
     "reading": [1, 2],
     "speaking": [1, 2],
     "sleeping": [1],
+    "looking": [1, 2, 3, 4],
 }
 SHIPPED_PET_TWINS = ("idle", "walking", "flying", "thinking", "reading",
                      "speaking")
@@ -652,8 +659,8 @@ class PetAssetGuardTests(unittest.TestCase):
                                    "%s has no transparent pixel" % path.name)
                 self.assertGreater((alpha > 8).sum(), 1000,
                                    "%s is nearly empty" % path.name)
-        # 15 cycle frames plus 6 blink twins.
-        self.assertEqual(declared, 21, "the shipped set changed size")
+        # 19 cycle frames plus 6 blink twins.
+        self.assertEqual(declared, 25, "the shipped set changed size")
 
     def test_no_frame_pixel_can_darken_the_chat_canvas(self):
         """The pet composites SourceOver at 0.85 opacity, so a pixel darker than
@@ -710,8 +717,8 @@ class PetPlaybackTests(unittest.TestCase):
     def test_the_pose_table_matches_the_spec(self):
         self.assertEqual(PET_FPS, {"idle": None, "walking": 6.0,
                                    "flying": 8.0, "thinking": 2.0,
-                                   "reading": 2.0, "speaking": 6.0,
-                                   "sleeping": None})
+                                   "reading": 2.0, "speaking": 8.0,
+                                   "sleeping": None, "looking": 2.0})
 
 
 class PetPaintTests(unittest.TestCase):
@@ -858,6 +865,81 @@ class PetPaintTests(unittest.TestCase):
                                     "pixel (%d, %d) was darkened" % (x, y))
         finally:
             pet.deleteLater()
+
+
+class PetZzzTests(unittest.TestCase):
+    """The floating Zs: pure timing arithmetic, plus proof they only paint while
+    the sleeping pose is the one on screen."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.asset_dir = _make_sprite_dir(self._tmp.name, "idle:1",
+                                          "sleeping:1")
+        self.pet = PetWidget(parent=None, asset_dir=self.asset_dir)
+        self.pet.resize(400, 400)
+        self.pet.set_state("idle")
+
+    def tearDown(self):
+        self.pet.deleteLater()
+        self._tmp.cleanup()
+        self.app.processEvents()
+
+    def render(self):
+        canvas = QImage(400, 400, QImage.Format.Format_RGB32)
+        canvas.fill(QColor("#808080"))
+        painter = QPainter(canvas)
+        self.pet._paint(painter)
+        return canvas
+
+    def count_above_sprite(self, canvas):
+        """Non-floor pixels strictly above the sprite's top edge."""
+        sprite = self.pet.sprite
+        dpr = sprite.devicePixelRatio() or 1.0
+        top = int(400 - sprite.height() / dpr - PET_MARGIN)
+        floor = QColor("#808080")
+        count = 0
+        for y in range(top):
+            for x in range(canvas.width()):
+                if canvas.pixelColor(x, y) != floor:
+                    count += 1
+        return count
+
+    def test_the_glyphs_are_staggered_by_a_third_of_the_period(self):
+        progress = pet_zzz_progress(0.0)
+        self.assertEqual(len(progress), PET_ZZZ_COUNT)
+        self.assertEqual(progress[0], 0.0)
+        self.assertAlmostEqual(progress[1], 1.0 / 3.0)
+        self.assertAlmostEqual(progress[2], 2.0 / 3.0)
+
+    def test_progress_wraps_exactly_every_period(self):
+        for wrapped, start in zip(pet_zzz_progress(PET_ZZZ_PERIOD),
+                                  pet_zzz_progress(0.0)):
+            self.assertAlmostEqual(wrapped, start, places=9)
+
+    def test_progress_never_leaves_the_unit_interval(self):
+        for step in range(300):
+            for value in pet_zzz_progress(step * 0.1):
+                self.assertGreaterEqual(value, 0.0)
+                self.assertLess(value, 1.0)
+
+    def test_nothing_floats_above_an_awake_pet(self):
+        self.assertEqual(self.count_above_sprite(self.render()), 0)
+
+    def test_zs_float_above_a_sleeping_pet(self):
+        self.pet.set_state("sleeping")
+        self.pet.advance(0.6)
+        self.assertGreater(self.count_above_sprite(self.render()), 0)
+
+    def test_waking_removes_the_zs(self):
+        self.pet.set_state("sleeping")
+        self.pet.advance(0.6)
+        self.assertGreater(self.count_above_sprite(self.render()), 0)
+        self.pet.set_state("idle")
+        self.assertEqual(self.count_above_sprite(self.render()), 0)
 
 
 class PetAnimationTests(unittest.TestCase):
@@ -1050,16 +1132,30 @@ class PetBehaviourTests(unittest.TestCase):
             pet.deleteLater()
         self.app.processEvents()
 
-    def test_blinks_fire_in_every_awake_pose(self):
+    def test_blinks_fire_in_every_awake_pose_whose_twin_is_sound(self):
         """Blinking is awake behaviour, so it layers on whatever the pet is
-        doing — a thinking pet blinks too."""
-        for pose in ("idle", "thinking", "reading", "speaking", "walking",
-                     "flying"):
+        doing — a walking pet blinks mid-stride."""
+        for pose in ("idle", "speaking", "walking", "flying"):
             with self.subTest(pose=pose):
                 pet = self._make_pet()
                 pet.set_state(pose)
                 self.assertTrue(self._blinked_within(pet, 20.0),
                                 "the pet never blinked while %s" % pose)
+                self.assertEqual(pet.pet_state, pose)
+                pet.deleteLater()
+
+    def test_poses_whose_blink_twin_is_defective_hold_their_eyes_open(self):
+        """thinking's twin has a hole in the arm and reading's beside the book.
+        The pet blinks in every other awake pose, so skipping exactly these two
+        is a deliberate, removable choice until that art is redrawn."""
+        self.assertEqual(set(PET_BLINK_SKIP), {"thinking", "reading"})
+        for pose in PET_BLINK_SKIP:
+            with self.subTest(pose=pose):
+                pet = self._make_pet()
+                pet.set_state(pose)
+                self.assertTrue(pet._twin(pose), "the fixture lost that twin")
+                self.assertFalse(self._blinked_within(pet, 20.0),
+                                 "the pet blinked into a hole while %s" % pose)
                 self.assertEqual(pet.pet_state, pose)
                 pet.deleteLater()
 
@@ -1218,6 +1314,68 @@ class PetBehaviourTests(unittest.TestCase):
         self.assertFalse(pet.sleeping)
         self.assertEqual(pet.pet_state, "idle")
         self.assertEqual(pet.idle_time, 0.0, "waking did not reset the clock")
+
+    # -- idle variation --------------------------------------------------
+    def _advance_into_variation(self, pet, limit=400.0):
+        """Tick until the variation starts. Sampling every tick matters: the
+        pet can be airborne when the timer expires, and it only stops to look
+        once it is back on the ground."""
+        for _tick in range(int(limit)):
+            pet.advance(1.0)
+            if pet._variation:
+                return True
+        return False
+
+    def test_the_looking_cycle_plays_after_a_couple_of_quiet_minutes(self):
+        pet = self._make_pet()
+        self._advance(pet, PET_IDLE_VARIATION_AFTER - 2.0, step=1.0)
+        self.assertFalse(pet._variation)
+        self.assertTrue(self._advance_into_variation(pet),
+                        "the pet never played its idle variation")
+        self.assertEqual(pet.pose, "looking")
+        self.assertEqual(pet.pet_state, "looking")
+        self.assertEqual(pet.override, "looking")
+
+    def test_the_variation_ends_and_puts_the_pose_back(self):
+        pet = self._make_pet()
+        self.assertTrue(self._advance_into_variation(pet))
+        low, high = PET_IDLE_VARIATION_DURATION
+        self.assertTrue(low <= pet._variation_left <= high,
+                        "the duration came from outside the declared range")
+        for _tick in range(int(high) + 3):
+            pet.advance(1.0)
+            if not pet._variation:
+                break
+        self.assertFalse(pet._variation, "the variation never ended")
+        self.assertNotEqual(pet.pose, "looking")
+        self.assertIn(pet.pose, ("idle", "walking"),
+                      "the pet did not return to what it was doing")
+
+    def test_activity_cancels_the_variation(self):
+        pet = self._make_pet()
+        self.assertTrue(self._advance_into_variation(pet))
+        pet.note_activity()
+        self.assertFalse(pet._variation)
+        self.assertEqual(pet.pet_state, "idle")
+
+    def test_a_pet_with_work_to_do_does_not_peck(self):
+        pet = self._make_pet()
+        pet.set_state("speaking")
+        for _tick in range(int(PET_IDLE_VARIATION_AFTER) + 20):
+            pet.advance(1.0)
+            self.assertFalse(pet._variation)
+        self.assertEqual(pet.pose, "speaking")
+
+    def test_a_finished_variation_re_arms_itself_well_ahead(self):
+        pet = self._make_pet()
+        self.assertTrue(self._advance_into_variation(pet))
+        for _tick in range(int(PET_IDLE_VARIATION_DURATION[1]) + 3):
+            pet.advance(1.0)
+            if not pet._variation:
+                break
+        self.assertFalse(pet._variation)
+        self.assertGreater(pet._next_variation, pet.idle_time + 30.0,
+                           "the next variation is due almost immediately")
 
     # -- cursor proximity ------------------------------------------------
     def _proximate_pet(self, near, events=None):
