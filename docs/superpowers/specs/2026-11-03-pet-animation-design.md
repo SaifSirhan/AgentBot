@@ -111,19 +111,32 @@ swapped in or overlaid without looking broken.
 
 ## 5. Auto-alignment
 
-Independently generated frames differ in scale and placement. Blitted raw, the
-pet wobbles and appears to jump. Every frame therefore passes through a build
-step that:
+**Amended during batch 1.** Generated frames arrive at different scales relative
+to their own canvas — the idle sheet fills 79% of its height, the walk sheet 57%.
+Scaling each frame to fit the canvas would make the bird grow and shrink between
+frames, which is the exact wobble alignment exists to remove. The normaliser is
+therefore the **head**, not the bounding box: legs and wings change height
+legitimately between poses, the head does not.
 
-1. Mattes the key colour to alpha (flood fill from the edges, feathered 1.2 px —
-   the method proven on the JPEG sources, where it left 0.01–0.46% fringe).
-2. Trims to the bounding box of pixels with alpha > 8.
-3. Pastes onto a common **360×300** canvas — wider than tall, because a
-   wings-spread flying pose has a span larger than its height and a square canvas
-   would clip it. The content is scaled to fit the canvas preserving aspect,
-   horizontally centred, with the bbox bottom edge resting on a fixed baseline at
-   y = 286. Feet-anchored, so legs and wings move while the bird stays planted.
-4. Records the baseline offset in the frame table.
+Measured on batch 1 after head-width normalisation: mean head width idle 108.7 px
+against walk 109.5 px, a 0.8% difference, with every frame's feet landing on rows
+284–285.
+
+The build step is:
+
+1. Matte the key field to alpha (flood fill from the edges, feathered — the
+   method proven on the JPEG sources, where it left 0.01–0.46% fringe).
+2. Remove magenta residue. Measured: the generator's ground line and any pink
+   fringe have **green as their minimum channel** (G 5–28 against R,B 51–219),
+   which cyan and navy art never does. That one rule clears residue across the
+   whole frame without touching the sprite, and it is what made column slicing
+   possible at all.
+3. Trim to the bounding box of pixels with alpha > 8.
+4. Scale by the shared head-width normaliser and paste onto a common
+   **300×300** canvas, horizontally centred, with the bbox bottom edge resting on
+   a fixed baseline at y = 286. Feet-anchored, so legs and wings move while the
+   bird stays planted.
+5. Record the baseline offset in the frame table.
 
 `PET_HEIGHT` (190) then scales the common canvas down at draw time, so every
 pose occupies the same footprint and the corner anchor does not shift when the
@@ -222,20 +235,36 @@ delay survives a viewport resize.
 
 ## 10. Generation and approval workflow
 
-1. Generate per-pose batches with `ImageGen`, image-to-image from the clean
-   reference PNGs, each frame on a flat solid magenta `#FF00FF` key colour,
-   full body in frame, feet near the bottom, no shadow.
-2. Matte, align and compose a **contact sheet per batch**, composited over
-   `COLOR_BG` so it is judged against the real dark canvas.
-3. Show the contact sheet. **Nothing is committed until it is approved.**
-4. Repeat per batch. Batch 1 is `idle` + `walking` (8 images): the base standing
-   pose and the walk cycle, which together validate style consistency and
-   feet-anchored alignment before the remaining 14 are generated.
+**Amended during batch 1.** The original plan was one `ImageGen` call per frame.
+Batch 1 proved that wrong twice: separately-called frames came back at four
+near-identical standing poses (a walk cycle that does not walk) and at
+inconsistent scale, because the model has no shared frame of reference between
+calls. The method is now **one sheet per cycle** — all poses of a cycle in a
+single image, then sliced. Same image means same scale, same style, and the model
+can see the poses it is relating. This is also how the supplied reference sheets
+were built.
 
-Known risk, stated rather than hidden: generated frames can drift in style
-between calls even with a reference image. If a contact sheet comes back
-inconsistent, the fallback is to reduce scope to the walk and fly cycles and keep
-single poses elsewhere.
+1. Generate one sheet per pose cycle, image-to-image from the clean reference
+   PNGs, poses left to right on a flat magenta field, feet on a common line.
+2. Matte, clear residue, slice by column projection with seam splitting at
+   opacity troughs, normalise by head width, align on the feet baseline.
+3. Compose a **contact sheet per batch**, composited over `COLOR_BG` so it is
+   judged against the real dark canvas, plus a zoomed head strip to prove the
+   blink twin actually closed the eyes.
+4. Show the contact sheet. **Nothing is committed until it is approved.**
+5. Batch 1 is `idle` (3) + `walking` (4) = 7 of 22 frames.
+
+Two facts about the generator that the pipeline must accommodate, both measured:
+
+- It does **not** honour a requested hex background. It produced a different flat
+  pink per image — `(245,8,137)` to `(253,3,217)` — so the key colour is sampled
+  per image from the border ring rather than assumed.
+- Its PNGs are `mode=RGBA` with a **nearly opaque alpha channel** (extrema
+  101–239 up to 255). That is not a cut-out. Existing alpha is only trusted when
+  it actually contains transparent pixels.
+
+Known risk, still true: poses can drift between sheets. Head-width normalisation
+measures the drift and the batch is rejected if it exceeds a few percent.
 
 ## 11. Out of scope
 
