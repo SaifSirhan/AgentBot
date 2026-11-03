@@ -19,6 +19,12 @@ class SystemWatcherTests(unittest.TestCase):
         patcher = mock.patch.object(agent, "note_tool_result")
         patcher.start()
         self.addCleanup(patcher.stop)
+        # These tests drive the loop through the text protocol on purpose: they
+        # assert engine semantics (grants, DONE checks, batching), not transport.
+        p = mock.patch.object(agent, "_autonomous_native_reply",
+                              return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
         self.threads = []
         real_thread = threading.Thread
         self.thread_type = real_thread

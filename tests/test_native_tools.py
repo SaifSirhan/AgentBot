@@ -61,6 +61,22 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(sorted(params["properties"]), ["key", "text"])
         self.assertEqual(sorted(params["required"]), ["key", "text"])
 
+    def test_primitive_registry_schemas_are_wrapped_as_input(self):
+        """Most registry tools declare a bare string schema. A function's
+        parameters must be an object, so the primitive becomes the `input`
+        property — otherwise the model gets an unusable shape and sends no
+        query at all, which is how search_web failed live."""
+        registry = _FakeRegistry([_FakeSpec(
+            "search_web", "Search the web",
+            {"type": "string", "minLength": 1})])
+        params = native_tools.build_specs(["search_web"], registry,
+                                          describe)[0]["function"]["parameters"]
+        self.assertEqual(params["type"], "object")
+        self.assertEqual(params["required"], ["input"])
+        self.assertEqual(params["properties"]["input"]["type"], "string")
+        self.assertEqual(params["properties"]["input"]["minLength"], 1)
+        self.assertIs(params["additionalProperties"], False)
+
     def test_delegate_to_qoder_advertises_prompt_and_goal(self):
         specs = native_tools.build_specs(["delegate_to_qoder"], None, describe)
         params = specs[0]["function"]["parameters"]
@@ -219,6 +235,26 @@ class TranscriptTests(unittest.TestCase):
         messages = native_tools.messages_from_transcript(step_log)
         self.assertLessEqual(len(messages[1]["content"]),
                              native_tools.MAX_TOOL_MESSAGE_CHARS + 64)
+
+
+class RealRegistrySchemaTests(unittest.TestCase):
+    """Every advertisable tool must present a schema the API can enforce."""
+
+    def test_every_tool_advertises_a_valid_object_schema(self):
+        import agent
+        specs = native_tools.build_specs(
+            sorted(agent.VALID_TOOLS), agent.TOOL_REGISTRY,
+            agent._router_tool_description)
+        self.assertGreater(len(specs), 100)
+        for spec in specs:
+            with self.subTest(tool=spec["function"]["name"]):
+                params = spec["function"]["parameters"]
+                self.assertEqual(params["type"], "object")
+                self.assertIs(params["additionalProperties"], False)
+                self.assertTrue(params["properties"],
+                                "a tool with no properties cannot be called")
+                self.assertTrue(set(params["required"]) <= set(params["properties"]))
+                self.assertTrue(spec["function"]["description"].strip())
 
 
 if __name__ == "__main__":

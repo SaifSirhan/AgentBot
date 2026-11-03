@@ -31,6 +31,7 @@ import memory
 import artifact_store
 from tool_registry import (
     InputValidationError,
+    MAX_BATCH_ACTIONS,
     ToolRegistry,
     ToolSpec,
     batch_rejection_error,
@@ -6236,7 +6237,99 @@ def _autonomous_context_prompt(prompt):
     return prompt
 
 
+def _autonomous_args(action):
+    """The args dict AutonomousLoop authorizes, built from an adapter action."""
+    inp = action.get("input", "")
+    args = dict(inp) if isinstance(inp, dict) else {"input": inp}
+    if action.get("goal"):
+        args["goal"] = action["goal"]
+    return args
+
+
+_AUTONOMOUS_FINISH = {
+    "type": "function",
+    "function": {
+        "name": "finish",
+        "description": ("End the task because the goal is achieved. This is the "
+                        "native form of outputting DONE — call it instead of "
+                        "writing the final answer as prose, which the loop "
+                        "cannot tell from an unfinished step."),
+        "parameters": {
+            "type": "object",
+            "properties": {"answer": {"type": "string",
+                                      "description": "Optional closing summary"}},
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _autonomous_native_reply(messages):
+    """Ask the engine's next move with a real tools array.
+
+    Returns exactly what AutonomousLoop already parses — "DONE", or JSON
+    {"tool", "args"}, or a list of them — and None when the native call could
+    not be made or named a tool this turn never received. The caller then takes
+    the text protocol, so the loop is never left without a reply.
+    """
+    allowed = set(getattr(_ROUTED, "allowed", None) or ())
+    if not allowed:
+        return None
+    extras = {"request_tool", "finish"}
+    names = sorted((allowed - {"chat", "done"}) | extras)
+    tools = [dict(spec) for spec in native_tools.build_specs(
+        names, TOOL_REGISTRY, _router_tool_description)]
+    # build_specs gives every name the generic shape; finish is a control
+    # signal, not a tool that takes an input string.
+    tools = [_AUTONOMOUS_FINISH if spec["function"]["name"] == "finish" else spec
+             for spec in tools]
+
+    payload = []
+    for index, entry in enumerate(messages or ()):
+        content = str((entry or {}).get("content") or "")
+        if index == 0:
+            # The protected goal text and follow-up constraints ride on the
+            # system message here, exactly as the flattened text prompt did.
+            content = _autonomous_context_prompt(content)
+        payload.append({"role": str((entry or {}).get("role") or "user"),
+                        "content": content})
+
+    message, error = _call_deepseek_native(payload, tools)
+    if error is not None:
+        print(f"\n[Autonomous native call unavailable] {error}")
+        return None
+
+    actions, rejects = native_tools.actions_from_tool_calls(
+        message, valid_names=VALID_TOOLS | extras,
+        allowed=allowed | extras,
+        object_input_tools=OBJECT_INPUT_TOOLS)
+    if rejects:
+        print(f"\n[Autonomous native call rejected] {rejects[0]}")
+        return None
+    if any(item["tool"] == "finish" for item in (actions or [])):
+        return "DONE"
+    if actions:
+        shape = [{"tool": item["tool"], "args": _autonomous_args(item)}
+                 for item in actions[:MAX_BATCH_ACTIONS]]
+        return json.dumps(shape[0] if len(shape) == 1 else shape,
+                          ensure_ascii=False)
+
+    content = ((message or {}).get("content") or "").strip()
+    if not content:
+        return None
+    # No call and no keyword means the model answered in prose, which is how a
+    # natively-called model ends a task. Hand the loop a completion claim and
+    # let the goal verifier judge it. Passing the prose through instead counts
+    # as an invalid reply, spends the single repair step, and reports an unmet
+    # goal after a search that actually worked.
+    return "DONE"
+
+
 def _autonomous_llm(messages):
+    native = _autonomous_native_reply(messages)
+    if native is not None:
+        return native
     prompt = "\n\n".join(
         f"{m.get('role', 'user').upper()}: {m.get('content', '')}"
         for m in messages)

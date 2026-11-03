@@ -24,6 +24,12 @@ class AutonomousIntegrationTests(unittest.TestCase):
         p = mock.patch("rag_tool.search_documents", return_value="")
         p.start()
         self.addCleanup(p.stop)
+        # These tests drive the loop through the text protocol on purpose: they
+        # assert engine semantics (grants, DONE checks, batching), not transport.
+        p = mock.patch.object(agent, "_autonomous_native_reply",
+                              return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_task_prefix_routes_to_the_autonomous_engine(self):
         with mock.patch.object(agent, "_run_autonomous_goal",
@@ -425,6 +431,13 @@ class AutoRoutingTests(unittest.TestCase):
         agent._clear_turn_route()
         self.addCleanup(agent._clear_turn_route)
         p = mock.patch.object(agent, "GROUP_MODE", False)
+        p.start()
+        self.addCleanup(p.stop)
+
+        # These tests drive the loop through the text protocol on purpose: they
+        # assert engine semantics (grants, DONE checks, batching), not transport.
+        p = mock.patch.object(agent, "_autonomous_native_reply",
+                              return_value=None)
         p.start()
         self.addCleanup(p.stop)
 

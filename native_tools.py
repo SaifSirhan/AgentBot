@@ -48,9 +48,23 @@ _DELEGATE_SCHEMA = {
 
 
 def _strict(schema: dict) -> dict:
-    """Copy a registry schema and make sure it cannot accept extra keys."""
+    """Turn a ToolSpec input schema into a function `parameters` object.
+
+    Registry schemas are written against the tool's input, which for most
+    tools is a bare string (`{"type": "string", "minLength": 1}`), not an
+    object. OpenAI function schemas must be objects, so a primitive schema is
+    wrapped as the `input` property the dispatcher already reads. Passing a
+    primitive through unchanged is what made search_web come back with no
+    query: the shape was invalid, and the model filled nothing in.
+    """
+    if schema.get("type") != "object":
+        return {
+            "type": "object",
+            "properties": {"input": dict(schema)},
+            "required": ["input"],
+            "additionalProperties": False,
+        }
     fixed = dict(schema)
-    fixed.setdefault("type", "object")
     fixed.setdefault("properties", {})
     fixed.setdefault("required", sorted(fixed["properties"]))
     fixed["additionalProperties"] = False
