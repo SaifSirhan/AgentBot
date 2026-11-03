@@ -939,9 +939,6 @@ def starts_new_task(user_request):
 # PROMPT ROUTING
 # ---------------------------
 MAX_PROMPT_TOKENS = 7800
-_STICKY_TOOL_TURNS = 2
-_STICKY_LOCK = _threading.RLock()
-_STICKY_CONTEXTS = []
 _ROUTED = _threading.local()
 
 TOOL_PROTOCOL = (
@@ -981,69 +978,7 @@ def _classify_unmatched_intents(user_request):
     return groups
 
 
-def _clear_sticky_tools():
-    with _STICKY_LOCK:
-        _STICKY_CONTEXTS.clear()
-
-
-def _sticky_context(history):
-    """Return the sticky-tool bucket for one conversation history object."""
-    key = history if isinstance(history, list) else None
-    for entry in _STICKY_CONTEXTS:
-        if entry["key"] is key:
-            return entry
-    entry = {"key": key, "ttl": {}}
-    _STICKY_CONTEXTS.append(entry)
-    del _STICKY_CONTEXTS[:-4]
-    return entry
-
-
-def _begin_sticky_turn(history):
-    """Return tools carried from the previous two turns, then age the TTLs."""
-    if GROUP_MODE:
-        return ()
-    with _STICKY_LOCK:
-        entry = _sticky_context(history)
-        carried = tuple(sorted(
-            name for name, turns in entry["ttl"].items() if turns > 0))
-        for name in list(entry["ttl"]):
-            entry["ttl"][name] -= 1
-            if entry["ttl"][name] <= 0:
-                del entry["ttl"][name]
-        return carried
-
-
-def _remember_sticky_tools(history, names):
-    """Keep tools used this turn available for the next two turns."""
-    if GROUP_MODE:
-        return
-    unique = []
-    for name in names:
-        if isinstance(name, str) and name in VALID_TOOLS and name not in unique:
-            unique.append(name)
-    if not unique:
-        return
-    with _STICKY_LOCK:
-        entry = _sticky_context(history)
-        for name in unique:
-            entry["ttl"][name] = _STICKY_TOOL_TURNS
-
-
-def _executed_tool_names(step_log):
-    names = []
-    for line in step_log or ():
-        if not isinstance(line, str) or not line.startswith("Action: "):
-            continue
-        if "-> Result: " not in line:
-            continue
-        head = line[len("Action: "):].split(") -> Result: ", 1)[0]
-        name = head.partition("(")[0].strip()
-        if name and name not in ("chat", "done", "request_tool"):
-            names.append(name)
-    return names
-
-
-def _route_prompt(user_request, carry_tools=()):
+def _route_prompt(user_request):
     tools = prompt_catalog.build_tools(frozenset(VALID_TOOLS))
     routed = prompt_router.build_dynamic_prompt(
         user_request,
@@ -1052,10 +987,8 @@ def _route_prompt(user_request, carry_tools=()):
         classify_intents=_classify_unmatched_intents,
         max_tokens=MAX_PROMPT_TOKENS,
         reserve_tokens=200,
-        fallback_tools=prompt_catalog.FALLBACK_TOOLS,
         # Built later in this module; looked up when routing runs.
         tool_registry=TOOL_REGISTRY,
-        carry_tools=carry_tools,
     )
     selected = list(routed.tools)
     prompt = routed.system_prompt.replace(
@@ -1138,9 +1071,6 @@ def _grant_requested_tool(name):
     spec = _autonomous_tool_spec(name) if loop is not None else None
     if allowed is not None:
         allowed.add(name)
-        granted = getattr(_ROUTED, "granted_tools", None)
-        if granted is not None:
-            granted.add(name)
     if needs_description:
         _ROUTED.prompt = prompt + f"\n\n- {name}: {description}"
     if loop is not None:
@@ -1159,14 +1089,14 @@ def _not_allowed_error(tool):
             f"Use one of: {', '.join(sorted(allowed))}.")
 
 
-def _set_turn_route(user_request, carry_tools=()):
+def _set_turn_route(user_request):
     active = getattr(_ROUTED, "autonomous_loop", None)
     if active is None:
         _clear_turn_route()
     if GROUP_MODE:
         return
     try:
-        prompt, selected = _route_prompt(user_request, carry_tools=carry_tools)
+        prompt, selected = _route_prompt(user_request)
     except Exception as exc:
         if active is not None:
             # A mid-task router failure cannot revoke existing grants or open access.
@@ -1180,7 +1110,6 @@ def _set_turn_route(user_request, carry_tools=()):
         return
     _ROUTED.prompt = prompt
     _ROUTED.allowed = {tool.name for tool in selected} | {"chat", "done"}
-    _ROUTED.granted_tools = set()
 
 
 def _build_plan_prompt(user_request, context, correction=None, native=False):
@@ -4996,7 +4925,9 @@ If the user says pause, skip, next, or stop the music, you MUST use media_contro
 If the user asks to queue a song, use queue_on_ytm, NOT media_control or play_on_youtube.
 NEVER say a song is queued, paused, or playing unless you have successfully run media_control, play_on_youtube, or queue_on_ytm and verified the result. Do not guess.
 
-NEVER name the tools you have or lack. If you cannot see an image, say so — never describe colors or layout from its source code."""
+NEVER name the tools you have or lack. If you cannot see an image, say so — never describe colors or layout from its source code.
+
+NEVER explain your tool availability to the user. Do not say "I don't have search_web this turn". If a user asks a casual question, just answer it using your internal knowledge. If you genuinely cannot do a task, say "I can't do that right now" and move on. Do NOT generate meta-commentary about your internal logs, verification steps, or tool lists."""
 
 # ---------------------------
 # TOOL REGISTRY
@@ -6769,9 +6700,7 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
     step_log = _StepLog(on_step)
     last_signature = None
     reset_python_failures()
-    sticky_history = conversation_history
-    _set_turn_route(
-        user_input, carry_tools=_begin_sticky_turn(sticky_history))
+    _set_turn_route(user_input)
     _raise_if_stopped(stop_event)
     checkpoint = _latest_task_checkpoint(conversation_history)
     task_active = bool(checkpoint and checkpoint.get("status") not in {"success", "completed"})
@@ -6790,7 +6719,6 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
         print(f"[compactor] skipped: {e}")
     _raise_if_stopped(stop_event)
     # Force-inject RAG context for content-ish questions
-    rag_used = False
     try:
         from rag_tool import search_documents
         words = user_input.split()
@@ -6798,7 +6726,6 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
         if len(words) >= 3:
             hits = search_documents(user_input)
             if hits and "No relevant information" not in hits and "No documents indexed" not in hits:
-                rag_used = True
                 user_input = (
                     "=== AUTO-RETRIEVED FROM USER'S INDEXED DOCUMENTS ===\n"
                     f"{hits}\n"
@@ -6850,6 +6777,11 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
 
     def _reply_allowed(reply):
         _raise_if_stopped(stop_event)
+        # Conversation, not a task claim: with no tool executed there is no
+        # tool evidence to verify, and running the auditor anyway rewrites
+        # ordinary replies that mention past-tense actions.
+        if not tool_executions_this_turn:
+            return True
         try:
             engine = verification_adapter.build_engine(
                 tool_executions_this_turn, stop_event=stop_event)
@@ -7051,10 +6983,6 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
         tool_executions_this_turn.append((tool, inp, output))
         print(f"\n{output}")
         step_log.append(f"Action: {tool}({inp}) -> Result: {output}")
-        # Pin as it runs, not at the end of the turn: a chain that dies on a
-        # provider error never reaches the end-of-turn bookkeeping, and the
-        # follow-up then loses the tool that was doing the work.
-        _remember_sticky_tools(sticky_history, (tool,))
         print(f"  [step {step+1} took {time.time()-step_start:.1f}s]")
 
         # Run any extra tool calls the LLM packed into the same response
@@ -7182,13 +7110,6 @@ Reply:"""
         except Exception as e:
             print(f"[skill-gen] failed: {e}")
 
-    sticky_tools = _executed_tool_names(step_log)
-    sticky_tools.extend(sorted(getattr(_ROUTED, "granted_tools", ())))
-    if rag_used:
-        # Auto-retrieval is document search even when the model never calls
-        # the tool; keep rag_search available for the follow-up.
-        sticky_tools.append("rag_search")
-    _remember_sticky_tools(sticky_history, sticky_tools)
     _clear_stop_event()
     _clear_turn_route()
     return step_log

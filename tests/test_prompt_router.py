@@ -41,142 +41,72 @@ def words(text):
 
 
 class RoutingTests(unittest.TestCase):
-    def test_watch_a_movie_injects_stremio_and_os_rules(self):
-        result = pr.build_dynamic_prompt(
+    def test_every_request_exposes_every_available_tool(self):
+        tools = example_tools()
+        for request in (
             "watch a movie",
-            example_tools(),
-            count_tokens=words,
-            max_tokens=2000,
-        )
+            "edit a file",
+            "tell me a joke",
+            "do not use python_execute",
+            "",
+        ):
+            with self.subTest(request=request):
+                result = pr.build_dynamic_prompt(
+                    request, tools, count_tokens=words, max_tokens=2000)
+                self.assertEqual(result.tools, tuple(tools))
+                for tool in tools:
+                    self.assertIn(f"- {tool.name}:", result.system_prompt)
+
+    def test_rules_follow_the_request_even_though_tools_do_not(self):
+        result = pr.build_dynamic_prompt(
+            "watch a movie", example_tools(), count_tokens=words, max_tokens=2000)
         self.assertIn(pr.RULES["stremio"], result.system_prompt)
         self.assertIn(pr.RULES["os"], result.system_prompt)
         self.assertNotIn(pr.RULES["python"], result.system_prompt)
         self.assertEqual(
-            [tool.name for tool in result.tools],
-            ["stremio_play", "os_control"],
+            {tool.name for tool in result.tools},
+            {tool.name for tool in example_tools()},
         )
 
-    def test_edit_a_file_injects_python_rules_only(self):
+    def test_python_rules_do_not_hide_the_other_tools(self):
         result = pr.build_dynamic_prompt(
-            "edit a file",
-            example_tools(),
-            count_tokens=words,
-            max_tokens=2000,
-        )
+            "edit a file", example_tools(), count_tokens=words, max_tokens=2000)
         self.assertIn(pr.RULES["python"], result.system_prompt)
         self.assertNotIn(pr.RULES["stremio"], result.system_prompt)
-        self.assertNotIn(pr.RULES["os"], result.system_prompt)
-        self.assertEqual([tool.name for tool in result.tools], ["python_execute"])
-        self.assertIn("- python_execute:", result.system_prompt)
+        self.assertEqual(len(result.tools), len(example_tools()))
 
-    def test_artist_song_request_selects_music_tools(self):
+    def test_unmatched_request_uses_the_default_rule_groups(self):
+        result = pr.build_dynamic_prompt(
+            "tell me a joke", example_tools(), count_tokens=words, max_tokens=2000)
+        self.assertIn(pr.RULES["os"], result.system_prompt)
+        self.assertIn(pr.RULES["python"], result.system_prompt)
+        self.assertNotIn(pr.RULES["stremio"], result.system_prompt)
+        self.assertEqual(len(result.tools), len(example_tools()))
+
+    def test_research_rules_and_tools_are_not_starved_by_other_intents(self):
+        tools = pc.build_tools(frozenset({
+            "search_web", "execute_python", "open_app",
+        }))
+        result = pr.build_dynamic_prompt(
+            "research the best laptops and write a docx report",
+            tools, count_tokens=words, max_tokens=5000)
+        self.assertIn(pr.RULES["research"], result.system_prompt)
+        self.assertIn("search_web", {tool.name for tool in result.tools})
+        self.assertIn("execute_python", {tool.name for tool in result.tools})
+
+    def test_music_rules_and_tools_are_exposed_together(self):
         tools = pc.build_tools(frozenset({
             "youtube_search", "play_on_youtube", "media_control", "open_app",
         }))
-        for request in (
-            "find songs from Frank Ocean",
-            "play some music",
-            "what album is this",
-            "find that track",
-            "who is the artist",
-        ):
+        for request in ("find songs from Frank Ocean", "play some music"):
             with self.subTest(request=request):
                 result = pr.build_dynamic_prompt(
                     request, tools, count_tokens=words, max_tokens=5000)
-                names = {tool.name for tool in result.tools}
-                self.assertIn("youtube_search", names)
-                self.assertIn("play_on_youtube", names)
                 self.assertIn(pr.RULES["music"], result.system_prompt)
-
-    def test_carry_tools_survive_a_bare_followup(self):
-        tools = pc.build_tools(frozenset({
-            "rag_search", "search_web", "read_file", "open_app",
-        }))
-        result = pr.build_dynamic_prompt(
-            "yeah", tools, count_tokens=words, max_tokens=5000,
-            carry_tools=("rag_search",))
-        self.assertIn("rag_search", {tool.name for tool in result.tools})
-        self.assertIn("- rag_search:", result.system_prompt)
-
-    def test_unknown_carry_tools_are_ignored(self):
-        result = pr.build_dynamic_prompt(
-            "yeah", example_tools(), count_tokens=words, max_tokens=5000,
-            carry_tools=("no_such_tool",))
-        self.assertNotIn(
-            "no_such_tool", {tool.name for tool in result.tools})
-
-    def test_top_five_tools_are_selected(self):
-        tools = [
-            pr.Tool(f"file_tool_{i}", f"Edit file {i}.", ("python",), ("file",))
-            for i in range(8)
-        ]
-        result = pr.build_dynamic_prompt(
-            "edit a file", tools, count_tokens=words, max_tokens=5000)
-        self.assertEqual(len(result.tools), 5)
-        self.assertEqual(
-            [tool.name for tool in result.tools],
-            [f"file_tool_{i}" for i in range(5)],
-        )
-
-    def test_search_and_click_exposes_the_whole_ui_toolset(self):
-        """A multi-step request must not leave the model able to search but
-        unable to type or click. The UI siblings are selected as one set."""
-        tools = pc.build_tools(
-            frozenset(pc.OS_TOOLS) | frozenset({"search_web"}))
-        result = pr.build_dynamic_prompt(
-            "search the web for the newest reviews and click the first result",
-            tools, count_tokens=words, max_tokens=7800,
-            fallback_tools=pc.FALLBACK_TOOLS)
-        names = {tool.name for tool in result.tools}
-        self.assertIn("search_web", names)
-        self.assertIn("click_coordinates", names)
-        self.assertIn("type_text", names)
-
-    def test_image_path_in_request_pins_the_vision_tools(self):
-        """A request that names an image file must be able to look at it."""
-        tools = pc.build_tools(
-            frozenset(pc.OS_TOOLS)
-            | frozenset({"analyze_screenshot", "describe_image"}))
-        for name in ("shot.png", "shot.jpg", "shot.jpeg"):
-            with self.subTest(name=name):
-                result = pr.build_dynamic_prompt(
-                    f"what colours are in C:\\Users\\USER\\Downloads\\{name}",
-                    tools, count_tokens=words, max_tokens=7800,
-                    fallback_tools=pc.FALLBACK_TOOLS)
-                names = {tool.name for tool in result.tools}
-                self.assertIn("describe_image", names)
-                self.assertIn("analyze_screenshot", names)
-
-    def test_core_rules_do_not_ask_the_model_to_explain_gaps(self):
-        """The inventory ban itself lives in agent.CORE_RULES, which reaches
-        every prompt variant; this one copy keeps the routed rules short."""
-        self.assertNotIn("otherwise explain the limitation", pr.CORE_RULES)
-
-    def test_budget_drops_tools_but_keeps_required_rules(self):
-        tools = [
-            pr.Tool(f"file_tool_{i}", f"Edit file {i}.", ("python",), ("file",))
-            for i in range(2)
-        ]
-        one = pr.build_dynamic_prompt(
-            "edit a file", tools[:1], count_tokens=len, max_tokens=10_000,
-            reserve_tokens=0)
-        result = pr.build_dynamic_prompt(
-            "edit a file",
-            tools,
-            count_tokens=len,
-            max_tokens=len(one.system_prompt),
-            reserve_tokens=0,
-        )
-        self.assertEqual([tool.name for tool in result.tools], ["file_tool_0"])
-        self.assertIn(pr.RULES["python"], result.system_prompt)
-        self.assertIn(pr.CORE_RULES, result.system_prompt)
-        self.assertLessEqual(result.token_count, len(one.system_prompt))
-
-    def test_budget_too_small_for_rules_raises_instead_of_truncating(self):
-        with self.assertRaises(ValueError):
-            pr.build_dynamic_prompt(
-                "edit a file", example_tools(),
-                count_tokens=len, max_tokens=10, reserve_tokens=0)
+                self.assertEqual(len(result.tools), len(tools))
+        pause = pr.build_dynamic_prompt(
+            "pause the music", tools, count_tokens=words, max_tokens=5000)
+        self.assertIn("media_control", {tool.name for tool in pause.tools})
 
     def test_classifier_runs_only_when_keywords_find_nothing(self):
         calls = []
@@ -198,7 +128,7 @@ class RoutingTests(unittest.TestCase):
         )
         self.assertEqual(calls, ["do the mysterious thing"])
         self.assertIn(pr.RULES["python"], classified.system_prompt)
-        self.assertEqual([tool.name for tool in classified.tools], ["python_execute"])
+        self.assertEqual(len(classified.tools), len(example_tools()))
 
     def test_classifier_cannot_return_unknown_intents(self):
         with self.assertRaises(ValueError):
@@ -220,314 +150,37 @@ class RoutingTests(unittest.TestCase):
                 count_tokens=words,
             )
 
-    def test_unmatched_request_falls_back_to_os_and_python_tools(self):
-        result = pr.build_dynamic_prompt(
-            "tell me a joke", example_tools(), count_tokens=words, max_tokens=2000)
-        self.assertNotEqual(result.tools, ())
-        self.assertEqual(
-            [tool.name for tool in result.tools],
-            ["os_control", "python_execute"],
-        )
-        self.assertIn(pr.RULES["os"], result.system_prompt)
-        self.assertIn(pr.RULES["python"], result.system_prompt)
-        self.assertNotIn(pr.RULES["stremio"], result.system_prompt)
-        self.assertNotIn("No relevant tools are exposed.", result.system_prompt)
+    def test_budget_raises_instead_of_hiding_tools(self):
+        tools = [
+            pr.Tool(f"file_tool_{i}", "Edit file. " * 50, ("python",))
+            for i in range(2)
+        ]
+        with self.assertRaisesRegex(ValueError, "(?i)toolset.*budget"):
+            pr.build_dynamic_prompt(
+                "edit a file", tools, count_tokens=len,
+                max_tokens=100, reserve_tokens=0)
 
-    def test_fallback_uses_the_named_core_tools_in_order(self):
+    def test_budget_guard_keeps_the_complete_catalog(self):
+        tools = [pr.Tool(f"file_tool_{i}", "Edit file.", ("python",))
+                 for i in range(8)]
+        result = pr.build_dynamic_prompt(
+            "edit a file", tools, count_tokens=len,
+            max_tokens=10_000, reserve_tokens=0)
+        self.assertEqual(len(result.tools), 8)
+        self.assertLessEqual(result.token_count, 10_000)
+
+    def test_registry_descriptions_are_used_for_every_tool(self):
+        class Registry:
+            def describe(self, name):
+                return f"registry description for {name}"
+
         result = pr.build_dynamic_prompt(
             "tell me a joke", example_tools(), count_tokens=words,
-            max_tokens=2000,
-            fallback_tools=("python_execute", "os_control"),
-        )
-        self.assertEqual(
-            [tool.name for tool in result.tools],
-            ["python_execute", "os_control"],
-        )
-
-    def test_fallback_names_missing_from_the_catalog_are_ignored(self):
-        result = pr.build_dynamic_prompt(
-            "tell me a joke", example_tools(), count_tokens=words,
-            max_tokens=2000,
-            fallback_tools=("os_control", "no_such_tool"),
-        )
-        self.assertEqual([tool.name for tool in result.tools], ["os_control"])
-
-    def test_matched_requests_never_receive_the_fallback(self):
-        result = pr.build_dynamic_prompt(
-            "watch a movie", example_tools(), count_tokens=words,
-            max_tokens=2000,
-            fallback_tools=("python_execute", "os_control"),
-        )
-        self.assertEqual(
-            [tool.name for tool in result.tools],
-            ["stremio_play", "os_control"],
-        )
-        self.assertNotIn(pr.RULES["python"], result.system_prompt)
-
-    def test_named_search_and_python_survive_docx_tool_ranking(self):
-        tools = [
-            pr.Tool(f"document_tool_{i}", "Document helper.", ("python",),
-                    ("docx", "document", "write"))
-            for i in range(7)
-        ] + [
-            pr.Tool("search_web", "Search the web.", (), ("search", "web")),
-            pr.Tool("execute_python", "Execute Python.", ("python",),
-                    ("python", "file")),
-        ]
-        result = pr.build_dynamic_prompt(
-            "Use search_web to research sources, then use execute_python "
-            "to write a DOCX document.",
-            tools, count_tokens=words, max_tokens=5000,
-        )
-        names = {tool.name for tool in result.tools}
-        self.assertTrue({"search_web", "execute_python"} <= names)
-        self.assertIn("- search_web:", result.system_prompt)
-        self.assertIn("- execute_python:", result.system_prompt)
-        self.assertIn(pr.RULES["python"], result.system_prompt)
-        self.assertNotIn(pr.RULES["stremio"], result.system_prompt)
-        self.assertEqual(len(result.tools), 5)
-
-    def test_more_than_five_explicit_names_are_all_exposed(self):
-        tools = [pr.Tool(f"tool_{i}", "Requested helper.", ()) for i in range(7)]
-        result = pr.build_dynamic_prompt(
-            "Use tool_0, tool_1, tool_2, tool_3, tool_4, tool_5 and tool_6.",
-            tools, count_tokens=words, max_tokens=5000,
-        )
-        self.assertEqual({tool.name for tool in result.tools},
-                         {f"tool_{i}" for i in range(7)})
-        for tool in tools:
-            self.assertIn(f"- {tool.name}:", result.system_prompt)
-
-    def test_explicit_tool_cannot_be_silently_dropped_for_budget(self):
-        with self.assertRaisesRegex(ValueError, "(?i)mandatory.*budget"):
-            pr.build_dynamic_prompt(
-                "Use search_web.",
-                [pr.Tool("search_web", "Search details. " * 200, ())],
-                count_tokens=len, max_tokens=1500, reserve_tokens=0,
-            )
-
-    def test_budget_removes_optional_tools_not_explicit_names(self):
-        tools = [
-            pr.Tool(f"helper_{i}", "Optional details. " * 100, (), ("use",))
-            for i in range(6)
-        ] + [pr.Tool("search_web", "Search the web.", ())]
-        result = pr.build_dynamic_prompt(
-            "Use search_web.", tools, count_tokens=len,
-            max_tokens=1500, reserve_tokens=0,
-        )
-        self.assertEqual([tool.name for tool in result.tools], ["search_web"])
-        self.assertIn("- search_web:", result.system_prompt)
-        self.assertLessEqual(result.token_count, 1500)
-
-    def test_research_intent_always_pins_search_web(self):
-        tools = [
-            pr.Tool("search_web", "Search the web.", (), ("search", "web")),
-        ] + [
-            pr.Tool(f"document_tool_{i}", "Document helper.", ("python",),
-                    ("docx", "document"))
-            for i in range(7)
-        ]
-        for request in (
-            "research the best laptops for programming",
-            "search the web for laptop reviews",
-            "search for a good Italian restaurant",
-        ):
-            with self.subTest(request=request):
-                result = pr.build_dynamic_prompt(
-                    request, tools, count_tokens=words, max_tokens=5000)
-                names = [tool.name for tool in result.tools]
-                self.assertIn("search_web", names)
-                self.assertIn(pr.RULES["research"], result.system_prompt)
-                self.assertNotIn(pr.RULES["python"], result.system_prompt)
-
-    def test_classifier_research_intent_pins_the_same_tools(self):
-        tools = [
-            pr.Tool("search_web", "Search the web.", ()),
-            pr.Tool("os_control", "Desktop control.", ("os",)),
-        ]
-        result = pr.build_dynamic_prompt(
-            "compare three laptops", tools, count_tokens=words,
-            max_tokens=5000, classify_intents=lambda request: ["research"],
-        )
-        names = [tool.name for tool in result.tools]
-        self.assertIn("search_web", names)
-        self.assertIn(pr.RULES["research"], result.system_prompt)
-
-    def test_document_writes_pin_registered_python(self):
-        tools = [
-            pr.Tool(f"a_document_{i}", "Document helper.", ("python",),
-                    ("docx", "document"))
-            for i in range(7)
-        ] + [pr.Tool("execute_python", "Execute Python.", ("python",),
-                     ("python", "file"))]
-        for request in (
-            "Create report.docx with the results.",
-            "Write a Word document with the findings.",
-            "Generate a DOCX summary.",
-            "Save the results as a document.",
-        ):
-            with self.subTest(request=request):
-                result = pr.build_dynamic_prompt(
-                    request, tools, count_tokens=words, max_tokens=5000)
-                self.assertIn("execute_python", [tool.name for tool in result.tools])
-                self.assertIn("- execute_python:", result.system_prompt)
-                self.assertIn(pr.RULES["python"], result.system_prompt)
-                self.assertNotIn(pr.RULES["stremio"], result.system_prompt)
-
-    def test_document_write_does_not_invent_unregistered_python(self):
-        result = pr.build_dynamic_prompt(
-            "Create a DOCX document.",
-            [pr.Tool("write_document", "Write a document.", ("python",))],
-            count_tokens=words, max_tokens=5000,
-        )
-        self.assertEqual([tool.name for tool in result.tools], ["write_document"])
-        self.assertNotIn("- execute_python:", result.system_prompt)
-
-    def test_implicit_web_research_survives_document_tool_ranking(self):
-        tools = [
-            pr.Tool(f"document_tool_{i}", "Document helper.", ("python",),
-                    ("docx", "document", "write"))
-            for i in range(7)
-        ] + [
-            pr.Tool("search_web", "Search the web.", (), ("search", "web")),
-            pr.Tool("execute_python", "Execute Python.", ("python",)),
-        ]
-        for request in (
-            "Search the web for UM parties then write a docx.",
-            "Research Universiti Malaya student parties and write a document.",
-        ):
-            with self.subTest(request=request):
-                result = pr.build_dynamic_prompt(
-                    request, tools, count_tokens=words, max_tokens=5000)
-                self.assertTrue({"search_web", "execute_python"} <=
-                                {tool.name for tool in result.tools})
-
-    def test_document_searches_do_not_grant_python_tools(self):
-        tools = [
-            pr.Tool("search_web", "Search the web.", (),
-                    ("search", "web", "docx", "document")),
-            pr.Tool("execute_python", "Execute Python.", ("python",),
-                    ("python", "file")),
-        ]
-        for request in (
-            "Search the web for DOCX templates.",
-            "Search for document editors.",
-            "Use search_web to find DOCX documentation.",
-        ):
-            with self.subTest(request=request):
-                result = pr.build_dynamic_prompt(
-                    request, tools, count_tokens=words, max_tokens=5000)
-                self.assertEqual([tool.name for tool in result.tools], ["search_web"])
-                self.assertNotIn(pr.RULES["stremio"], result.system_prompt)
-
-    def test_implicit_intents_survive_ranking_cap_and_budget(self):
-        tools = [
-            pr.Tool("a_desktop", "Inspect desktop.", ("os",),
-                    ("screenshot", "desktop")),
-        ] + [
-            pr.Tool(f"b_desktop_{i}", "Desktop details. " * 100, ("os",),
-                    ("screenshot", "desktop"))
-            for i in range(6)
-        ] + [pr.Tool("execute_python", "Edit files.", ("python",), ("file",))]
-        for budget in (10_000, 1500):
-            with self.subTest(budget=budget):
-                result = pr.build_dynamic_prompt(
-                    "Take a screenshot of the desktop and edit a file.",
-                    tools, count_tokens=len, max_tokens=budget, reserve_tokens=0)
-                self.assertTrue({"a_desktop", "execute_python"} <=
-                                {tool.name for tool in result.tools})
-                self.assertIn("- execute_python:", result.system_prompt)
-                self.assertIn(pr.RULES["os"], result.system_prompt)
-                self.assertIn(pr.RULES["python"], result.system_prompt)
-                self.assertNotIn(pr.RULES["stremio"], result.system_prompt)
-                self.assertLessEqual(len(result.tools), 5)
-                self.assertLessEqual(result.token_count, budget)
-
-    def test_budget_cannot_drop_implicit_intent_coverage(self):
-        tools = [
-            pr.Tool("desktop", "Inspect. " * 90, ("os",), ("desktop",)),
-            pr.Tool("files", "Edit. " * 150, ("python",), ("file",)),
-        ]
-        with self.assertRaisesRegex(ValueError, "(?i)mandatory.*budget"):
-            pr.build_dynamic_prompt(
-                "Inspect the desktop and edit a file.", tools,
-                count_tokens=len, max_tokens=2000, reserve_tokens=0)
-
-    def test_stremio_dependency_survives_crowded_ranking_and_budget(self):
-        tools = [pr.Tool("a_play", "Play movie.", ("stremio",), ("movie",))] + [
-            pr.Tool(f"b_play_{i}", "Playback details. " * 100, ("stremio",),
-                    ("movie",))
-            for i in range(6)
-        ] + [pr.Tool("os_control", "Control desktop.", ("os",))]
-        for budget in (10_000, 1500):
-            with self.subTest(budget=budget):
-                result = pr.build_dynamic_prompt(
-                    "Watch a movie.", tools, count_tokens=len,
-                    max_tokens=budget, reserve_tokens=0)
-                self.assertTrue({"a_play", "os_control"} <=
-                                {tool.name for tool in result.tools})
-                self.assertIn("- os_control:", result.system_prompt)
-                self.assertIn(pr.RULES["stremio"], result.system_prompt)
-                self.assertIn(pr.RULES["os"], result.system_prompt)
-                self.assertNotIn(pr.RULES["python"], result.system_prompt)
-
-    def test_classifier_multi_intent_coverage_is_retained(self):
-        tools = [pr.Tool(f"a_os_{i}", "Desktop helper.", ("os",))
-                 for i in range(6)] + [pr.Tool("z_files", "File helper.", ("python",))]
-        result = pr.build_dynamic_prompt(
-            "Do the task.", tools, count_tokens=words,
-            classify_intents=lambda _request: ["os", "python"], max_tokens=5000)
-        self.assertIn("z_files", [tool.name for tool in result.tools])
-        self.assertIn("a_os_0", [tool.name for tool in result.tools])
-
-    def test_explicit_shared_tool_does_not_leak_stremio_rules(self):
-        result = pr.build_dynamic_prompt(
-            "Use open_app to inspect my screen.",
-            [pr.Tool("open_app", "Open an approved app.", ("os", "stremio"))],
-            count_tokens=words, max_tokens=5000)
-        self.assertEqual([tool.name for tool in result.tools], ["open_app"])
-        self.assertNotIn(pr.RULES["stremio"], result.system_prompt)
-
-    def test_only_positive_whole_tool_names_are_pinned(self):
-        tools = [
-            pr.Tool("search_web", "Search.", ()),
-            pr.Tool("execute_python", "Compute.", ()),
-        ]
-        for request, expected in (
-            ("Do not use search_web. Use execute_python.", ["execute_python"]),
-            ("Never use search_web; use execute_python.", ["execute_python"]),
-            ("Don't use search_web, but use execute_python.", ["execute_python"]),
-            ("Use execute_python; do not use search_web.", ["execute_python"]),
-            ("Never use search_web or execute_python.", []),
-            ("Use search_web_extra instead.", []),
-            ("Use SEARCH_WEB.", ["search_web"]),
-        ):
-            with self.subTest(request=request):
-                result = pr.build_dynamic_prompt(
-                    request, tools, count_tokens=words, max_tokens=5000)
-                self.assertEqual([tool.name for tool in result.tools], expected)
-
-    def test_explanations_and_avoided_tool_names_are_not_mandatory(self):
-        tools = [pr.Tool("execute_python", "Compute.", ()),
-                 pr.Tool("search_web", "Search.", ())]
-        for request in (
-            "Explain the quoted text 'execute_python'; use search_web for documentation.",
-            "Explain execute_python; use search_web for documentation.",
-            "Avoid execute_python; use search_web.",
-        ):
-            with self.subTest(request=request):
-                result = pr.build_dynamic_prompt(
-                    request, tools, count_tokens=words, max_tokens=5000)
-                self.assertEqual([tool.name for tool in result.tools], ["search_web"])
-
-    def test_explicit_backtick_tool_calls_remain_mandatory(self):
-        tools = [pr.Tool("execute_python", "Compute.", ()),
-                 pr.Tool("search_web", "Search.", ())]
-        result = pr.build_dynamic_prompt(
-            "Use `search_web` and `execute_python`.", tools,
-            count_tokens=words, max_tokens=5000)
-        self.assertEqual({tool.name for tool in result.tools},
-                         {"search_web", "execute_python"})
+            max_tokens=5000, tool_registry=Registry())
+        for tool in example_tools():
+            self.assertIn(
+                f"- {tool.name}: registry description for {tool.name}",
+                result.system_prompt)
 
     def test_capability_shortage_guidance_uses_request_tool(self):
         result = pr.build_dynamic_prompt(
@@ -540,6 +193,11 @@ class RoutingTests(unittest.TestCase):
                          result.system_prompt)
         self.assertIn("Ask for clarification when the request", result.system_prompt)
         self.assertIn("Tool access is not authorization", result.system_prompt)
+
+    def test_core_rules_do_not_ask_the_model_to_explain_gaps(self):
+        """The inventory ban itself lives in agent.CORE_RULES, which reaches
+        every prompt variant; this one copy keeps the routed rules short."""
+        self.assertNotIn("otherwise explain the limitation", pr.CORE_RULES)
 
     def test_empty_catalog_does_not_ask_to_clarify_missing_capabilities(self):
         result = pr.build_dynamic_prompt(
@@ -654,7 +312,7 @@ class WeatherRoutingTests(unittest.TestCase):
         return pr.build_dynamic_prompt(
             request, self.tools, count_tokens=words, max_tokens=2000)
 
-    def test_weather_questions_expose_the_weather_tool(self):
+    def test_weather_questions_inject_weather_rules(self):
         for request in (
             "will it rain tomorrow",
             "what's the temperature in Paris",
@@ -664,11 +322,10 @@ class WeatherRoutingTests(unittest.TestCase):
         ):
             with self.subTest(request=request):
                 result = self.route(request)
-                self.assertIn(
-                    "weather", [tool.name for tool in result.tools], request)
                 self.assertIn(pr.RULES["weather"], result.system_prompt, request)
+                self.assertEqual(len(result.tools), len(self.tools))
 
-    def test_air_quality_questions_expose_the_air_quality_tool(self):
+    def test_air_quality_questions_inject_air_quality_rules(self):
         for request in (
             "what is the air quality in Berlin",
             "show me the aqi for today",
@@ -677,13 +334,8 @@ class WeatherRoutingTests(unittest.TestCase):
             with self.subTest(request=request):
                 result = self.route(request)
                 self.assertIn(
-                    "air_quality", [tool.name for tool in result.tools], request)
-                self.assertIn(
                     pr.RULES["air_quality"], result.system_prompt, request)
-
-
-if __name__ == "__main__":
-    unittest.main()
+                self.assertEqual(len(result.tools), len(self.tools))
 
 
 class AgentRoutingTests(unittest.TestCase):
@@ -717,7 +369,7 @@ class AgentRoutingTests(unittest.TestCase):
         for name in ("read_file", "write_file", "patch_file",
                      "edit_docx_safe", "load_skill"):
             self.assertIn(name, prompt)
-        self.assertLess(len(prompt) / 4, 7800)
+        self.assertLess(len(prompt) / 4, self.agent.MAX_PROMPT_TOKENS)
 
     def test_artist_song_prompt_exposes_music_tools(self):
         prompt = self.agent._build_plan_prompt(
@@ -770,21 +422,29 @@ class AgentRoutingTests(unittest.TestCase):
         self.assertIn("- weather:", prompt)
         self.assertIn(pr.RULES["weather"], prompt)
 
-    def test_turn_allowlist_blocks_unrelated_tools(self):
+    def test_turn_allowlist_exposes_every_catalog_tool(self):
         self.agent._set_turn_route("watch a movie")
         allowed = self.agent._ROUTED.allowed
-        self.assertNotIn("read_file", allowed)
+        self.assertEqual(allowed, set(self.agent.VALID_TOOLS))
+        self.assertIn("read_file", allowed)
+        self.assertIn("search_web", allowed)
         action, error = self.agent.parse_action(
             '{"tool": "read_file", "input": "notes.txt"}')
-        self.assertIsNone(action)
-        self.assertIn("not available this turn", error)
-        self.assertTrue(
-            self.agent._execute_tool_impl(
-                {"tool": "read_file", "input": "notes.txt"}
-            ).startswith("ERROR: Tool 'read_file' is not available"))
+        self.assertIsNone(error)
+        self.assertEqual(action["tool"], "read_file")
+
+    def test_core_rules_ban_tool_meta_commentary(self):
+        prompt = self.agent._build_plan_prompt("hello", "")
+        self.assertIn("NEVER explain your tool availability to the user.", prompt)
+        self.assertIn('Do not say "I don\'t have search_web this turn".', prompt)
+        self.assertIn("Do NOT generate meta-commentary", prompt)
 
     def test_group_mode_keeps_the_existing_tool_index(self):
         with mock.patch.object(self.agent, "GROUP_MODE", True):
             prompt = self.agent._build_plan_prompt("hello", "")
         self.assertIn("screenshot_background", prompt)
         self.assertIsNone(getattr(self.agent._ROUTED, "allowed", None))
+
+
+if __name__ == "__main__":
+    unittest.main()

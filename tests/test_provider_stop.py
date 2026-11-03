@@ -257,8 +257,20 @@ class ProviderStopTests(unittest.TestCase):
             parse.assert_not_called()
 
     def test_normal_turn_verification_fault_fails_closed(self):
-        with mock.patch.object(self.a, "get_valid_action", return_value=({"tool": "chat", "input": "I saved the file."}, None)), \
-                mock.patch.object(self.a, "execute_tool", return_value="AI: I saved the file."), \
+        steps = iter([
+            ({"tool": "read_file", "input": "notes.txt"}, None),
+            ({"tool": "chat", "input": "I saved the file."}, None),
+            ({"tool": "chat", "input": "I saved the file."}, None),
+        ])
+
+        def plan(*_args):
+            return next(steps)
+
+        def execute(action):
+            return "data" if action["tool"] == "read_file" else "AI: I saved the file."
+
+        with mock.patch.object(self.a, "get_valid_action", side_effect=plan), \
+                mock.patch.object(self.a, "execute_tool", side_effect=execute), \
                 mock.patch.object(self.a.verification_adapter, "build_engine", side_effect=RuntimeError("broken")):
             log = self.a._run_agent_turn_impl("hello", [])
         self.assertNotIn("I saved the file.", "\n".join(log))
@@ -267,12 +279,24 @@ class ProviderStopTests(unittest.TestCase):
     def test_verification_build_and_reply_receive_shared_stop(self):
         stop = threading.Event()
         engine = object()
-        with mock.patch.object(self.a, "get_valid_action", return_value=({"tool": "chat", "input": "hello"}, None)), \
-                mock.patch.object(self.a, "execute_tool", return_value="AI: hello"), \
+        steps = iter([
+            ({"tool": "read_file", "input": "notes.txt"}, None),
+            ({"tool": "chat", "input": "hello"}, None),
+        ])
+
+        def plan(*_args):
+            return next(steps)
+
+        def execute(action):
+            return "data" if action["tool"] == "read_file" else "AI: hello"
+
+        with mock.patch.object(self.a, "get_valid_action", side_effect=plan), \
+                mock.patch.object(self.a, "execute_tool", side_effect=execute), \
                 mock.patch.object(self.a.verification_adapter, "build_engine", return_value=engine) as build, \
                 mock.patch.object(self.a.verification_adapter, "reply_is_supported", return_value=True) as reply:
             self.a._run_agent_turn_impl("hello", [], stop_event=stop)
-        build.assert_called_once_with([], stop_event=stop)
+        build.assert_called_once_with(
+            [("read_file", "notes.txt", "data")], stop_event=stop)
         reply.assert_called_once_with(engine, "hello", stop_event=stop)
 
     def test_normal_turn_stop_propagates_without_fallback_or_skill_generation(self):
@@ -282,9 +306,15 @@ class ProviderStopTests(unittest.TestCase):
                 if phase == "preset":
                     stop.set()
 
+                decisions = {"count": 0}
+
                 def plan(*_args, **_kwargs):
                     if phase == "planner":
                         stop.set()
+                    decisions["count"] += 1
+                    if phase.startswith("verification") and decisions["count"] == 1:
+                        # The verifier only runs after a real tool execution.
+                        return {"tool": "read_file", "input": "notes.txt"}, None
                     tool = "chat" if phase.startswith("verification") else "read_file"
                     action = {"tool": tool, "input": "notes.txt"}
                     if phase == "queued":

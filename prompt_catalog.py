@@ -37,12 +37,6 @@ WEATHER_TOOLS = frozenset({"weather"})
 AIR_QUALITY_TOOLS = frozenset({"air_quality"})
 MUSIC_TOOLS = frozenset({"youtube_search", "play_on_youtube"})
 
-# Fallback when a request matches no intent or keyword: desktop control plus
-# file/Python access, so the turn is never left without a way to act.
-FALLBACK_TOOLS = (
-    "open_app", "type_text", "execute_python", "read_file", "write_file",
-)
-
 DESCRIPTIONS = {
     "search_web": "Search the live web and return titles, URLs, and summaries.",
     "read_artifact": "Read the full text of a saved large tool-output artifact by id.",

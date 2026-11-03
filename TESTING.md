@@ -40,7 +40,7 @@ project modules under test become importable.
 
 | | |
 |---|---|
-| Tests | **1456** |
+| Tests | **1432** |
 | Duration | ~85 s |
 | Outcome | `Ran 1456 tests in ...` then `OK`, exit code 0 |
 

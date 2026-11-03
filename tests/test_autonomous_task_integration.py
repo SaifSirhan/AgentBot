@@ -147,19 +147,18 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
             self.assertIs(self.a._ROUTED.goal_verifier, verifier)
             self.assertTrue(self.a._grant_requested_tool(" screenshot_background ")[0])
             self.assertIn("- screenshot_background:", self.a._ROUTED.prompt)
+            self.assertIn("- search_web:", self.a._ROUTED.prompt)
             return action("screenshot_background")
         log = self.run_task("check my battery health", [
-            action("screenshot_background"),
             action("request_tool", " screenshot_background "), reroute, "DONE"])
-        self.assertNotIn("screenshot_background", self.catalogs()[0])
-        self.assertIn("screenshot_background", self.catalogs()[2])
-        self.assertIn("search_web", self.catalogs()[3])
+        self.assertIn("screenshot_background", self.catalogs()[0])
+        self.assertIn("search_web", self.catalogs()[-1])
         self.screen.assert_called_once_with("")
         self.assertIn(SUCCESS, "\n".join(log))
         self.assertEqual(self.a._ROUTED.__dict__, {})
         self.prompts.clear()
         self.run_task("check my battery health", ["DONE"])
-        self.assertNotIn("screenshot_background", self.catalogs()[0])
+        self.assertIn("screenshot_background", self.catalogs()[0])
 
     def test_host_grant_updates_loop_without_request_adapter(self):
         def grant():
@@ -385,14 +384,17 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         self.assertNotIn(SUCCESS, "\n".join(log))
 
     def test_group_grant_restrictions_remain_live(self):
+        reasons = []
+
         def blocked():
             with mock.patch.object(self.a, "GROUP_MODE", True):
                 ok, reason = self.a._grant_requested_tool("execute_python")
                 self.assertFalse(ok)
                 self.assertIn("blocked", reason)
+                reasons.append(reason)
             return "DONE"
         self.run_task("check battery health", [blocked, "DONE"])
-        self.assertNotIn("execute_python", self.catalogs()[1])
+        self.assertEqual(len(reasons), 1)
 
     def test_normal_unrouted_grant_does_not_require_catalog_rendering(self):
         with mock.patch.object(self.a, "_router_tool_description", side_effect=AssertionError("unused catalog")):
@@ -436,22 +438,21 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         self.assertNotIn(SUCCESS, "\n".join(log))
         self.assertFalse(any("EVIDENCE_JSON:" in p for p in self.prompts))
 
-    def test_restored_grant_and_observation_are_not_new_permission(self):
+    def test_resumed_task_exposes_the_full_catalog_without_a_replayed_grant(self):
         goal = "check battery health"
         history = ["User: " + goal]
-        self.screen.return_value = "ERROR: screenshot unavailable"
-        with mock.patch.object(self.a, "MAX_STEPS_PER_TURN", 2):
-            self.run_task(goal, [action("request_tool", "screenshot_background"), action("screenshot_background")], history)
+        self.semantic = '{"goal_met":false,"reason":"Still running."}'
+        with mock.patch.object(self.a, "MAX_STEPS_PER_TURN", 1):
+            self.run_task(goal, [action("screenshot_background")], history)
+        self.screen.assert_called_once_with("")
         self.screen.reset_mock()
-        self.screen.return_value = "Captured screen."
         self.prompts.clear()
-        self.responses = iter([action("screenshot_background"), action("request_tool", "screenshot_background"),
-                               action("screenshot_background"), "DONE"])
-        self.a.run_agent_turn("continue", history)
-        self.assertNotIn("screenshot_background", self.catalogs()[0])
-        self.assertIn("not available", self.prompts[1])
-        self.assertIn("screenshot_background", self.catalogs()[2])
-        self.screen.assert_called_once()
+        self.semantic = '{"goal_met":true,"reason":"All requested evidence is present."}'
+        self.responses = iter([action("screenshot_background"), "DONE"])
+        log = self.a.run_agent_turn("continue", history)
+        self.assertIn("screenshot_background", self.catalogs()[0])
+        self.screen.assert_called_once_with("")
+        self.assertIn(SUCCESS, "\n".join(log))
 
     def test_truncated_snapshot_is_not_restored_as_successful_receipt(self):
         history = [PREFIX + json.dumps({
@@ -492,10 +493,11 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
 
     def test_two_calls_in_one_response_cannot_grant_and_execute(self):
         self.run_task("check battery health", [
-            '[{"tool":"request_tool","input":"screenshot_background"},{"tool":"screenshot_background","input":""}]',
+            '[{"tool":"request_tool","args":{"input":"screenshot_background"}},'
+            '{"tool":"screenshot_background","args":{"input":""}}]',
             action("request_tool", "screenshot_background"), action("screenshot_background"), "DONE"])
-        self.assertNotIn("screenshot_background", self.catalogs()[1])
-        self.assertIn("screenshot_background", self.catalogs()[2])
+        self.assertIn("Cannot batch write/system_control tools", "\n".join(self.prompts))
+        self.assertIn("screenshot_background", self.catalogs()[1])
         self.screen.assert_called_once()
 
     def test_disk_checkpoint_restores_large_goal_notes_and_full_observations(self):

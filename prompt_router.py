@@ -45,11 +45,6 @@ DOCUMENT_WRITE_PATTERN = (
     rf"\b(?:{DOCUMENT_WRITE_VERBS})\b.*\b(?:docx|documents?)\b"
 )
 
-# A request that names an image file has to be able to look at it. Without a
-# vision tool the model describes colours it has never seen.
-VISION_TOOLS = ("analyze_screenshot", "describe_image")
-IMAGE_PATH_PATTERN = r"[^\s\"'|]+?\.(?:png|jpe?g)(?![a-z0-9])"
-
 INTENT_PATTERNS = {
     "stremio": (
         r"\bstremio\b",
@@ -151,15 +146,8 @@ def requires_react_loop(user_request: str) -> bool:
 
 DEPENDENCIES = {"stremio": {"os"}}
 
-# Basic desktop automation is one capability, not five. A turn that can click
-# but cannot type leaves the model mid-chain, and it reports the missing tool
-# to the user instead of finishing the job.
-UI_AUTOMATION_TOOLS = (
-    "click_coordinates", "uia_click", "type_text", "uia_type", "open_app",
-)
-
-# Used when nothing in the request matches an intent pattern or a tool
-# keyword: a turn must still be able to act on the desktop and the filesystem.
+# Used when nothing in the request matches an intent pattern: a turn must
+# still carry the rules for acting on the desktop and the filesystem.
 DEFAULT_FALLBACK_GROUPS = ("os", "python")
 
 
@@ -194,12 +182,6 @@ def positive_tool_request(user_request: str) -> str:
     return re.sub(r'"[^"\n]*"|`[^`\n]*`|(?<!\w)\'[^\'\n]*\'', quoted, text)
 
 
-def requested_tool_names(user_request: str, available_names: Iterable[str]) -> tuple[str, ...]:
-    text = positive_tool_request(user_request)
-    return tuple(sorted(name for name in available_names if re.search(
-        rf"(?<!\w){re.escape(name)}(?!\w)", text, re.I)))
-
-
 USE_VERBS = r"(?:use|using|used|call|calling|invoke|invoking|run|running|execute|executing|via)"
 
 
@@ -224,11 +206,17 @@ def build_dynamic_prompt(
     classify_intents: Callable[[str], Iterable[str]] | None = None,
     max_tokens: int = 2000,
     reserve_tokens: int = 200,
-    fallback_tools: Sequence[str] = (),
     fallback_groups: Sequence[str] = DEFAULT_FALLBACK_GROUPS,
     tool_registry: ToolRegistry | None = None,
-    carry_tools: Sequence[str] = (),
 ) -> RoutedPrompt:
+    """Expose every available tool; routing only selects rule text.
+
+    Keyword-based tool selection starved turns of tools the model could use,
+    and it then reported those capabilities as missing. The model decides
+    whether to call a tool by calling it or not, so the full catalog travels
+    on every turn. The budget guards against a runaway catalog; it never
+    hides tools to fit.
+    """
     budget = max_tokens - reserve_tokens
     if budget <= 0:
         raise ValueError("Token reserve must be smaller than max_tokens.")
@@ -240,31 +228,13 @@ def build_dynamic_prompt(
     for group in fallback_groups:
         if group not in RULES:
             raise ValueError(f"Unknown fallback group {group!r}")
-    if any(not isinstance(name, str) for name in fallback_tools):
-        raise ValueError("Fallback tool names must be strings.")
-    if any(not isinstance(name, str) for name in carry_tools):
-        raise ValueError("Carried tool names must be strings.")
 
     positive_request = positive_tool_request(user_request)
-    by_name = {tool.name: tool for tool in available_tools}
-    registry_descriptions = {}
-    if tool_registry is not None:
-        for tool in available_tools:
-            description = tool_registry.describe(tool.name)
-            if description is not None:
-                registry_descriptions[tool.name] = description
-    mandatory = set(requested_tool_names(user_request, by_name))
-    # A follow-up such as "yeah" reuses the tools that did the previous work.
-    mandatory.update(name for name in carry_tools if name in by_name)
-    document_write = bool(re.search(
-        DOCUMENT_WRITE_PATTERN, positive_request, re.I | re.S))
-    if document_write and "execute_python" in by_name:
-        mandatory.add("execute_python")
-
     intents = {
         group
         for group, patterns in INTENT_PATTERNS.items()
-        if any(re.search(p, positive_request, re.I | re.S) for p in patterns)
+        if any(re.search(pattern, positive_request, re.I | re.S)
+               for pattern in patterns)
     }
 
     # A classifier may select known IDs, never author system instructions.
@@ -273,15 +243,6 @@ def build_dynamic_prompt(
         if any(not isinstance(x, str) or x not in RULES for x in predicted):
             raise ValueError("Classifier returned an invalid intent.")
         intents.update(predicted)
-
-    # Research must never be routed without live search tools; otherwise the
-    # model reports a missing capability the router simply forgot to expose.
-    if "research" in intents:
-        mandatory.update(
-            name for name in ("search_web",) if name in by_name)
-
-    if re.search(IMAGE_PATH_PATTERN, positive_request, re.I):
-        mandatory.update(name for name in VISION_TOOLS if name in by_name)
 
     def expand(groups: set[str]) -> set[str]:
         expanded = set(groups)
@@ -294,93 +255,36 @@ def build_dynamic_prompt(
             expanded.update(added)
 
     active_groups = expand(intents)
-
-    def score(tool: Tool) -> int:
-        keyword_hits = sum(
-            bool(re.search(
-                rf"(?<!\w){re.escape(keyword)}(?!\w)",
-                positive_request,
-                re.I,
-            ))
-            for keyword in tool.keywords
-            if keyword.strip()
-        )
-        groups = set(tool.rule_groups)
-        return (
-            20 * len(groups & intents)
-            + 5 * len(groups & (active_groups - intents))
-            + 10 * keyword_hits
-        )
-
-    ranked = sorted(
-        ((score(tool), tool) for tool in available_tools),
-        key=lambda item: (-item[0], item[1].name),
-    )
-
-    # Incidental group membership must not activate unrelated rules.
-    covered = set().union(*(set(by_name[name].rule_groups) for name in mandatory))
-    for group in sorted(active_groups):
-        if group in covered:
-            continue
-        representative = next(
-            (tool for _, tool in ranked if group in tool.rule_groups), None)
-        if representative is not None:
-            mandatory.add(representative.name)
-            covered.update(representative.rule_groups)
-
-    # One UI tool implies the rest of the set: they are selected as mandatory,
-    # so neither the five-tool fill nor the budget trim can starve the chain.
-    ui_available = [name for name in UI_AUTOMATION_TOOLS if name in by_name]
-    if "os" in intents and any(name in mandatory for name in ui_available):
-        mandatory.update(ui_available)
-
-    selected = [tool for _, tool in ranked if tool.name in mandatory]
-    selected.extend([
-        tool for relevance, tool in ranked
-        if relevance > 0 and tool.name not in mandatory
-    ][:max(0, 5 - len(selected))])
-
-    # Nothing matched: fall back to the named core tools, then to every tool
-    # in the OS/Python groups. An empty selection is never a valid default.
-    used_fallback = False
-    if not selected:
-        selected = [by_name[name] for name in fallback_tools if name in by_name][:5]
-        if not selected:
-            selected = [
-                tool for tool in sorted(available_tools, key=lambda t: t.name)
-                if set(tool.rule_groups) & set(fallback_groups)
-            ][:5]
-        used_fallback = True
-
-    # Rules follow the request, never a tool's incidental membership: a
-    # shared tool such as open_app must not pull in the Stremio rules.
-    if not intents or used_fallback:
+    if not intents:
         active_groups = expand(set(active_groups) | set(fallback_groups))
 
-    def render(tools: list[Tool]) -> str:
-        sections = [CORE_RULES]
-        sections.extend(RULES[group] for group in sorted(active_groups))
-        if tools:
-            sections.append("Available tools:")
-            sections.extend(
-                f"- {tool.name}: "
-                f"{registry_descriptions.get(tool.name, tool.description)}"
-                for tool in tools
-            )
-        else:
-            sections.append(
-                "No relevant tools are exposed. Answer without tools when "
-                "possible; otherwise say in one sentence what you cannot do, "
-                "without naming any tool."
-            )
-        return "\n\n".join(sections)
+    selected = list(available_tools)
+    registry_descriptions = {}
+    if tool_registry is not None:
+        for tool in available_tools:
+            description = tool_registry.describe(tool.name)
+            if description is not None:
+                registry_descriptions[tool.name] = description
 
-    # Only the optional suffix may be removed to fit the token budget.
-    while True:
-        prompt = render(selected)
-        tokens = count_tokens(prompt)
-        if tokens <= budget:
-            return RoutedPrompt(prompt, tuple(selected), tokens)
-        if len(selected) == len(mandatory):
-            raise ValueError("Mandatory rules and tools exceed token budget.")
-        selected.pop()
+    sections = [CORE_RULES]
+    sections.extend(RULES[group] for group in sorted(active_groups))
+    if selected:
+        sections.append("Available tools:")
+        sections.extend(
+            f"- {tool.name}: "
+            f"{registry_descriptions.get(tool.name, tool.description)}"
+            for tool in selected
+        )
+    else:
+        sections.append(
+            "No relevant tools are exposed. Answer without tools when "
+            "possible; otherwise say in one sentence what you cannot do, "
+            "without naming any tool."
+        )
+    prompt = "\n\n".join(sections)
+    tokens = count_tokens(prompt)
+    if tokens > budget:
+        raise ValueError(
+            "Full toolset and rules exceed token budget; raise max_tokens "
+            "instead of hiding tools.")
+    return RoutedPrompt(prompt, tuple(selected), tokens)

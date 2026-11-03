@@ -215,18 +215,17 @@ class PromptInstructionTests(unittest.TestCase):
         self.assertLessEqual(len(native), len(text))
 
 
-class BudgetTests(unittest.TestCase):
-    def test_tools_array_fits_the_prompt_budget(self):
-        """Routed catalog + schemas must stay inside the static-plan guard."""
+class ToolArrayTests(unittest.TestCase):
+    def test_tools_array_exposes_the_full_catalog(self):
         agent._set_turn_route("open spotify and play jazz")
         tools = native_tools.build_specs(
             sorted(agent._ROUTED.allowed - {"chat", "done"}),
             agent.TOOL_REGISTRY, agent._router_tool_description)
-        serialized = json.dumps(tools)
         agent._clear_turn_route()
-        # chars/4 is the project's token estimate.
-        self.assertLess(len(serialized) / 4, 1200,
-                        f"tools array is {len(serialized)/4:.0f} tokens")
+        self.assertEqual(
+            {spec["function"]["name"] for spec in tools},
+            agent.VALID_TOOLS - {"chat", "done"},
+        )
 
 
 if __name__ == "__main__":

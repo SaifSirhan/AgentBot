@@ -107,9 +107,8 @@ class AutonomousIntegrationTests(unittest.TestCase):
         self.assertIn("blocked in group chats", joined)
         self.assertNotIn("read_file(autonomous)", joined)
 
-    def test_missing_tool_then_grant_refreshes_prompt_and_continues(self):
+    def test_grant_refreshes_prompt_and_continues(self):
         replies = iter([
-            '{"tool":"screenshot_background","input":""}',
             '{"tool":"request_tool","input":" screenshot_background "}',
             '{"tool":"screenshot_background","input":""}',
             "DONE",
@@ -124,11 +123,10 @@ class AutonomousIntegrationTests(unittest.TestCase):
         with mock.patch.object(agent, "ask_llm_direct", side_effect=llm), \
                 mock.patch.object(agent, "execute_tool", return_value="captured screen") as execute:
             step_log = agent._run_autonomous_goal("check my battery health")
-        self.assertIn("not available", prompts[1])
-        self.assertIn("request_tool", prompts[1])
-        system = prompts[2].split("\n\nUSER:", 1)[0]
-        catalog = json.loads(system.split("Allowed tools: ", 1)[1])
-        self.assertIn("screenshot_background", catalog)
+        for prompt in prompts[:2]:
+            system = prompt.split("\n\nUSER:", 1)[0]
+            catalog = json.loads(system.split("Allowed tools: ", 1)[1])
+            self.assertIn("screenshot_background", catalog)
         execute.assert_called_once_with({"tool": "screenshot_background", "input": ""})
         self.assertIn("Execution and goal checks passed", "\n".join(step_log))
 

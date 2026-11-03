@@ -280,7 +280,7 @@ class MusicCdpTests(unittest.TestCase):
             with self.subTest(request=request), mock.patch.object(
                     agent, "_classify_unmatched_intents", return_value=[]):
                 _prompt, tools = agent._route_prompt(request)
-            self.assertEqual(tools[0].name, "media_control")
+            self.assertIn("media_control", [tool.name for tool in tools])
 
     def test_close_music_tab_is_a_registered_dispatchable_tool(self):
         self.assertIn("close_music_tab", agent.VALID_TOOLS)

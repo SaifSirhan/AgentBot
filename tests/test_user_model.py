@@ -287,11 +287,11 @@ class PromptInjectionTests(UserModelTestBase):
 
         self.assertIn(memory.USER_TRAITS_WARNING, full)
         self.assertLess(
-            len(static) / 4, 2000,
+            len(static) / 4, 4100,
             f"static prompt is {len(static)} chars "
             f"(~{len(static) / 4:.0f} tokens)")
         self.assertLess(
-            len(full) / 4, 2400,
+            len(full) / 4, 4500,
             f"full prompt is {len(full)} chars (~{len(full) / 4:.0f} tokens)")
 
 
