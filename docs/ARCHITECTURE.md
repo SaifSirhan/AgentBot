@@ -9,6 +9,7 @@ the result is summarised back to the user.
 | Module | Responsibility |
 | --- | --- |
 | `agent.py` | Core: the single DeepSeek client (text, vision, search/fetch), tool dispatch, and the multi-step agent turn loop. Also holds the tool-description prompt the model uses to choose tools. |
+| `native_tools.py` | Adapter between the loop's text contracts and OpenAI-native function calling: builds the `tools` array, converts `tool_calls` back into action dicts, and replays `step_log` as `assistant`/`tool` messages. Owns no state. |
 | `agent_gui_qt.py` | PySide6 desktop UI — chat view, sidebar, input pill, settings overlay, tray, hotkeys, mic. |
 | `rag_tool.py` | Indexes local documents into ChromaDB with Sentence-Transformers embeddings; semantic search for retrieval-augmented answers. |
 | `memory.py` | Persistent user facts recalled across conversations. |
@@ -34,6 +35,32 @@ DeepSeek V4 Flash has explicit **thinking-mode control**: reasoning is disabled
 for normal tool-calling turns (so a small `max_tokens` budget isn't consumed by
 reasoning tokens), while `deep_research` uses a high-effort thinking path.
 
+## Native tool calling
+
+Each step is sent with a `tools` array of JSON-Schema functions built from the
+turn's routed catalog (`native_tools.build_specs`). Migrated tools bring their
+registry `input_schema`; the rest advertise the single `input` string the
+legacy dispatcher already expects. The response's `tool_calls` become the same
+action dicts the dispatcher has always taken, and the observation returns as a
+`role: "tool"` message keyed to the call's id.
+
+Two details that are easy to get wrong:
+
+- `tool_choice` stays `"auto"`. `"required"` is refused while thinking mode is
+  on, and forcing a call teaches the model to invent one to satisfy the API.
+- The provider will echo tool names it was never given, so returned names are
+  checked against `VALID_TOOLS` **and** this turn's allowlist before anything
+  executes. A rejection is retried with the error attached; it is not treated
+  as a transport failure.
+
+`tool_calls` may arrive in parallel, which maps onto the existing read-only
+batch path — writes are still refused there.
+
+The transcript is rebuilt from `step_log` on every step rather than stored as
+extra turn state, so there is one record of what ran. If the native call itself
+fails, the step falls back to the JSON-object text protocol; that is the only
+remaining use of it.
+
 ## Request flow
 
 ```
@@ -55,7 +82,11 @@ reasoning tokens), while `deep_research` uses a high-effort thinking path.
               +--------------------+---------------------+
                                    |
                     model returns either
-                    (a) plain text  or  (b) {tool, input}
+                    (a) plain text  or  (b) native tool_calls
+                        |                    |
+                 reply to user        executed, then sent back
+                                      as role:"tool" messages
+                                      (native_tools.py adapts)
                                    |
                                    v
                      +---------------------------+

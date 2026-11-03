@@ -44,6 +44,7 @@ import telegram_user
 import autonomous_loop as autonomous_engine
 import prompt_catalog
 import prompt_router
+import native_tools
 import verification_adapter
 
 # MODULE GUIDE
@@ -527,6 +528,48 @@ def _call_deepseek_thinking(prompt, force_json=False, max_tokens=4096):
         return f"Error: {e}"
 
 
+def _call_deepseek_native(messages, tools, max_tokens=None):
+    """One OpenAI-compatible turn with native function calling.
+
+    Returns (message, error) instead of a string, because the caller needs the
+    `tool_calls` array as well as the text. `tool_choice` stays "auto":
+    "required" is refused while thinking is on, and forcing a call teaches the
+    model to invent one to satisfy the API.
+    """
+    if not DEEPSEEK_API_KEY:
+        return None, "Error: DEEPSEEK_API_KEY not set"
+    body = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": 0.3,
+        # Reasoning is off for tool turns: it counts against max_tokens and a
+        # model that thinks out loud here just delays the call we want.
+        "reasoning_effort": "none",
+        "thinking": {"type": "disabled"},
+    }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    if max_tokens:
+        body["max_tokens"] = max_tokens
+    try:
+        r = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                     "Content-Type": "application/json"},
+            json=body, timeout=LLM_TIMEOUT)
+    except Exception as e:
+        return None, f"Error: {type(e).__name__}: {e}"
+    if r.status_code != 200:
+        return None, f"Error: HTTP {r.status_code}: {r.text[:200]}"
+    try:
+        choice = r.json()["choices"][0]
+    except (ValueError, KeyError, IndexError) as e:
+        return None, f"Error: malformed response from DeepSeek: {e}"
+    message = choice.get("message") or {}
+    return message, None
+
+
 # ---------------------------
 # FAILOVER DISPATCHER
 # ---------------------------
@@ -906,6 +949,18 @@ TOOL_PROTOCOL = (
     '{"tool": "request_tool", "input": "tool_name"}.'
 )
 
+# The same protocol for a call made with a real `tools` array. Telling a model
+# to emit JSON while also advertising schemas is how the old prompt asked for
+# text pretending to be a function call.
+NATIVE_TOOL_CALL_INSTRUCTION = "Use native tool calls, never fabricated XML tool calls."
+JSON_TOOL_CALL_INSTRUCTION = (
+    'To call a tool, output ONLY a JSON object: {"tool": "tool_name", '
+    '"input": "tool_input"}. Never write tool("arg") or XML.')
+TOOL_PROTOCOL_NATIVE = (
+    'Call load_skill("local:core_tools") for unknown tool input formats.\n'
+    'If a tool is not listed, call request_tool with its name.'
+)
+
 
 def _estimate_prompt_tokens(text):
     return len(text) // 4
@@ -1003,10 +1058,7 @@ def _route_prompt(user_request, carry_tools=()):
     )
     selected = list(routed.tools)
     prompt = routed.system_prompt.replace(
-        "Use native tool calls, never fabricated XML tool calls.",
-        'To call a tool, output ONLY a JSON object: {"tool": "tool_name", '
-        '"input": "tool_input"}. Never write tool("arg") or XML.',
-    )
+        NATIVE_TOOL_CALL_INSTRUCTION, JSON_TOOL_CALL_INSTRUCTION)
     load_skill = next(tool for tool in tools if tool.name == "load_skill")
     if load_skill not in selected:
         selected.append(load_skill)
@@ -1130,11 +1182,15 @@ def _set_turn_route(user_request, carry_tools=()):
     _ROUTED.granted_tools = set()
 
 
-def _build_plan_prompt(user_request, context, correction=None):
+def _build_plan_prompt(user_request, context, correction=None, native=False):
     """Build the exact prompt run_agent_turn's step 1 sends to the LLM.
 
     Extracted verbatim from ask_ai_for_plan so the eval harness can reuse the
     SAME prompt assembly (byte-identical) without duplicating it.
+
+    native=True swaps the "output a JSON object" protocol for the sentence that
+    matches a real `tools` array. The instruction is a replace, not a second
+    template, so the two variants cannot drift apart.
     """
     correction_block = (f"\n\nYour previous response was invalid: {correction}\n"
                         f"Respond with ONLY a corrected JSON object.") if correction else ""
@@ -1212,10 +1268,17 @@ def _build_plan_prompt(user_request, context, correction=None):
         except Exception as exc:
             print(f"[router] skipped: {exc}")
     if router_prompt:
-        instructions = f"{router_prompt}\n\n{TOOL_PROTOCOL}\n\n{CORE_RULES}"
+        protocol = TOOL_PROTOCOL_NATIVE if native else TOOL_PROTOCOL
+        instructions = f"{router_prompt}\n\n{protocol}\n\n{CORE_RULES}"
+        if native:
+            instructions = instructions.replace(
+                JSON_TOOL_CALL_INSTRUCTION, NATIVE_TOOL_CALL_INSTRUCTION)
     else:
         instructions = f"{TOOL_DESCRIPTIONS}\n{CORE_RULES}"
 
+    tail = ("Your response: reply in plain text, or call one of the tools."
+            if native else
+            "Your response (either a plain-text reply or a single JSON tool call):")
     prompt = f"""{skill_catalog}{skill_directive}{instructions}
 {CORE_PERSONA}{learned_block}{group_block}{time_block}{persona_block}{user_model_block}{facts_block}
 Context (recent conversation and tool results):
@@ -1223,7 +1286,7 @@ Context (recent conversation and tool results):
 
 User: {user_request}{correction_block}
 
-Your response (either a plain-text reply or a single JSON tool call):"""
+{tail}"""
     return prompt
 
 
@@ -1432,7 +1495,73 @@ def parse_action(plan_text):
     return {"tool": "chat", "input": raw}, None
 
 
+def _native_action(user_request, native_context, transcript, max_retries=2):
+    """Ask for the next step with a real `tools` array.
+
+    Returns (action, error, handled). handled=False means the request itself
+    could not be made, so the caller falls back to the text protocol instead of
+    ending the turn with nothing.
+
+    The transcript is rebuilt from step_log every call rather than kept as
+    turn state: the loop already treats step_log as the record of what ran, and
+    a second copy of that history would be free to drift.
+    """
+    global _LAST_FAILURE_REASON
+    prompt = _build_plan_prompt(user_request, native_context, native=True)
+    messages = [{"role": "system", "content": prompt}]
+    messages.extend(native_tools.messages_from_transcript(transcript))
+
+    allowed = set(getattr(_ROUTED, "allowed", None) or ()) or set(VALID_TOOLS)
+    tools = native_tools.build_specs(sorted(allowed - {"chat", "done"}),
+                                     TOOL_REGISTRY, _router_tool_description)
+
+    for _attempt in range(max_retries + 1):
+        _raise_if_stopped()
+        message, error = _call_deepseek_native(messages, tools)
+        _raise_if_stopped()
+        if error is not None:
+            _LAST_FAILURE_REASON = "error"
+            print(f"\n[Native call unavailable] {error}")
+            return None, None, False
+
+        actions, rejects = native_tools.actions_from_tool_calls(
+            message, valid_names=VALID_TOOLS, allowed=allowed,
+            object_input_tools=OBJECT_INPUT_TOOLS)
+        if rejects:
+            print(f"\n[Native call rejected] {rejects[0]}")
+            messages.append({"role": "assistant",
+                             "content": (message or {}).get("content") or ""})
+            messages.append({"role": "user", "content": " ".join(rejects)})
+            continue
+        if actions:
+            return (actions[0] if len(actions) == 1 else actions), None, True
+
+        content = ((message or {}).get("content") or "").strip()
+        if content:
+            return {"tool": "chat", "input": content}, None, True
+        messages.append({"role": "user",
+                         "content": "Reply in plain text or call a tool."})
+
+    _raise_if_stopped()
+    return None, "Model produced no usable tool call.", True
+
+
 def get_valid_action(user_request, context, max_retries=2):
+    """Next action for this step: native tool calling, else the text protocol.
+
+    The native inputs travel as turn state (`_ROUTED.native_context` /
+    `.transcript`) rather than new parameters, because this function is the
+    loop's seam and callers stub it as-is. native_context is the history
+    WITHOUT this turn's step_log — with it, an observation would be sent twice,
+    once as a role:"tool" message and once as prompt text.
+    """
+    if getattr(_ROUTED, "native_context", None) is not None:
+        action, error, handled = _native_action(
+            user_request, _ROUTED.native_context,
+            getattr(_ROUTED, "transcript", ()), max_retries)
+        if handled:
+            return action, error
+
     correction = None
     for attempt in range(max_retries + 1):
         _raise_if_stopped()
@@ -6674,8 +6803,10 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
             break
         step = work_steps
         step_start = time.time()
-        context = "\n".join(_history_window(
-            conversation_history, protected_message=protected_message) + step_log)
+        window = _history_window(conversation_history,
+                                 protected_message=protected_message)
+        context = "\n".join(window + step_log)
+        native_context = "\n".join(window)
 
         if decision == 0:
             if is_pushback:
@@ -6706,6 +6837,8 @@ def _run_agent_turn_impl(user_input, conversation_history, on_step=None,
             )
         granted_last = False
 
+        _ROUTED.native_context = native_context
+        _ROUTED.transcript = step_log
         _raise_if_stopped(stop_event)
         action, error = get_valid_action(next_input, context)
         _raise_if_stopped(stop_event)

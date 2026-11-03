@@ -40,9 +40,9 @@ project modules under test become importable.
 
 | | |
 |---|---|
-| Tests | **1291** |
-| Duration | ~110 s |
-| Outcome | `Ran 1291 tests in ...` then `OK`, exit code 0 |
+| Tests | **1354** |
+| Duration | ~60 s |
+| Outcome | `Ran 1354 tests in ...` then `OK`, exit code 0 |
 
 The voice/wake/TTS modules open real microphones and audio devices, so the run
 prints non-fatal lines such as `[voice] mic open failed (1/2): device busy` and
