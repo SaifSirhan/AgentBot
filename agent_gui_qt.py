@@ -108,7 +108,7 @@ except Exception:
     scheduler = None
 
 import memory
-from hud_core import ReactorHud
+from hud_core import PetWidget, ReactorHud
 from window_chrome import FramelessChrome
 
 # --------------------------- palette ---------------------------
@@ -2356,6 +2356,9 @@ class ChatView(QScrollArea):
         self.scanlines.setGeometry(
             0, 0, self.viewport().width(), self.viewport().height())
         self.scanlines.lower()
+        self.pet = PetWidget(parent=self.viewport())
+        self.pet.sync_to_parent()
+        self.background_hud.set_pet_widget(self.pet)
         self._body.raise_()
         self._center_background_hud()
 
@@ -2371,6 +2374,11 @@ class ChatView(QScrollArea):
             layer.resize(self.viewport().size())
             layer.lower()
             self._body.raise_()
+        pet = getattr(self, "pet", None)
+        if pet is not None:
+            # The pet anchors itself inside its own rect, so it follows the
+            # viewport instead of being re-moved per state like a sized widget.
+            pet.sync_to_parent()
 
     def _center_background_hud(self):
         hud = getattr(self, "background_hud", None)
@@ -4211,28 +4219,40 @@ class AgentWindow(QMainWindow):
         self.setWindowTitle(f"Agent — {label}" if label else "Agent")
         self._sync_hud_state()
 
+    # The pet's sprite for each reactor state. Every busy status maps to the
+    # book, which leaves `thinking` a valid name with no trigger; LISTENING,
+    # CONTINUOUS and ERROR leave the pet plainly awake.
+    _PET_BY_STATE = {"THINKING": "reading", "SPEAKING": "speaking"}
+
     def _sync_hud_state(self):
         hud = getattr(getattr(self, "chat", None), "background_hud", None)
         if hud is None:
             return
+        name = self._resolve_hud_state()
+        hud.set_state(name)
+        title = self.windowTitle().lower()
+        if "sleeping" in title:
+            # The 60s continuous-listening timeout is the only thing that puts
+            # the pet to bed; every other quiet state leaves it awake.
+            hud.set_pet_state("sleeping")
+        else:
+            hud.set_pet_state(self._PET_BY_STATE.get(name, "idle"))
+
+    def _resolve_hud_state(self):
         if time.monotonic() < getattr(self, "_hud_error_until", 0.0):
-            hud.set_state("ERROR")
-            return
+            return "ERROR"
         if getattr(self, "_recording", False):
             if getattr(self, "_continuous_listening", False):
-                hud.set_state("CONTINUOUS")
-            else:
-                hud.set_state("LISTENING")
-            return
+                return "CONTINUOUS"
+            return "LISTENING"
         if _tts_is_speaking():
-            hud.set_state("SPEAKING")
-            return
+            return "SPEAKING"
         title = self.windowTitle().lower()
         busy = getattr(self, "_processing", False) or any(
             word in title for word in (
                 "thinking", "working", "reading", "verifying",
                 "transcribing", "browsing", "stopping"))
-        hud.set_state("THINKING" if busy else "IDLE")
+        return "THINKING" if busy else "IDLE"
 
     def nativeEvent(self, event_type, message):
         """Collapse the Win32 caption and re-claim the resize borders.

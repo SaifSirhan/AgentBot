@@ -12,6 +12,11 @@ larger particles. The layer paints no opaque backdrop — every glow stop is a
 true-alpha colour, so the HUD adds light over the chat canvas instead of
 darkening it, and it sets WA_TransparentForMouseEvents so text under it stays
 clickable.
+
+`PetWidget` is the desktop pet that shares that canvas. It is a sibling layer
+rather than a seventh reactor state: it blits `assets/pet/<state>.png` into the
+bottom-right of the chat viewport under the same alpha-only rule, and the HUD's
+existing tick drives its breathing bob so it never needs a timer of its own.
 """
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ import math
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QLineF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
@@ -47,6 +53,38 @@ PARTICLE_CAP = 50
 BURST_MIN = 5
 BURST_MAX = 10
 TAU = 2.0 * math.pi
+
+# -- desktop pet -------------------------------------------------------
+PET_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "pet"
+# idle / thinking / sleeping / speaking / reading are what the GUI asks for.
+# blinking and walking are never requested from outside: the pet layers them
+# over its own idle time. They are listed here so they stay loadable names.
+PET_STATES = ("idle", "thinking", "sleeping", "speaking", "reading",
+              "blinking", "walking")
+PET_FALLBACK = "idle"
+# Idle-only micro-behaviours. Both ride the HUD's tick, so neither needs a
+# timer of its own, and both are dropped the instant another state is asked for.
+PET_BLINK_DURATION = 0.18
+PET_BLINK_GAP = (4.0, 7.0)
+PET_WANDER_AFTER = 90.0
+PET_WANDER_DURATION = 12.0
+PET_HEIGHT = 190
+PET_MARGIN = 24
+PET_OPACITY = 0.85
+# `sin(elapsed * PET_BOB_RATE) * PET_BOB_AMPLITUDE` — a 5 px rise over a ~3.1 s
+# cycle. Driven by the HUD's own tick, so the pet never needs a timer of its own.
+PET_BOB_RATE = 2.0
+PET_BOB_AMPLITUDE = 5.0
+
+
+def pet_bob(elapsed: float, rate: float = PET_BOB_RATE,
+            amplitude: float = PET_BOB_AMPLITUDE) -> float:
+    """Vertical offset for the pet at `elapsed` seconds of animation time.
+
+    Takes an accumulated elapsed value rather than calling a clock itself, so a
+    test can drive it from a fake tick and get an exact number.
+    """
+    return math.sin(max(0.0, float(elapsed)) * rate) * amplitude
 
 
 @dataclass
@@ -252,6 +290,10 @@ class ReactorHud(QWidget):
         self._scan_offset = 0.0
         self._particles = ParticleField()
         self._spikes = SpikeDetector()
+        self._pet = None
+        self._pet_requested = PET_FALLBACK
+        self._bob_elapsed = 0.0
+        self._bob = 0.0
         self._paint_tick = 0
         self._last_tick = time.monotonic()
         self._tick_cache = None
@@ -294,6 +336,37 @@ class ReactorHud(QWidget):
         if name != self._state:
             self._state = name
             self.update()
+
+    @property
+    def bob(self) -> float:
+        return self._bob
+
+    @property
+    def pet(self):
+        return self._pet
+
+    @property
+    def pet_state(self) -> str:
+        """What the pet is drawn as, or the requested name while detached."""
+        if self._pet is not None:
+            return self._pet.pet_state
+        return self._pet_requested
+
+    def set_pet_widget(self, pet) -> None:
+        """Adopt the pet; the HUD keeps the only animation timer."""
+        self._pet = pet
+        if pet is not None:
+            pet.set_state(self._pet_requested)
+            pet.set_bob(self._bob)
+
+    def set_pet_state(self, state: str) -> None:
+        """idle / thinking / sleeping. Unknown names and missing files -> idle."""
+        name = str(state or "").strip().lower()
+        if name not in PET_STATES:
+            name = PET_FALLBACK
+        self._pet_requested = name
+        if self._pet is not None:
+            self._pet.set_state(name)
 
     # -- animation ------------------------------------------------------
     def showEvent(self, event):
@@ -356,9 +429,18 @@ class ReactorHud(QWidget):
                                   min(self.width(), self.height()) * 0.38)
         self._particles.advance(dt)
 
+        # The pet carries no timer; this tick is the animation clock.
+        self._bob_elapsed += dt
+        self._bob = pet_bob(self._bob_elapsed)
+        if self._pet is not None:
+            self._pet.set_bob(self._bob)
+            self._pet.advance(dt)
+
         self._paint_tick = (self._paint_tick + 1) % 2
         if self._paint_tick == 0 and self._on_screen():
             self.update()
+            if self._pet is not None:
+                self._pet.update()
 
     def _on_screen(self) -> bool:
         if not self.isVisible():
@@ -699,3 +781,212 @@ class ReactorHud(QWidget):
             self._glow(color, self._alpha(alpha)),
             2.6 if aggressive else 1.6))
         painter.drawLines(lines)
+
+
+class PetWidget(QWidget):
+    """The desktop pet, anchored to the bottom-right of the chat viewport.
+
+    Sized to the whole viewport and anchoring inside itself at paint time:
+    the background HUD's 800 px box runs past the bottom of the chat at every
+    window size (measured 32 to 152 px of overflow at 1280x800 down to 900x560),
+    so an offset measured from that box would push the pet off-screen. The
+    viewport is the only rectangle that is guaranteed visible, and its bottom
+    edge sits above the input field, so the pet can never cover text entry —
+    `WA_TransparentForMouseEvents` makes that doubly true.
+
+    It carries no timer. The HUD's existing tick owns the animation clock and
+    pushes each frame's bob in through `set_bob` and each frame's idle time in
+    through `advance`, which is what blinks and wanders the pet while it is
+    genuinely idle.
+    """
+
+    HEIGHT = PET_HEIGHT
+    MARGIN = PET_MARGIN
+
+    def __init__(self, parent=None, asset_dir=PET_ASSET_DIR,
+                 opacity: float = PET_OPACITY, rng: random.Random = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAutoFillBackground(False)
+        self._asset_dir = Path(asset_dir)
+        self._opacity = max(0.0, min(1.0, float(opacity)))
+        self._rng = rng if rng is not None else random.Random()
+        self._requested = None
+        self._override = None
+        self._idle_time = 0.0
+        self._override_time = 0.0
+        self._next_blink = 0.0
+        self._name = None
+        self._bob = 0.0
+        self._cache = {}
+        # Awake from the first frame: a pet that draws nothing until the GUI
+        # happens to sync would leave the corner empty at startup.
+        self.set_state(PET_FALLBACK)
+
+    # -- state ----------------------------------------------------------
+    @property
+    def pet_state(self) -> str:
+        """The sprite actually being drawn, after fallback and idle overrides."""
+        return self._name or ""
+
+    @property
+    def requested_state(self) -> str:
+        """What the GUI last asked for, before any blink or wander."""
+        return self._requested or ""
+
+    @property
+    def override(self):
+        """The idle behaviour currently layered on, if any."""
+        return self._override
+
+    @property
+    def idle_time(self) -> float:
+        return self._idle_time
+
+    @property
+    def bob(self) -> float:
+        return self._bob
+
+    @property
+    def sprite(self):
+        return self._load(self._name) if self._name else None
+
+    def set_state(self, state: str) -> None:
+        """Record what the GUI wants; idle-only behaviours restart with it.
+
+        An unchanged request is ignored, so a status line that fires repeatedly
+        cannot keep re-arming the blink and stop the pet from ever blinking.
+        """
+        name = str(state or "").strip().lower()
+        if name not in PET_STATES:
+            name = PET_FALLBACK
+        if name == self._requested:
+            return
+        self._requested = name
+        self._override = None
+        self._override_time = 0.0
+        self._idle_time = 0.0
+        if name == PET_FALLBACK:
+            self._arm_blink()
+        self._refresh()
+
+    def advance(self, dt: float) -> None:
+        """Blink and wander, but only while the pet is genuinely idle.
+
+        A thinking or speaking pet must not break into a blink mid-sentence, so
+        any non-idle request drops the override and stops the clock. Both
+        behaviours are timed off accumulated tick seconds, never a wall clock.
+        """
+        dt = max(0.0, float(dt))
+        if self._requested != PET_FALLBACK:
+            return
+        self._idle_time += dt
+        if self._override is not None:
+            self._override_time += dt
+            limit = (PET_WANDER_DURATION if self._override == "walking"
+                     else PET_BLINK_DURATION)
+            if self._override_time < limit:
+                return
+            finished = self._override
+            self._override = None
+            self._override_time = 0.0
+            if finished == "walking":
+                # Without this the wander would re-trigger on the next tick.
+                self._idle_time = 0.0
+            self._arm_blink()
+            self._refresh()
+            return
+        if self._idle_time >= PET_WANDER_AFTER:
+            self._override = "walking"
+        elif self._idle_time >= self._next_blink:
+            self._override = "blinking"
+        else:
+            return
+        self._override_time = 0.0
+        self._refresh()
+
+    def _arm_blink(self) -> None:
+        self._next_blink = self._idle_time + self._rng.uniform(*PET_BLINK_GAP)
+
+    def _resolve(self, name):
+        """The sprite to draw for `name`, falling back to idle, then to nothing."""
+        if self._load(name) is not None:
+            return name
+        if self._load(PET_FALLBACK) is not None:
+            return PET_FALLBACK
+        return None
+
+    def _refresh(self) -> None:
+        drawn = self._resolve(self._override or self._requested)
+        if drawn != self._name:
+            self._name = drawn
+            self.update()
+
+    def set_bob(self, offset: float) -> None:
+        """Store the current frame's vertical offset.
+
+        Deliberately does not repaint: the HUD requests the update on its own
+        ~30 FPS throttle and only while the window is on screen, so a minimized
+        window still stops moving.
+        """
+        self._bob = float(offset)
+
+    # -- geometry -------------------------------------------------------
+    def sync_to_parent(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        self.setGeometry(parent.rect())
+
+    # -- sprites --------------------------------------------------------
+    def _load(self, name):
+        if not name:
+            return None
+        if name in self._cache:
+            return self._cache[name]
+        path = self._asset_dir / ("%s.png" % name)
+        pixmap = None
+        if path.is_file():
+            source = QPixmap(str(path))
+            if not source.isNull():
+                dpr = max(1.0, float(self.devicePixelRatio() or 1.0))
+                pixmap = source.scaledToHeight(
+                    int(round(self.HEIGHT * dpr)),
+                    Qt.TransformationMode.SmoothTransformation)
+                pixmap.setDevicePixelRatio(dpr)
+        self._cache[name] = pixmap
+        return pixmap
+
+    # -- painting -------------------------------------------------------
+    def paintEvent(self, event):
+        self._paint(QPainter(self))
+
+    def _paint(self, painter):
+        """Blit one pet frame. No opaque clear, and never Source mode.
+
+        Same rule the HUD's layers follow: this widget covers the entire
+        viewport, so a CompositionMode_Source fill would erase the chat canvas
+        underneath it and the window would flush black through the hole.
+        """
+        if not painter.isActive():
+            return
+        try:
+            painter.setRenderHint(
+                QPainter.RenderHint.SmoothPixmapTransform)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver)
+            pixmap = self.sprite
+            if pixmap is None:
+                return
+            painter.setOpacity(self._opacity)
+            dpr = pixmap.devicePixelRatio() or 1.0
+            width = pixmap.width() / dpr
+            height = pixmap.height() / dpr
+            x = max(0.0, self.width() - width - self.MARGIN)
+            y = max(0.0, self.height() - height - self.MARGIN) + self._bob
+            painter.drawPixmap(QPointF(x, y), pixmap)
+        finally:
+            painter.end()
+

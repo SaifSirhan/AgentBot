@@ -6,6 +6,7 @@ import math
 import os
 import random
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -16,22 +17,38 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np  # noqa: E402
-from PySide6.QtCore import QPoint, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
+from PySide6.QtCore import QPoint, Qt, QTimer  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget  # noqa: E402
 
 from audio_bus import AudioBus  # noqa: E402
 from hud_core import (  # noqa: E402
     PARTICLE_CAP,
+    PET_ASSET_DIR,
+    PET_BLINK_DURATION,
+    PET_BLINK_GAP,
+    PET_BOB_AMPLITUDE,
+    PET_MARGIN,
+    PET_STATES,
+    PET_WANDER_AFTER,
+    PET_WANDER_DURATION,
     Particle,
     ParticleField,
+    PetWidget,
     ReactorHud,
     SpikeDetector,
     burst_count,
+    pet_bob,
 )
 
 STATES = (
     "IDLE", "LISTENING", "CONTINUOUS", "THINKING", "SPEAKING", "ERROR")
+# Every sprite committed under assets/pet/. The five the GUI can ask for plus
+# blinking and walking, which the pet layers over its own idle time.
+SHIPPED_PET_ART = ("idle", "thinking", "sleeping", "speaking", "reading",
+                   "blinking", "walking")
+HAS_PET_ART = all(
+    (PET_ASSET_DIR / ("%s.png" % name)).is_file() for name in SHIPPED_PET_ART)
 
 
 class _CanvasParent(QWidget):
@@ -425,6 +442,449 @@ class HolographicLayerTests(unittest.TestCase):
             Qt.WidgetAttribute.WA_TransparentForMouseEvents))
 
 
+def _write_sprite(asset_dir, name):
+    """One solid opaque PNG at a known size, so a test can see exactly where it
+    landed. Returns the path."""
+    pixmap = QPixmap(100, 100)
+    pixmap.fill(QColor("#25F2FF"))
+    path = Path(asset_dir) / ("%s.png" % name)
+    pixmap.save(str(path), "PNG")
+    return path
+
+
+def _make_sprite_dir(root, *names):
+    asset_dir = Path(root)
+    for name in names:
+        _write_sprite(asset_dir, name)
+    return asset_dir
+
+
+class PetSpriteTests(unittest.TestCase):
+    """State selection and the missing-file fallback, against synthetic art."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.asset_dir = _make_sprite_dir(
+            self._tmp.name, "idle", "thinking")
+        self.pet = PetWidget(parent=None, asset_dir=self.asset_dir)
+        self.pet.resize(400, 400)
+
+    def tearDown(self):
+        self.pet.deleteLater()
+        self._tmp.cleanup()
+        self.app.processEvents()
+
+    def test_the_pet_state_set_matches_the_committed_sprites(self):
+        self.assertEqual(PET_STATES, SHIPPED_PET_ART)
+
+    def test_a_named_state_loads_its_sprite(self):
+        self.pet.set_state("thinking")
+        self.assertEqual(self.pet.pet_state, "thinking")
+        self.assertIsNotNone(self.pet.sprite)
+
+    def test_state_names_are_case_insensitive(self):
+        self.pet.set_state("  THINKING ")
+        self.assertEqual(self.pet.pet_state, "thinking")
+
+    def test_unknown_state_falls_back_to_idle(self):
+        self.pet.set_state("dancing")
+        self.assertEqual(self.pet.pet_state, "idle")
+
+    def test_a_missing_sprite_falls_back_to_idle(self):
+        # sleeping.png was never written to this fixture directory.
+        self.pet.set_state("sleeping")
+        self.assertEqual(self.pet.pet_state, "idle")
+        self.assertEqual(self.pet.requested_state, "sleeping")
+
+    def test_a_new_sprite_is_picked_up_without_a_code_change(self):
+        """The promise behind the fallback: a state name already in PET_STATES
+        draws idle while its file is absent and resolves to it on its own once
+        the file lands. Only a new PetWidget instance is needed, because the
+        missing-file result is cached for the life of the widget."""
+        self.pet.set_state("speaking")
+        self.assertEqual(self.pet.pet_state, "idle")
+        self.assertEqual(self.pet.requested_state, "speaking")
+
+        _write_sprite(self.asset_dir, "speaking")
+        fresh = PetWidget(parent=None, asset_dir=self.asset_dir)
+        try:
+            fresh.set_state("speaking")
+            self.assertEqual(fresh.pet_state, "speaking")
+            self.assertIsNotNone(fresh.sprite)
+        finally:
+            fresh.deleteLater()
+
+    def test_no_art_at_all_draws_nothing(self):
+        empty = _make_sprite_dir(tempfile.mkdtemp())
+        pet = PetWidget(parent=None, asset_dir=empty)
+        pet.resize(200, 200)
+        pet.set_state("thinking")
+        self.assertEqual(pet.pet_state, "")
+        self.assertIsNone(pet.sprite)
+        pet.deleteLater()
+
+    def test_sprites_are_scaled_to_the_pet_height(self):
+        sprite = self.pet.sprite
+        dpr = sprite.devicePixelRatio() or 1.0
+        self.assertAlmostEqual(sprite.height() / dpr, self.pet.HEIGHT,
+                               places=3)
+
+    @unittest.skipUnless(HAS_PET_ART, "assets/pet/*.png not present")
+    def test_the_shipped_art_loads_for_every_committed_sprite(self):
+        pet = PetWidget(parent=None, asset_dir=PET_ASSET_DIR)
+        try:
+            for state in SHIPPED_PET_ART:
+                with self.subTest(state=state):
+                    pet.set_state(state)
+                    self.assertEqual(pet.pet_state, state)
+                    self.assertIsNotNone(pet.sprite)
+        finally:
+            pet.deleteLater()
+
+
+class PetPaintTests(unittest.TestCase):
+    """Where the pet lands, and that it only ever blends."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.asset_dir = _make_sprite_dir(self._tmp.name, "idle")
+        self.pet = PetWidget(parent=None, asset_dir=self.asset_dir)
+        self.pet.resize(400, 400)
+        self.pet.set_state("idle")
+
+    def tearDown(self):
+        self.pet.deleteLater()
+        self._tmp.cleanup()
+        self.app.processEvents()
+
+    def render_over(self, color="#808080", size=(400, 400)):
+        canvas = QImage(size[0], size[1], QImage.Format.Format_RGB32)
+        canvas.fill(QColor(color))
+        painter = QPainter(canvas)
+        self.pet._paint(painter)
+        return canvas
+
+    def painted_bounds(self, canvas, floor):
+        xs, ys = [], []
+        for y in range(canvas.height()):
+            for x in range(canvas.width()):
+                if canvas.pixelColor(x, y) != floor:
+                    xs.append(x)
+                    ys.append(y)
+        if not xs:
+            return None
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def test_the_pet_sits_bottom_right_and_keeps_its_margin(self):
+        sprite = self.pet.sprite
+        dpr = sprite.devicePixelRatio() or 1.0
+        width = sprite.width() / dpr
+        height = sprite.height() / dpr
+        expected_x = 400 - width - PET_MARGIN
+        expected_y = 400 - height - PET_MARGIN
+        floor = QColor("#808080")
+        bounds = self.painted_bounds(self.render_over(), floor)
+        self.assertIsNotNone(bounds, "the pet painted nothing")
+        self.assertEqual(
+            bounds, (int(expected_x), int(expected_y),
+                     int(expected_x + width) - 1,
+                     int(expected_y + height) - 1))
+
+    def test_the_pet_never_reaches_the_corner_it_sits_in(self):
+        # The margin is what keeps the sprite off the window edge; the bob can
+        # only lift it, so the bottom-right pixel must always stay canvas.
+        floor = QColor("#808080")
+        for bob in (-5.0, 0.0, 5.0):
+            with self.subTest(bob=bob):
+                self.pet.set_bob(bob)
+                canvas = self.render_over()
+                self.assertEqual(canvas.pixelColor(399, 399), floor)
+
+    def test_the_pet_is_transparent_for_mouse_events(self):
+        self.assertTrue(self.pet.testAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+
+    def test_the_pet_adds_light_and_never_erasures_the_canvas(self):
+        """The Phase 2 rule, applied to the new layer. A CompositionMode_Source
+        fill here would wipe the chat viewport, which the pet covers entirely."""
+        parent = _CanvasParent()
+        parent.setFixedSize(400, 400)
+        pet = PetWidget(parent=parent, asset_dir=self.asset_dir)
+        pet.setGeometry(parent.rect())
+        pet.set_state("idle")
+        parent.show()
+        self.app.processEvents()
+        try:
+            for bob in (-5.0, 0.0, 5.0):
+                with self.subTest(bob=bob):
+                    pet.set_bob(bob)
+                    pet.repaint()
+                    self.app.processEvents()
+                    image = parent.grab().toImage()
+                    for y in range(0, 400, 3):
+                        for x in range(0, 400, 3):
+                            colour = image.pixelColor(x, y)
+                            self.assertGreaterEqual(
+                                colour.red() + colour.green() + colour.blue(),
+                                parent.floor,
+                                "the pet erased the canvas at (%d, %d)"
+                                % (x, y))
+        finally:
+            parent.hide()
+            parent.deleteLater()
+            self.app.processEvents()
+
+    @unittest.skipUnless(HAS_PET_ART, "assets/pet/*.png not present")
+    def test_the_shipped_art_does_not_darken_the_holographic_canvas(self):
+        """The reactor layers are light-only. The falcon is not a glow, so this
+        is measured rather than assumed: every sprite is sampled over #0E1116
+        and no composited pixel may fall below that floor."""
+        pet = PetWidget(parent=None, asset_dir=PET_ASSET_DIR)
+        pet.resize(400, 400)
+        floor = 0x0E + 0x11 + 0x16
+        try:
+            for state in SHIPPED_PET_ART:
+                with self.subTest(state=state):
+                    pet.set_state(state)
+                    canvas = QImage(400, 400, QImage.Format.Format_RGB32)
+                    canvas.fill(QColor("#0E1116"))
+                    pet._paint(QPainter(canvas))
+                    for y in range(0, 400, 3):
+                        for x in range(0, 400, 3):
+                            colour = canvas.pixelColor(x, y)
+                            self.assertGreaterEqual(
+                                colour.red() + colour.green() + colour.blue(),
+                                floor,
+                                "pixel (%d, %d) was darkened" % (x, y))
+        finally:
+            pet.deleteLater()
+
+
+class PetAnimationTests(unittest.TestCase):
+    """The breathing bob rides the HUD's existing tick — no second timer."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.asset_dir = _make_sprite_dir(self._tmp.name, *PET_STATES)
+        self.bus = AudioBus()
+        self.hud = ReactorHud(bus=self.bus)
+        self.pet = PetWidget(parent=self.hud, asset_dir=self.asset_dir)
+        self.pet.resize(400, 400)
+        self.hud.set_pet_widget(self.pet)
+        self.hud.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.hud.hide()
+        self.hud.deleteLater()
+        self._tmp.cleanup()
+        self.app.processEvents()
+
+    def test_bob_peaks_at_five_pixels_on_a_three_second_cycle(self):
+        self.assertAlmostEqual(pet_bob(0.0), 0.0)
+        # sin(t * 2) peaks at t = pi/4 and troughs at 3*pi/4, so one full bob
+        # cycle is pi seconds — a ~3.1 s rise and fall.
+        self.assertAlmostEqual(pet_bob(math.pi / 4), PET_BOB_AMPLITUDE)
+        self.assertAlmostEqual(pet_bob(3.0 * math.pi / 4),
+                               -PET_BOB_AMPLITUDE)
+        self.assertAlmostEqual(pet_bob(math.pi), 0.0, places=9)
+        self.assertLessEqual(max(abs(pet_bob(t / 100.0))
+                                 for t in range(629)), PET_BOB_AMPLITUDE)
+
+    def test_bob_is_pushed_to_the_pet_by_the_huds_tick(self):
+        clock = [1000.0]
+        self.hud._last_tick = clock[0]
+        with mock.patch("hud_core.time.monotonic", lambda: clock[0]):
+            for _frame in range(10):
+                clock[0] += 0.1
+                self.hud._tick()
+        self.assertAlmostEqual(self.pet.bob, pet_bob(1.0), places=9)
+        self.assertAlmostEqual(self.hud.bob, math.sin(2.0) * 5.0, places=9)
+
+    def test_the_pet_adds_no_second_timer(self):
+        self.assertEqual(len(self.hud.findChildren(QTimer)), 1)
+        self.assertEqual(self.pet.findChildren(QTimer), [])
+
+    def test_set_bob_does_not_repaint_on_its_own(self):
+        # Repaint stays on the HUD's ~30 FPS throttle so a minimized window
+        # still stops moving; set_bob only stores the number.
+        with mock.patch.object(self.pet, "update") as update:
+            self.pet.set_bob(3.0)
+        update.assert_not_called()
+        self.assertEqual(self.pet.bob, 3.0)
+
+    def test_a_state_set_before_the_pet_is_attached_survives_attach(self):
+        hud = ReactorHud(bus=self.bus)
+        pet = PetWidget(parent=hud, asset_dir=self.asset_dir)
+        try:
+            hud.set_pet_state("thinking")
+            self.assertEqual(hud.pet_state, "thinking")
+            hud.set_pet_widget(pet)
+            self.assertEqual(pet.pet_state, "thinking")
+        finally:
+            pet.deleteLater()
+            hud.deleteLater()
+
+    def test_an_unknown_pet_state_lands_on_idle_through_the_hud(self):
+        self.hud.set_pet_state("dancing")
+        self.assertEqual(self.pet.pet_state, "idle")
+        self.hud.set_pet_state("speaking")
+        self.assertEqual(self.pet.pet_state, "speaking")
+        self.hud.set_pet_state("sleeping")
+        self.assertEqual(self.pet.pet_state, "sleeping")
+
+
+class PetBehaviourTests(unittest.TestCase):
+    """Blink and wander: idle-only habits driven off the HUD's tick seconds.
+
+    A fixed rng and an explicit `advance(dt)` keep these deterministic — no
+    wall clock and no real timer is involved.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.asset_dir = _make_sprite_dir(self._tmp.name, *PET_STATES)
+        self.pet = PetWidget(parent=None, asset_dir=self.asset_dir,
+                             rng=random.Random(11))
+        self.pet.resize(400, 400)
+
+    def tearDown(self):
+        self.pet.deleteLater()
+        self._tmp.cleanup()
+        self.app.processEvents()
+
+    def _advance(self, pet, seconds, step=0.1):
+        for _tick in range(int(round(seconds / step))):
+            pet.advance(step)
+
+    def test_blink_lights_for_its_duration_then_returns(self):
+        self.assertEqual(self.pet.pet_state, "idle")
+        self._advance(self.pet, self.pet._next_blink - 0.2)
+        self.assertEqual(self.pet.pet_state, "idle", "blinked early")
+        self._advance(self.pet, 0.3)
+        self.assertEqual(self.pet.pet_state, "blinking")
+        self.assertEqual(self.pet.override, "blinking")
+        self._advance(self.pet, PET_BLINK_DURATION)
+        self.assertEqual(self.pet.pet_state, "idle")
+        self.assertIsNone(self.pet.override)
+
+    def test_the_first_blink_is_due_within_the_declared_gap(self):
+        low, high = PET_BLINK_GAP
+        for seed in range(12):
+            pet = PetWidget(parent=None, asset_dir=self.asset_dir,
+                            rng=random.Random(seed))
+            with self.subTest(seed=seed):
+                self.assertTrue(low <= pet._next_blink <= high,
+                                "seed %d scheduled a blink at %.2f s"
+                                % (seed, pet._next_blink))
+            pet.deleteLater()
+        self.app.processEvents()
+
+    def test_blinks_only_fire_while_the_pet_is_idle(self):
+        for state in ("reading", "speaking", "sleeping", "thinking"):
+            with self.subTest(state=state):
+                pet = PetWidget(parent=None, asset_dir=self.asset_dir,
+                                rng=random.Random(5))
+                pet.set_state(state)
+                self._advance(pet, 30.0)
+                self.assertEqual(pet.pet_state, state)
+                self.assertIsNone(pet.override)
+                self.assertEqual(pet.idle_time, 0.0,
+                                 "idle clock ran while not idle")
+                pet.deleteLater()
+
+    def test_a_state_change_drops_an_in_flight_blink(self):
+        self._advance(self.pet, self.pet._next_blink + 0.1)
+        self.assertEqual(self.pet.pet_state, "blinking")
+        self.pet.set_state("speaking")
+        self.assertEqual(self.pet.pet_state, "speaking")
+        self.assertIsNone(self.pet.override)
+
+    def test_repeated_identical_requests_do_not_starve_the_blink(self):
+        """A chatty status line calls set_pet_state over and over; the early
+        return on an unchanged name must not keep re-arming the blink."""
+        quiet = PetWidget(parent=None, asset_dir=self.asset_dir,
+                          rng=random.Random(11))
+        noisy = PetWidget(parent=None, asset_dir=self.asset_dir,
+                          rng=random.Random(11))
+        try:
+            for _tick in range(300):                     # 30 s of idle
+                for _repeat in range(25):
+                    noisy.set_state("idle")
+                quiet.advance(0.1)
+                noisy.advance(0.1)
+            self.assertEqual(noisy.idle_time, quiet.idle_time)
+            self.assertAlmostEqual(quiet._next_blink, noisy._next_blink,
+                                   places=9)
+        finally:
+            quiet.deleteLater()
+            noisy.deleteLater()
+
+    def test_the_pet_wanders_after_a_long_idle_and_returns(self):
+        self._advance(self.pet, PET_WANDER_AFTER + 0.1)
+        self.assertEqual(self.pet.override, "walking")
+        self.assertEqual(self.pet.pet_state, "walking")
+        # A margin, not the exact duration: 0.1 s added a step at a time sums
+        # to just under 12.0, and the wander ends on the tick that clears it.
+        self._advance(self.pet, PET_WANDER_DURATION + 0.5)
+        self.assertEqual(self.pet.pet_state, "idle")
+        self.assertIsNone(self.pet.override)
+
+    def test_walking_does_not_restart_on_the_tick_after_it_ends(self):
+        self._advance(self.pet, PET_WANDER_AFTER + PET_WANDER_DURATION + 0.2)
+        self.assertEqual(self.pet.pet_state, "idle")
+        self.assertLess(self.pet.idle_time, 1.0,
+                        "the idle clock was not reset after the wander")
+        self._advance(self.pet, 2.0)
+        self.assertNotEqual(self.pet.pet_state, "walking")
+
+    def test_the_hud_tick_is_what_drives_the_idle_behaviours(self):
+        """advance() is called from ReactorHud._tick, not from a timer of the
+        pet's own, so prove the wiring rather than only the method.
+
+        The blink is sampled across the whole run, not at the final instant:
+        it only lasts ~0.18 s, so a single end-of-loop read can land after it
+        has already returned to idle.
+        """
+        bus = AudioBus()
+        hud = ReactorHud(bus=bus)
+        pet = PetWidget(parent=hud, asset_dir=self.asset_dir,
+                        rng=random.Random(11))
+        pet.resize(400, 400)
+        hud.set_pet_widget(pet)
+        try:
+            clock = [1000.0]
+            hud._last_tick = clock[0]
+            seen = set()
+            with mock.patch("hud_core.time.monotonic", lambda: clock[0]):
+                for _tick in range(100):        # 10 s of driven idle
+                    clock[0] += 0.1
+                    hud._tick()
+                    seen.add(pet.pet_state)
+            self.assertIn("blinking", seen,
+                          "the HUD tick never blinked the pet, saw %s" % seen)
+            self.assertIn("idle", seen)
+        finally:
+            pet.deleteLater()
+            hud.deleteLater()
+
+
 class CoreCardIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -459,6 +919,82 @@ class CoreCardIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(hud.opacity, 0.15, places=3)
             self.assertGreaterEqual(
                 window.right_panel.minimumWidth(), 250)
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_pet_is_attached_to_the_chat_viewport_and_to_the_hud(self):
+        import agent_gui_qt as gui
+
+        window = gui.AgentWindow()
+        try:
+            pet = window.chat.pet
+            hud = window.chat.background_hud
+            self.assertIsInstance(pet, PetWidget)
+            self.assertIs(hud.pet, pet)
+            self.assertIs(pet.parentWidget(), window.chat.viewport())
+            self.assertEqual(pet.geometry(), window.chat.viewport().rect())
+            self.assertTrue(pet.testAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_the_pet_tracks_the_agent_status_through_one_hook(self):
+        """Reading while busy, speaking over TTS, asleep when the mic times out,
+        awake again when the turn ends — all from _sync_hud_state, which
+        set_status already calls, so no per-call-site pet code is needed."""
+        import agent_gui_qt as gui
+
+        window = gui.AgentWindow()
+        try:
+            pet = window.chat.pet
+            hud = window.chat.background_hud
+            window._recording = False
+            window._continuous_listening = False
+            with mock.patch.object(gui, "_tts_is_speaking", return_value=False):
+                window.set_status("Ready", busy=False)
+                self.assertEqual(pet.pet_state, "idle")
+
+                window.set_status("Thinking…", busy=True)
+                self.assertEqual(pet.pet_state, "reading")
+                self.assertEqual(hud.state, "THINKING")
+
+                # Every busy status shares the book sprite, not just thinking.
+                for status in ("Working…", "Browsing…", "Transcribing…",
+                               "Verifying…"):
+                    with self.subTest(status=status):
+                        window.set_status(status, busy=True)
+                        self.assertEqual(pet.pet_state, "reading")
+
+                window.set_status(
+                    "Mic sleeping. Say 'Hey Jarvis' or press F9.", busy=False)
+                self.assertEqual(pet.pet_state, "sleeping")
+                self.assertEqual(hud.state, "IDLE")
+
+                window._processing = True
+                window.set_status("Thinking…", busy=True)
+                self.assertEqual(pet.pet_state, "reading")
+                window._end_turn()
+                self.assertEqual(pet.pet_state, "idle")
+                self.assertTrue(window.input_field.isEnabled())
+
+                window.set_status("Ready", busy=False)
+                with mock.patch.object(gui, "_tts_is_speaking",
+                                       return_value=True):
+                    window.set_status("Speaking…", busy=False)
+                    self.assertEqual(pet.requested_state, "speaking")
+                    self.assertEqual(pet.pet_state, "speaking")
+                    self.assertEqual(hud.state, "SPEAKING")
+
+                # Listening and error have no sprite, so the pet stays plainly
+                # awake while the reactor shows them.
+                window._recording = True
+                window.set_status("Listening…", busy=True)
+                self.assertEqual(pet.pet_state, "idle")
+                self.assertEqual(hud.state, "LISTENING")
         finally:
             window.close()
             window.deleteLater()
