@@ -164,29 +164,21 @@ class ActiveTaskTests(unittest.TestCase):
 
 
 class SummarizerRoutingTests(unittest.TestCase):
-    def test_fast_provider_is_preferred(self):
+    def test_one_client_answers_and_no_provider_is_pinned(self):
         import agent
 
-        with mock.patch("config.get",
-                        side_effect=lambda k, d="": "key" if k == "GROQ_API_KEY" else ""), \
-                mock.patch.object(agent, "_call_llm", return_value="brief") as call:
+        with mock.patch.object(agent, "_call_llm", return_value="brief") as call:
             out = cc._ask_llm("prompt")
 
         self.assertEqual(out, "brief")
-        self.assertEqual(call.call_args.kwargs.get("force_provider"), "groq")
-
-    def test_falls_back_to_the_normal_chain(self):
-        import agent
-
-        with mock.patch("config.get",
-                        side_effect=lambda k, d="": "key" if k == "GROQ_API_KEY" else ""), \
-                mock.patch.object(agent, "_call_llm",
-                                  side_effect=["Error: nope", "brief"]) as call:
-            out = cc._ask_llm("prompt")
-
-        self.assertEqual(out, "brief")
-        self.assertEqual(call.call_count, 2)
+        self.assertEqual(call.call_count, 1)
         self.assertNotIn("force_provider", call.call_args.kwargs)
+
+    def test_failed_summary_is_none_not_a_blank(self):
+        import agent
+
+        with mock.patch.object(agent, "_call_llm", return_value="Error: nope"):
+            self.assertIsNone(cc._ask_llm("prompt"))
 
 
 class TurnIntegrationTests(unittest.TestCase):

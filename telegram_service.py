@@ -59,8 +59,8 @@ SUPPORTED_SUFFIXES = frozenset({".pdf", ".docx", ".txt"})
 
 SUMMARY_MAX_CHARS = 4000
 SUMMARY_MAX_TOKENS = 2000
-DEFAULT_LLM_PRIORITY = ("deepseek", "gemini")
-SUPPORTED_LLM_PROVIDERS = frozenset({"deepseek", "gemini", "ollama"})
+DEFAULT_LLM_PRIORITY = ("deepseek",)
+SUPPORTED_LLM_PROVIDERS = frozenset({"deepseek"})
 
 RESULT_QUEUE_MAX = 64
 JOB_QUEUE_MAX = 32
@@ -73,7 +73,6 @@ LLM_TIMEOUT = 60
 LLM_HTTP_TIMEOUT = 55
 
 DEEPSEEK_MODEL = "deepseek-flash"
-GEMINI_MODEL = "gemini-flash-latest"
 SUMMARY_TEMPERATURE = 0
 
 SYSTEM_PROMPT = """You are an isolated document summarizer.
@@ -190,7 +189,14 @@ def _parse_id_list(value, field_name: str) -> frozenset[int]:
 
 def _parse_priority(value, local_only: bool) -> tuple[str, ...]:
     if local_only:
-        return ("ollama",)
+        # Fail closed. TG_DOC_LOCAL_ONLY is a promise that document text
+        # leaves this machine never; with one cloud client, the only honest
+        # answer is to refuse rather than summarize remotely.
+        raise TelegramDocConfigError(
+            "TG_DOC_LOCAL_ONLY needs a local model, and AgentBot's only client "
+            "is DeepSeek (cloud). Set TG_DOC_LOCAL_ONLY to false to summarize "
+            "with DeepSeek, or turn off TG_DOC_LISTENER_ENABLED."
+        )
     if value is None or (isinstance(value, str) and not value.strip()):
         return DEFAULT_LLM_PRIORITY
     if isinstance(value, (list, tuple)):
@@ -283,7 +289,10 @@ def load_settings() -> DocSettings:
         )
         allowed_chats = frozenset()
         allowed_senders = frozenset()
-        priority = ("ollama",) if local_only else DEFAULT_LLM_PRIORITY
+        # Nothing summarizes while the listener is off, so a stale
+        # TG_DOC_LOCAL_ONLY must not break startup; call_isolated_llm is the
+        # boundary that actually refuses to send.
+        priority = DEFAULT_LLM_PRIORITY
 
     return DocSettings(
         enabled=enabled,
@@ -378,31 +387,6 @@ def _build_deepseek_payload(messages, model: str, max_tokens: int) -> dict:
     }
 
 
-def _build_gemini_payload(messages, max_tokens: int) -> dict:
-    system_parts = []
-    contents = []
-    for message in messages:
-        if message["role"] == "system":
-            system_parts.append({"text": message["content"]})
-        else:
-            contents.append(
-                {"role": "user", "parts": [{"text": message["content"]}]}
-            )
-    if not contents:
-        raise ValueError("Gemini payload needs at least one user message")
-    body = {
-        "contents": contents,
-        "generationConfig": {
-            "temperature": SUMMARY_TEMPERATURE,
-            "maxOutputTokens": max_tokens,
-            "responseMimeType": "application/json",
-        },
-    }
-    if system_parts:
-        body["systemInstruction"] = {"parts": system_parts}
-    return body
-
-
 def _call_deepseek_messages(messages, max_tokens: int, timeout: int) -> str:
     cfg = _load_raw_config()
     key = str(cfg.get("DEEPSEEK_API_KEY") or "").strip()
@@ -431,77 +415,9 @@ def _call_deepseek_messages(messages, max_tokens: int, timeout: int) -> str:
         return f"Error: {type(exc).__name__}"
 
 
-def _call_gemini_messages(messages, max_tokens: int, timeout: int) -> str:
-    cfg = _load_raw_config()
-    key = str(cfg.get("GEMINI_API_KEY") or "").strip()
-    if not key:
-        return "Error: GEMINI_API_KEY not set"
-    model = str(cfg.get("TG_DOC_GEMINI_MODEL") or GEMINI_MODEL)
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={key}"
-    )
-    try:
-        response = requests.post(
-            url,
-            json=_build_gemini_payload(messages, max_tokens),
-            timeout=(10, timeout),
-        )
-        if response.status_code != 200:
-            return f"Error: HTTP {response.status_code}: {response.text[:200]}"
-        data = response.json()
-        block = (data.get("promptFeedback") or {}).get("blockReason")
-        if block:
-            return f"Error: gemini blocked the prompt ({block})"
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return "Error: gemini returned no candidates"
-        candidate = candidates[0]
-        parts = (candidate.get("content") or {}).get("parts") or []
-        if parts and parts[0].get("text"):
-            return str(parts[0]["text"]).strip()
-        finish = candidate.get("finishReason")
-        if finish == "MAX_TOKENS":
-            return "Error: gemini empty response — output token limit reached"
-        return f"Error: gemini produced no text (finishReason={finish})"
-    except Exception as exc:
-        return f"Error: {type(exc).__name__}"
-
-
-def _call_ollama_messages(messages, max_tokens: int, timeout: int) -> str:
-    cfg = _load_raw_config()
-    url = str(cfg.get("OLLAMA_URL") or "http://localhost:11434/api/generate")
-    if "/api/" in url:
-        url = url.rsplit("/api/", 1)[0] + "/api/chat"
-    model = str(cfg.get("OLLAMA_MODEL") or "granite4.1:3b")
-    body = {
-        "model": model,
-        "messages": [dict(message) for message in messages],
-        "stream": False,
-        "format": "json",
-        "options": {
-            "temperature": SUMMARY_TEMPERATURE,
-            "num_predict": max_tokens,
-        },
-    }
-    try:
-        response = requests.post(url, json=body, timeout=(5, timeout))
-        if response.status_code != 200:
-            return f"Error: HTTP {response.status_code}: {response.text[:200]}"
-        return str(
-            (response.json().get("message") or {}).get("content") or ""
-        ).strip()
-    except Exception as exc:
-        return f"Error: {type(exc).__name__}"
-
-
 def _dispatch_isolated(name, messages, max_tokens, timeout) -> str:
     if name == "deepseek":
         return _call_deepseek_messages(messages, max_tokens, timeout)
-    if name == "gemini":
-        return _call_gemini_messages(messages, max_tokens, timeout)
-    if name == "ollama":
-        return _call_ollama_messages(messages, max_tokens, timeout)
     return f"Error: unsupported summarizer provider {name!r}"
 
 
@@ -515,7 +431,13 @@ def call_isolated_llm(
 ) -> str:
     """Summarizer call with no tools, no history, and no session context."""
     _validate_messages(messages)
-    chain = ("ollama",) if local_only else tuple(priority or DEFAULT_LLM_PRIORITY)
+    if local_only:
+        # The send boundary is where a local-only promise is kept or broken.
+        # No local model exists, so refuse instead of falling through to the
+        # cloud client with document text in the body.
+        return ("Error: local-only summarization is unavailable — AgentBot's "
+                "only client is DeepSeek (cloud).")
+    chain = tuple(priority or DEFAULT_LLM_PRIORITY)
     tried = []
     for name in chain:
         result = _dispatch_isolated(name, messages, max_tokens, timeout)
@@ -538,7 +460,8 @@ def call_isolated_llm(
         )
         tried.append(f"{name}({reason})")
         _log.warning("isolated summarizer failed provider=%s reason=%s", name, reason)
-    return "Error: All summarizer providers failed. Tried: " + ", ".join(tried)
+    return ("Error: DeepSeek summarization failed. Tried: "
+            + ", ".join(tried) + ". No secondary client is configured.")
 
 
 # ----------------------------------------------------------------------

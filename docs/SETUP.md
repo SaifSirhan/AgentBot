@@ -42,21 +42,16 @@ pip install -r requirements.txt
 - **Chrome/Chromium** — required by the Selenium-based web tools. `webdriver-manager`
   fetches a matching driver automatically.
 
-## 4. Configure API keys
+## 4. Configure the API key
 
-Secrets are read from **environment variables** so they never touch disk. Set the
-ones you need (PowerShell):
+The secret is read from an **environment variable** so it never touches disk:
 
 ```powershell
 # Per-session
-$env:GROQ_API_KEY      = "your-groq-key"
 $env:DEEPSEEK_API_KEY  = "your-deepseek-key"
-$env:GEMINI_API_KEY    = "your-gemini-key"
-# ... OPENROUTER_API_KEY, MISTRAL_API_KEY, HUGGINGFACE_API_KEY,
-#     COHERE_API_KEY, META_AI_API_KEY as desired
 ```
 
-To persist them, set them as **User environment variables** in
+To persist it, set it as a **User environment variable** in
 *Settings → System → About → Advanced system settings → Environment Variables*,
 or with `setx`:
 
@@ -65,17 +60,11 @@ setx DEEPSEEK_API_KEY "your-deepseek-key"
 ```
 
 Non-secret settings live in **`%APPDATA%\AgentBot\config.json`** (created on
-first run). You can optionally set the provider order there:
+first run); the GUI's Settings → API Keys field writes the same value.
 
-```json
-{
-  "AGENT_BRAIN_PRIORITY": "groq,deepseek,gemini,openrouter,mistral,huggingface,meta,cohere,ollama"
-}
-```
-
-At least **one** provider key must be valid for the agent to answer. Local
-**Ollama** works with no cloud key if you run `ollama serve` and set
-`OLLAMA_URL` / `OLLAMA_MODEL`.
+`DEEPSEEK_API_KEY` is the only model credential AgentBot uses. It serves text,
+vision and web search/fetch, so there is no provider order to configure and no
+fallback key to keep valid — if this call fails, the turn reports an error.
 
 ## 5. First run
 
@@ -95,14 +84,15 @@ python agent_gui_qt.py
 python -c "import agent; print(agent.list_brains())"
 ```
 
-This prints each provider's status in priority order.
+This prints the client's status. Cooldown and dead-marking still apply, so a
+rate-limited or auth-failed window is reported instead of re-tried every turn.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
 | `ModuleNotFoundError: PySide6` | Wrong Python interpreter. Use the pyenv 3.11.9 shell and `pip install -r requirements.txt`. |
-| `All brains unavailable` | No valid API key set, or every provider is cooling/dead. Check env vars and `list_brains()`. |
+| `DeepSeek is unavailable` | No valid `DEEPSEEK_API_KEY`, or the client is cooling down after errors. Check the env var and `list_brains()`. |
 | OCR fails | Tesseract not installed or not on `PATH`. |
 | Selenium fails | No Chrome/Chromium installed, or driver mismatch. |
 

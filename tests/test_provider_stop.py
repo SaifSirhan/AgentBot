@@ -213,19 +213,20 @@ class ProviderStopTests(unittest.TestCase):
                     self.a._call_llm("hello", stop_event=stop)
                 dispatch.assert_called_once()
 
-    def test_openrouter_request_preserves_payload_and_http_timeout(self):
-        self.a.OPENROUTER_API_KEY = "test-key"
+    def test_deepseek_request_preserves_payload_and_http_timeout(self):
+        self.a.BRAIN_PRIORITY = ["deepseek"]
+        self.a.DEEPSEEK_API_KEY = "test-key"
         post = self.a.requests.post
         post.return_value.status_code = 200
         post.return_value.json.return_value = {"choices": [{"message": {"content": "answer"}}]}
         self.a._ROUTED.allowed = {"search_web"}
         self.assertEqual(self.a._call_llm("catalog and goal", force_json=True, max_tokens=42,
-                                         force_provider="openrouter", stop_event=threading.Event()), "answer")
+                                         stop_event=threading.Event()), "answer")
         kwargs = post.call_args.kwargs
         self.assertEqual(kwargs["json"]["messages"], [{"role": "user", "content": "catalog and goal"}])
         self.assertEqual(kwargs["json"]["response_format"], {"type": "json_object"})
         self.assertEqual(kwargs["json"]["max_tokens"], 42)
-        self.assertEqual(kwargs["timeout"], self.a.OLLAMA_TIMEOUT)
+        self.assertEqual(kwargs["timeout"], self.a.LLM_TIMEOUT)
 
     def test_action_retry_stops_before_retry_after_parser_cancellation(self):
         stop = threading.Event()

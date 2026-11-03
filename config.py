@@ -21,15 +21,7 @@ DEFAULTS = {
     # Point it at a dedicated drive (e.g. D:\AgentBrain); the environment
     # variable of the same name overrides the file.
     "AGENT_MEMORY_DIR": "",
-    "GROQ_API_KEY": "",
-    "GEMINI_API_KEY": "",
-    "OPENROUTER_API_KEY": "",
-    "CEREBRAS_API_KEY": "",
-    "MISTRAL_API_KEY": "",
-    "CLOUDFLARE_API_KEY": "",
-    "CLOUDFLARE_ACCOUNT_ID": "",
-    "COHERE_API_KEY": "",
-    "HUGGINGFACE_API_KEY": "",
+    # One client: deepseek-flash serves text, vision and search/fetch.
     "DEEPSEEK_API_KEY": "",
     "SERPAPI_KEY": "",
     "CRAWLBASE_KEY": "",
@@ -44,12 +36,6 @@ DEFAULTS = {
     "TELEGRAM_USER_ID": "",
     "TELEGRAM_API_ID": "",
     "TELEGRAM_API_HASH": "",
-    "AGENT_BRAIN_PRIORITY": (
-        "meta,groq,gemini,openrouter,cerebras,mistral,cloudflare,"
-        "cohere,huggingface,deepseek,ollama"
-    ),
-    "OLLAMA_MODEL": "granite4.1:3b",
-    "OLLAMA_URL": "http://localhost:11434/api/generate",
     
     # TTS backend: "kokoro" (local). "none" disables speech output.
     "TTS_BACKEND": "kokoro",
@@ -58,7 +44,7 @@ DEFAULTS = {
     "TTS_VOICE": "af_heart",
     "TTS_SPEED": "1.0",
     "TTS_LANG": "a",
-    "TTS_MAX_CHARS": "2000",
+    "TTS_MAX_CHARS": "0",
 # Section 4 — restricted browser agent. Disabled until both the flag and at
 # least one HTTPS origin allowlist entry are set. Vision sends screenshots to
 # an external model, so it stays off until explicitly enabled.

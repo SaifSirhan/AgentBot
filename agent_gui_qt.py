@@ -5167,17 +5167,7 @@ class AgentWindow(QMainWindow):
 
         # --- API Keys ---
         page, lay = make_tab("API Keys")
-        section(lay, "Groq"); field(lay, "API key", "GROQ_API_KEY", secret=True)
-        section(lay, "Google Gemini"); field(lay, "API key", "GEMINI_API_KEY", secret=True)
-        section(lay, "OpenRouter"); field(lay, "API key", "OPENROUTER_API_KEY", secret=True)
-        section(lay, "Cerebras"); field(lay, "API key", "CEREBRAS_API_KEY", secret=True)
-        section(lay, "Mistral"); field(lay, "API key", "MISTRAL_API_KEY", secret=True)
-        section(lay, "Cloudflare Workers AI")
-        field(lay, "API key", "CLOUDFLARE_API_KEY", secret=True)
-        field(lay, "Account ID", "CLOUDFLARE_ACCOUNT_ID")
-        section(lay, "Cohere"); field(lay, "API key", "COHERE_API_KEY", secret=True)
-        section(lay, "HuggingFace"); field(lay, "API key", "HUGGINGFACE_API_KEY", secret=True)
-        section(lay, "DeepSeek"); field(lay, "API key", "DEEPSEEK_API_KEY", secret=True)
+        section(lay, "DeepSeek (text, vision, search)"); field(lay, "API key", "DEEPSEEK_API_KEY", secret=True)
         lay.addStretch(1)
 
         # --- Chat ---
@@ -5259,13 +5249,8 @@ class AgentWindow(QMainWindow):
         # --- Advanced ---
         page, lay = make_tab("Advanced")
         section(lay, "Brain")
-        field(lay, "Provider priority", "AGENT_BRAIN_PRIORITY")
         field(lay, "Max steps per turn", "MAX_STEPS_PER_TURN")
         field(lay, "Temperature (0.0-1.0)", "TEMPERATURE")
-        section(lay, "Ollama (local)")
-        field(lay, "Server URL", "OLLAMA_URL")
-        field(lay, "Model name", "OLLAMA_MODEL")
-        field(lay, "Timeout (seconds)", "OLLAMA_TIMEOUT")
         section(lay, "Proactive thoughts")
         checkbox(lay, "Spontaneous thoughts (2h)",
                  "SPONTANEOUS_THOUGHTS_ENABLED")

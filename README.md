@@ -21,7 +21,7 @@ AgentBot is not just a wrapper around a chatbot; it is a true computer-use agent
 
 - **True OS Control:** Uses `pyautogui`, `mss`, and Vision-Language Models to take screenshots, identify UI elements, and physically move the mouse and click coordinates.
 - **Native Office Automation:** Safely reads and edits `.docx` and `.xlsx` files using atomic saving and lock-detection to prevent data loss.
-- **Multi-provider LLM failover** — Routes through a priority chain (DeepSeek, Groq, Gemini, OpenRouter, etc.) with per-provider cooldown/dead-marking on errors.
+- **One client, native capabilities** — `deepseek-flash` serves text, vision (`image_url` content parts) and web search/fetch (`/v1/tools/search`, `/v1/tools/fetch`) over a single OpenAI-compatible API, so there is no second model to keep in sync and no failover chain to debug.
 - **Hybrid Memory** — Combines ChromaDB semantic search with SQLite FTS5 keyword search for blazing-fast, accurate RAG.
 - **Skills System (Progressive Disclosure):** Keeps the base prompt under 1.5k tokens by moving massive tool manuals into loadable `SKILL.md` files.
 - **Voice** — Wake-word activation (openWakeWord), speech-to-text (faster-whisper), and text-to-speech (Kokoro).
@@ -58,16 +58,7 @@ they are never written to disk.
 
 | Variable | Purpose |
 | --- | --- |
-| `GROQ_API_KEY` | Groq provider (Fallback) |
-| `DEEPSEEK_API_KEY` | DeepSeek provider (Primary) |
-| `GEMINI_API_KEY` | Google Gemini |
-| `OPENROUTER_API_KEY` | OpenRouter |
-| `MISTRAL_API_KEY` | Mistral |
-| `HUGGINGFACE_API_KEY` | Hugging Face inference |
-| `COHERE_API_KEY` | Cohere |
-| `META_AI_API_KEY` | Meta AI |
-| `OLLAMA_URL` / `OLLAMA_MODEL` | Local Ollama endpoint and model |
-| `AGENT_BRAIN_PRIORITY` | Comma-separated provider order (overrides the built-in default) |
+| `DEEPSEEK_API_KEY` | The one client: text, vision, search and fetch |
 
 ## Usage
 

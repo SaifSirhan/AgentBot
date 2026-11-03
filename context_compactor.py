@@ -85,18 +85,8 @@ def _valid(reply):
 
 
 def _ask_llm(prompt):
-    """Summarize with a fast provider when configured, else the normal chain."""
+    """Summarize with the one client."""
     import agent
-    import config
-
-    for provider, key in (("groq", "GROQ_API_KEY"),
-                          ("cerebras", "CEREBRAS_API_KEY")):
-        if config.get(key):
-            reply = agent._call_llm(
-                prompt, max_tokens=SUMMARY_MAX_TOKENS, force_provider=provider)
-            if _valid(reply):
-                return reply.strip()
-            break
 
     reply = agent._call_llm(prompt, max_tokens=SUMMARY_MAX_TOKENS)
     return reply.strip() if _valid(reply) else None

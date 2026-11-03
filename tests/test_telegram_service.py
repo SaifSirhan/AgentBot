@@ -87,13 +87,21 @@ class ConfigParsingTests(unittest.TestCase):
         with self.assertRaises(ts.TelegramDocConfigError):
             ts._parse_id_list("abc", "X")
 
-    def test_priority(self):
-        self.assertEqual(ts._parse_priority("deepseek, gemini", False),
-                         ("deepseek", "gemini"))
+    def test_gemini_is_rejected_as_a_provider(self):
+        """The Gemini client is gone: naming it is a config error, not a
+        silent fall back to a second brain."""
+        with self.assertRaises(ts.TelegramDocConfigError):
+            ts._parse_priority("deepseek, gemini", False)
+
+    def test_priority_defaults_to_the_one_client(self):
+        self.assertEqual(ts._parse_priority("deepseek", False), ("deepseek",))
         self.assertEqual(ts._parse_priority("", False), ts.DEFAULT_LLM_PRIORITY)
-        self.assertEqual(ts._parse_priority("gemini", True), ("ollama",))
         with self.assertRaises(ts.TelegramDocConfigError):
             ts._parse_priority("unknown", False)
+
+    def test_local_only_is_rejected_rather_than_summarized_in_cloud(self):
+        with self.assertRaises(ts.TelegramDocConfigError):
+            ts._parse_priority("gemini", True)
 
     def test_disabled_is_lenient(self):
         with mock.patch.object(ts, "_load_raw_config",
@@ -142,17 +150,6 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(payload["messages"], self.messages)
         self.assertNotIn("tools", payload)
 
-    def test_gemini_is_role_separated_and_tool_free(self):
-        payload = ts._build_gemini_payload(self.messages, 100)
-        system = payload["systemInstruction"]["parts"]
-        self.assertEqual(system[0]["text"], self.messages[0]["content"])
-        self.assertEqual(payload["contents"][0]["role"], "user")
-        self.assertEqual(
-            payload["contents"][0]["parts"][0]["text"],
-            self.messages[1]["content"],
-        )
-        self.assertNotIn("tools", payload)
-
     def test_messages_reject_extra_keys(self):
         with self.assertRaises(ValueError):
             ts._validate_messages(
@@ -165,39 +162,39 @@ class PayloadTests(unittest.TestCase):
 
 
 class FailoverTests(unittest.TestCase):
+    """One client: a failed DeepSeek call is reported, never routed elsewhere."""
+
     def setUp(self):
         self.messages = ts.guard_document("document body")
 
-    def test_deepseek_then_gemini(self):
+    def test_deepseek_error_is_reported_not_routed_away(self):
         with mock.patch.object(ts, "_call_deepseek_messages",
                                return_value="Error: HTTP 429"), \
-             mock.patch.object(ts, "_call_gemini_messages",
-                               return_value='{"summary":"ok"}'):
+             mock.patch.object(ts, "_dispatch_isolated",
+                               wraps=ts._dispatch_isolated) as dispatch:
             result = ts.call_isolated_llm(self.messages)
-        self.assertEqual(result, '{"summary":"ok"}')
+        self.assertTrue(result.startswith("Error: DeepSeek summarization failed"),
+                        result)
+        self.assertEqual([c.args[0] for c in dispatch.call_args_list],
+                         ["deepseek"], "no second client may be attempted")
 
-    def test_empty_reply_fails_over(self):
-        with mock.patch.object(ts, "_call_deepseek_messages", return_value="  "), \
-             mock.patch.object(ts, "_call_gemini_messages",
-                               return_value='{"summary":"ok"}'):
+    def test_empty_reply_is_not_success(self):
+        with mock.patch.object(ts, "_call_deepseek_messages", return_value="  "):
             result = ts.call_isolated_llm(self.messages)
-        self.assertEqual(result, '{"summary":"ok"}')
+        self.assertTrue(result.startswith("Error:"), result)
 
-    def test_invalid_output_fails_over(self):
+    def test_invalid_output_is_not_success(self):
         with mock.patch.object(ts, "_call_deepseek_messages",
-                               return_value="not json"), \
-             mock.patch.object(ts, "_call_gemini_messages",
-                               return_value='{"summary":"ok"}'):
+                               return_value="not json"):
             result = ts.call_isolated_llm(self.messages)
-        self.assertEqual(result, '{"summary":"ok"}')
+        self.assertTrue(result.startswith("Error:"), result)
 
-    def test_all_fail(self):
+    def test_local_only_never_sends_document_text(self):
         with mock.patch.object(ts, "_call_deepseek_messages",
-                               return_value="Error: HTTP 500"), \
-             mock.patch.object(ts, "_call_gemini_messages",
-                               return_value="Error: empty"):
-            result = ts.call_isolated_llm(self.messages)
-        self.assertTrue(result.startswith("Error: All summarizer providers"))
+                               return_value='{"summary":"ok"}') as call:
+            result = ts.call_isolated_llm(self.messages, local_only=True)
+        self.assertTrue(str(result).startswith("Error:"), result)
+        call.assert_not_called()
 
 
 class FakeStream:
@@ -522,7 +519,7 @@ class ServiceTests(unittest.TestCase):
             session_path=os.path.join(tempdir, "test_session.session"),
             allowed_chats=frozenset(chats),
             allowed_senders=frozenset(senders),
-            llm_priority=("deepseek", "gemini"),
+            llm_priority=("deepseek",),
             local_only=False,
         )
 

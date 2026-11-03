@@ -8,7 +8,7 @@ the result is summarised back to the user.
 
 | Module | Responsibility |
 | --- | --- |
-| `agent.py` | Core: LLM provider routing + failover, tool dispatch, and the multi-step agent turn loop. Also holds the tool-description prompt the model uses to choose tools. |
+| `agent.py` | Core: the single DeepSeek client (text, vision, search/fetch), tool dispatch, and the multi-step agent turn loop. Also holds the tool-description prompt the model uses to choose tools. |
 | `agent_gui_qt.py` | PySide6 desktop UI — chat view, sidebar, input pill, settings overlay, tray, hotkeys, mic. |
 | `rag_tool.py` | Indexes local documents into ChromaDB with Sentence-Transformers embeddings; semantic search for retrieval-augmented answers. |
 | `memory.py` | Persistent user facts recalled across conversations. |
@@ -21,14 +21,14 @@ the result is summarised back to the user.
 Supporting tool modules include `file_tools.py`, `export_tools.py`, `screen.py`,
 `weather_news.py`, `gmail_tool.py`, `whatsapp_tool.py`, and `air_quality.py`.
 
-## LLM routing & failover
+## LLM client
 
-`agent.py` keeps a **priority chain** of providers (Groq, DeepSeek, Gemini,
-OpenRouter, Mistral, Hugging Face, Meta, Cohere, Ollama). For each call it walks
-the chain and uses the first provider that returns a non-error response.
-Providers that error are classified (auth/quota → marked dead; rate-limit/5xx →
-temporary cooldown) so the chain self-heals without retrying a known-bad
-provider on every turn.
+`agent.py` talks to **one** client: `deepseek-flash` at `api.deepseek.com`,
+which serves text, vision (`image_url` content parts) and web search/fetch
+(`/v1/tools/search`, `/v1/tools/fetch`). Errors are still classified
+(auth/quota → dead; rate-limit/5xx → cooldown) so a known-bad window is not
+re-tried on every turn, but there is no chain to fall over to — a failed call
+returns an error the caller can see.
 
 DeepSeek V4 Flash has explicit **thinking-mode control**: reasoning is disabled
 for normal tool-calling turns (so a small `max_tokens` budget isn't consumed by
@@ -50,8 +50,8 @@ reasoning tokens), while `deep_research` uses a high-effort thinking path.
                                    |
                      plan (LLM)    v
               +--------------------+--------------------+
-              |  _call_llm  ->  BRAIN_PRIORITY failover   |
-              |  groq -> deepseek -> gemini -> ...        |
+              |  _call_llm  ->  deepseek-flash (one client) |
+              |  no failover: a failed call returns an error |
               +--------------------+---------------------+
                                    |
                     model returns either

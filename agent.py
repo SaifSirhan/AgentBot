@@ -154,18 +154,14 @@ import config as _cfg
 _c = _cfg.load_config()
 
 # ---------------------------
-# BRAIN CONFIGURATION (10-provider failover)
+# BRAIN CONFIGURATION — one client, one model
 # ---------------------------
-_default_priority = _c.get(
-    "AGENT_BRAIN_PRIORITY",
-    "deepseek,groq,gemini,openrouter,mistral,huggingface,meta,cohere,ollama",
-)
-BRAIN_PRIORITY = [
-    b.strip().lower()
-    for b in _default_priority.split(",")
-    if b.strip()
-]
-print(f"[BRAIN] Priority: {' -> '.join(BRAIN_PRIORITY)}")
+# deepseek-flash serves text, vision (image_url content parts) and web
+# search/fetch (/v1/tools/search, /v1/tools/fetch) natively. The eleven-brain
+# failover chain became dead weight the moment the primary could do all three:
+# every prompt-path bug had eleven providers to blame and exactly one that
+# could answer.
+BRAIN_PRIORITY = ["deepseek"]
 LAST_BRAIN = None
 # Outcome tracking for the most recent _call_llm call. Used by the eval
 # harness (evals.py) to label traces and by /eval. _LAST_PROVIDER is the
@@ -174,45 +170,18 @@ LAST_BRAIN = None
 _LAST_PROVIDER = None
 _LAST_FAILURE_REASON = None
 
-# ---------- Credentials and model endpoints ----------
-GROQ_API_KEY        = _c.get("GROQ_API_KEY", "")
-GEMINI_API_KEY      = _c.get("GEMINI_API_KEY", "")
-OPENROUTER_API_KEY  = _c.get("OPENROUTER_API_KEY", "")
-CEREBRAS_API_KEY    = _c.get("CEREBRAS_API_KEY", "")
-MISTRAL_API_KEY     = _c.get("MISTRAL_API_KEY", "")
-CLOUDFLARE_API_KEY  = _c.get("CLOUDFLARE_API_KEY", "")
-CLOUDFLARE_ACCOUNT_ID = _c.get("CLOUDFLARE_ACCOUNT_ID", "")
-COHERE_API_KEY      = _c.get("COHERE_API_KEY", "")
-HUGGINGFACE_API_KEY = _c.get("HUGGINGFACE_API_KEY", "")
-DEEPSEEK_API_KEY    = _c.get("DEEPSEEK_API_KEY", "")
-META_AI_API_KEY     = os.environ.get("META_AI_API_KEY", "") or _c.get("META_AI_API_KEY", "")
-
-OLLAMA_URL   = _c.get("OLLAMA_URL", "http://localhost:11434/api/generate")
-OLLAMA_MODEL = _c.get("OLLAMA_MODEL", "granite4.1:3b")
+# ---------- Credentials and model name ----------
+DEEPSEEK_API_KEY = _c.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL   = "deepseek-flash"
 
 TELEGRAM_TOKEN   = _c.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_USER_ID = _c.get("TELEGRAM_USER_ID", "")
-# ---------- Model names ----------
-GROQ_MODEL        = "openai/gpt-oss-120b"
-GEMINI_MODEL      = "gemini-flash-latest"
-OPENROUTER_MODEL  = "nvidia/nemotron-3-super-120b-a12b:free"
-CEREBRAS_MODEL    = "llama-3.3-70b"
-MISTRAL_MODEL     = "mistral-small-latest"
-CLOUDFLARE_MODEL  = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-COHERE_MODEL      = "command-r-plus-08-2024"
-HUGGINGFACE_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
-DEEPSEEK_MODEL    = "deepseek-flash"
-META_AI_MODEL     = "muse-spark-1.3"
-
-# ---------- Ollama (local) ----------
-# OLLAMA_URL / OLLAMA_MODEL are read from config.json above; don't reassign here.
-KEEP_ALIVE = "30m"
 
 # ---------- Common ----------
-OLLAMA_TIMEOUT = 120
+LLM_TIMEOUT = 120
 MAX_PAGE_CHARS = 6000
 MAX_STEPS_PER_TURN = 30
-MODEL = BRAIN_PRIORITY[0] if BRAIN_PRIORITY else "ollama"
+MODEL = DEEPSEEK_MODEL
 
 # ---------- Cooldown state per brain ----------
 _brain_lock = _threading.Lock()
@@ -492,326 +461,6 @@ def normalize_url(url):
     return url
 
 
-# ---------------------------
-# PROVIDER CALLS — one per API
-# ---------------------------
-def _call_meta(prompt, force_json, max_tokens):
-    if not META_AI_API_KEY:
-        return "Error: META_AI_API_KEY not set"
-    try:
-        body = {
-            "model": META_AI_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-        }
-        if force_json:
-            body["response_format"] = {"type": "json_object"}
-        if max_tokens:
-             body["max_tokens"] = max(max_tokens, 2048)
-
-        r = requests.post(
-            "https://api.meta.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {META_AI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=body, timeout=OLLAMA_TIMEOUT
-        )
-
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-
-        # Meta's API can return either an OpenAI-style response or a Meta-style one.
-        # We handle both just in case.
-        data = r.json()
-
-        # OpenAI-style response (what Muse Spark actually returns)
-        try:
-            content = data["choices"][0]["message"].get("content")
-            if content:
-                return content.strip()
-        except (KeyError, IndexError, TypeError):
-            pass
-
-        # Sometimes the API returns refusal instead of content
-        try:
-            refusal = data["choices"][0]["message"].get("refusal")
-            if refusal:
-                return f"Model refused: {refusal}"
-        except (KeyError, IndexError, TypeError):
-            pass
-
-        # Meta-native shape (fallback, in case they change it)
-        try:
-            content = data["completion_message"]["content"]["text"]
-            if content:
-                return content.strip()
-        except (KeyError, IndexError, TypeError):
-            pass
-
-        # Nothing worked — dump the whole thing so we can diagnose
-        import json as _json
-        print(f"[meta] unexpected response: {_json.dumps(data)[:500]}")
-        return f"Error: could not parse Meta response: {str(data)[:200]}"
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_ollama(prompt, force_json, max_tokens):
-    try:
-        payload = {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "keep_alive": KEEP_ALIVE,
-        }
-        if force_json:
-            payload["format"] = "json"
-        if max_tokens:
-            payload["options"] = {"num_predict": max_tokens}
-        r = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
-        if r.status_code == 200:
-            return r.json().get("response", "").strip()
-        return f"Error: HTTP {r.status_code}"
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_gemini(prompt, force_json, max_tokens):
-    if not GEMINI_API_KEY:
-        return "Error: GEMINI_API_KEY not set"
-    try:
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
-        body = {"contents": [{"parts": [{"text": prompt}]}]}
-        if force_json:
-            body["generationConfig"] = {"responseMimeType": "application/json"}
-        if max_tokens:
-            body.setdefault("generationConfig", {})["maxOutputTokens"] = max_tokens
-        r = requests.post(url, json=body, timeout=OLLAMA_TIMEOUT)
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-        data = r.json()
-        candidates = data.get("candidates") or []
-        # A blocked prompt (safety/recitation) may return no candidates at all.
-        block = (data.get("promptFeedback") or {}).get("blockReason")
-        if block:
-            return f"Error: gemini blocked the prompt ({block})"
-        if not candidates:
-            return "Error: gemini returned no candidates"
-        cand = candidates[0]
-        finish = cand.get("finishReason")
-        parts = (cand.get("content") or {}).get("parts") or []
-        if parts and parts[0].get("text"):
-            return parts[0]["text"].strip()
-        # No usable text. Distinguish the common, benign case (the model ran
-        # out of output budget before emitting anything — reasoning models do
-        # this at low maxOutputTokens) from a genuinely malformed response.
-        # Returning an Error: string makes _call_llm fail over, which is
-        # correct; before this it said "unexpected response: {...}" which
-        # looked like a parser bug rather than an empty reply.
-        if finish == "MAX_TOKENS":
-            return "Error: gemini empty response — output token limit reached"
-        if finish and finish not in ("STOP",):
-            return f"Error: gemini produced no text (finishReason={finish})"
-        return f"Error: gemini unexpected response: {str(data)[:200]}"
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_groq(prompt, force_json, max_tokens):
-    if not GROQ_API_KEY:
-        return "Error: GROQ_API_KEY not set"
-    try:
-        body = {
-            "model": GROQ_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-        }
-        if force_json:
-            body["response_format"] = {"type": "json_object"}
-        if max_tokens:
-            body["max_tokens"] = max_tokens
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}",
-                     "Content-Type": "application/json"},
-            json=body, timeout=OLLAMA_TIMEOUT
-        )
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_openrouter(prompt, force_json, max_tokens):
-    if not OPENROUTER_API_KEY:
-        return "Error: OPENROUTER_API_KEY not set"
-    try:
-        body = {
-            "model": OPENROUTER_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-        }
-        if force_json:
-            body["response_format"] = {"type": "json_object"}
-        if max_tokens:
-            body["max_tokens"] = max_tokens
-        r = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://t.me/benjaminnethayahubot",
-                "X-Title": "AgentBot",
-            },
-            json=body, timeout=OLLAMA_TIMEOUT
-        )
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_cerebras(prompt, force_json, max_tokens):
-    if not CEREBRAS_API_KEY:
-        return "Error: CEREBRAS_API_KEY not set"
-    try:
-        body = {
-            "model": CEREBRAS_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-        }
-        if force_json:
-            body["response_format"] = {"type": "json_object"}
-        if max_tokens:
-            body["max_tokens"] = max_tokens
-        r = requests.post(
-            "https://api.cerebras.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {CEREBRAS_API_KEY}",
-                     "Content-Type": "application/json"},
-            json=body, timeout=OLLAMA_TIMEOUT
-        )
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_mistral(prompt, force_json, max_tokens):
-    if not MISTRAL_API_KEY:
-        return "Error: MISTRAL_API_KEY not set"
-    try:
-        body = {
-            "model": MISTRAL_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-        }
-        if force_json:
-            body["response_format"] = {"type": "json_object"}
-        if max_tokens:
-            body["max_tokens"] = max_tokens
-        r = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {MISTRAL_API_KEY}",
-                     "Content-Type": "application/json"},
-            json=body, timeout=OLLAMA_TIMEOUT
-        )
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_cloudflare(prompt, force_json, max_tokens):
-    if not CLOUDFLARE_API_KEY:
-        return "Error: CLOUDFLARE_API_KEY not set"
-    if not CLOUDFLARE_ACCOUNT_ID:
-        return "Error: CLOUDFLARE_ACCOUNT_ID not set"
-    try:
-        url = (f"https://api.cloudflare.com/client/v4/accounts/"
-               f"{CLOUDFLARE_ACCOUNT_ID}/ai/v1/chat/completions")
-        body = {
-            "model": CLOUDFLARE_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if max_tokens:
-            body["max_tokens"] = max_tokens
-        r = requests.post(
-            url,
-            headers={"Authorization": f"Bearer {CLOUDFLARE_API_KEY}",
-                     "Content-Type": "application/json"},
-            json=body, timeout=OLLAMA_TIMEOUT
-        )
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-        data = r.json()
-        try:
-            return data["result"]["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError):
-            try:
-                return data["choices"][0]["message"]["content"].strip()
-            except (KeyError, IndexError):
-                return f"Error: unexpected response: {str(data)[:200]}"
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_cohere(prompt, force_json, max_tokens):
-    if not COHERE_API_KEY:
-        return "Error: COHERE_API_KEY not set"
-    try:
-        body = {
-            "model": COHERE_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if max_tokens:
-            body["max_tokens"] = max_tokens
-        r = requests.post(
-            "https://api.cohere.com/v2/chat",
-            headers={"Authorization": f"Bearer {COHERE_API_KEY}",
-                     "Content-Type": "application/json"},
-            json=body, timeout=OLLAMA_TIMEOUT
-        )
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-        data = r.json()
-        try:
-            return data["message"]["content"][0]["text"].strip()
-        except (KeyError, IndexError, TypeError):
-            return f"Error: unexpected response: {str(data)[:200]}"
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_huggingface(prompt, force_json, max_tokens):
-    if not HUGGINGFACE_API_KEY:
-        return "Error: HUGGINGFACE_API_KEY not set"
-    try:
-        body = {
-            "model": HUGGINGFACE_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-        }
-        if max_tokens:
-            body["max_tokens"] = max_tokens
-        r = requests.post(
-            "https://router.huggingface.co/v1/chat/completions",
-            headers={"Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
-                     "Content-Type": "application/json"},
-            json=body, timeout=OLLAMA_TIMEOUT
-        )
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"Error: {e}"
-
-
 def _call_deepseek(prompt, force_json, max_tokens):
     if not DEEPSEEK_API_KEY:
         return "Error: DEEPSEEK_API_KEY not set"
@@ -836,7 +485,7 @@ def _call_deepseek(prompt, force_json, max_tokens):
             "https://api.deepseek.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}",
                      "Content-Type": "application/json"},
-            json=body, timeout=OLLAMA_TIMEOUT
+            json=body, timeout=LLM_TIMEOUT
         )
         if r.status_code != 200:
             return f"Error: HTTP {r.status_code}: {r.text[:200]}"
@@ -869,32 +518,7 @@ def _call_deepseek_thinking(prompt, force_json=False, max_tokens=4096):
             "https://api.deepseek.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}",
                      "Content-Type": "application/json"},
-            json=body, timeout=OLLAMA_TIMEOUT
-        )
-        if r.status_code != 200:
-            return f"Error: HTTP {r.status_code}: {r.text[:200]}"
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"Error: {e}"
-
-
-def _call_openai(prompt, force_json, max_tokens):
-    if not os.environ.get("OPENAI_API_KEY", ""):
-        return "Error: OPENAI_API_KEY not set"
-    try:
-        body = {
-            "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if force_json:
-            body["response_format"] = {"type": "json_object"}
-        if max_tokens:
-            body["max_tokens"] = max_tokens
-        r = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-                     "Content-Type": "application/json"},
-            json=body, timeout=OLLAMA_TIMEOUT
+            json=body, timeout=LLM_TIMEOUT
         )
         if r.status_code != 200:
             return f"Error: HTTP {r.status_code}: {r.text[:200]}"
@@ -950,20 +574,14 @@ def _classify_error(err_text):
 
 
 def _dispatch_call(name, prompt, force_json, max_tokens):
-    if name == "ollama":        return _call_ollama(prompt, force_json, max_tokens)
-    elif name == "gemini":      return _call_gemini(prompt, force_json, max_tokens)
-    elif name == "groq":        return _call_groq(prompt, force_json, max_tokens)
-    elif name == "openrouter":  return _call_openrouter(prompt, force_json, max_tokens)
-    elif name == "cerebras":    return _call_cerebras(prompt, force_json, max_tokens)
-    elif name == "mistral":     return _call_mistral(prompt, force_json, max_tokens)
-    elif name == "cloudflare":  return _call_cloudflare(prompt, force_json, max_tokens)
-    elif name == "cohere":      return _call_cohere(prompt, force_json, max_tokens)
-    elif name == "huggingface": return _call_huggingface(prompt, force_json, max_tokens)
-    elif name == "deepseek":    return _call_deepseek(prompt, force_json, max_tokens)
-    elif name == "openai":      return _call_openai(prompt, force_json, max_tokens)
-    elif name == "meta":        return _call_meta(prompt, force_json, max_tokens)
-    else:
-        return f"Error: unknown brain '{name}'"
+    """Route a text-only call to the one client. Any other name reports a miss.
+
+    Strict on purpose: a stale provider string in a saved config must not look
+    like a working brain. `_call_llm` normalises the pin before it gets here.
+    """
+    if name == "deepseek":
+        return _call_deepseek(prompt, force_json, max_tokens)
+    return f"Error: unknown brain '{name}'"
 
 
 # Admission is serialized for both synchronous and cancellable calls. An
@@ -1004,9 +622,9 @@ def _dispatch_provider(name, prompt, force_json, max_tokens, stop_event):
         dispatch = _dispatch_call
 
         def request():
-            # Provider prompts already contain the routed catalog. In particular,
-            # _call_openrouter reads no _ROUTED state; do not copy live turn state
-            # (allowlists, autonomous loop, verifiers) into an abandoned worker.
+            # Provider prompts already contain the routed catalog. Do not copy
+            # live turn state (allowlists, autonomous loop, verifiers) into an
+            # abandoned worker: the request may outlive the turn that made it.
             _set_stop_event(stop_event)
             try:
                 _raise_if_stopped(stop_event)
@@ -1037,11 +655,12 @@ def _dispatch_provider(name, prompt, force_json, max_tokens, stop_event):
 
 def _call_llm(prompt, force_json=False, max_tokens=None, force_provider=None,
               stop_event=None):
-    """Try each brain in priority order until one succeeds.
+    """Call the one client, with its cooldown state respected.
 
-    force_provider pins a single provider (no failover). stop_event defaults to
-    the caller's thread-local event; cancellation always raises InterruptedError.
-    Only this waiting caller may update brain state or decide to fail over.
+    `force_provider` is accepted and ignored: there is a single brain, so a
+    stale provider string from an old config or an /eval run must not select
+    something that no longer exists. stop_event defaults to the caller's
+    thread-local event; cancellation always raises InterruptedError.
     """
     global LAST_BRAIN, _LAST_PROVIDER, _LAST_FAILURE_REASON
     stop_event = stop_event if stop_event is not None else _current_stop_event()
@@ -1049,7 +668,7 @@ def _call_llm(prompt, force_json=False, max_tokens=None, force_provider=None,
     tried = []
     now = time.time()
 
-    providers_to_try = [force_provider] if force_provider else BRAIN_PRIORITY
+    providers_to_try = BRAIN_PRIORITY
 
     for name in providers_to_try:
         _raise_if_stopped(stop_event)
@@ -1085,10 +704,10 @@ def _call_llm(prompt, force_json=False, max_tokens=None, force_provider=None,
             tried.append(f"{name}({result[:40]})")
             continue
 
-        # An empty or whitespace-only reply is NOT success: reasoning models
-        # (e.g. groq openai/gpt-oss-120b at low max_tokens) return '' and
-        # would otherwise short-circuit the failover chain, leaving the caller
-        # with '' and no error. Treat it as a failed attempt and keep going.
+        # An empty or whitespace-only reply is NOT success: deepseek-flash
+        # reasons before it answers, and when reasoning eats the whole
+        # max_tokens budget it answers HTTP 200 with content == ''. Treating
+        # that as success would hand the caller a blank reply and no error.
         if not (isinstance(result, str) and result.strip()):
             _LAST_FAILURE_REASON = "empty"
             tried.append(f"{name}(empty)")
@@ -1104,9 +723,9 @@ def _call_llm(prompt, force_json=False, max_tokens=None, force_provider=None,
     _raise_if_stopped(stop_event)
     LAST_BRAIN = None
     return (
-        "Error: All brains unavailable. "
+        "Error: DeepSeek is unavailable. "
         f"Tried: {', '.join(tried) if tried else 'none'}. "
-        "Check that at least one API key is set and valid."
+        "Check DEEPSEEK_API_KEY — there is no second client to fall back to."
     )
 
 
