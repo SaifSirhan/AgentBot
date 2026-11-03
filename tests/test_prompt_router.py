@@ -647,7 +647,7 @@ class WeatherRoutingTests(unittest.TestCase):
     def setUp(self):
         self.tools = pc.build_tools(frozenset({
             "weather", "air_quality", "open_app", "read_file",
-            "search_web", "serp_search",
+            "search_web",
         }))
 
     def route(self, request):
