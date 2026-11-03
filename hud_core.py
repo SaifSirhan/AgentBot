@@ -14,9 +14,10 @@ darkening it, and it sets WA_TransparentForMouseEvents so text under it stays
 clickable.
 
 `PetWidget` is the desktop pet that shares that canvas. It is a sibling layer
-rather than a seventh reactor state: it blits `assets/pet/<state>.png` into the
+rather than a seventh reactor state: it plays `assets/pet/frames/<pose>/` into the
 bottom-right of the chat viewport under the same alpha-only rule, and the HUD's
-existing tick drives its breathing bob so it never needs a timer of its own.
+existing tick drives both its breathing bob and its frame clock, so it never
+needs a timer of its own.
 """
 from __future__ import annotations
 
