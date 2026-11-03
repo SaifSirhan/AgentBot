@@ -69,3 +69,7 @@ recipes.json
 TelegramExport/
 result.json
 PrivateExport/
+
+# Raw generator output. The matte/align/slice pipeline reads these to build
+# assets/pet/frames/, so the sheets themselves are intermediate, not art.
+vibe_images/
