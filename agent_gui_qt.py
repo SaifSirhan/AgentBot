@@ -4219,10 +4219,33 @@ class AgentWindow(QMainWindow):
         self.setWindowTitle(f"Agent — {label}" if label else "Agent")
         self._sync_hud_state()
 
-    # The pet's sprite for each reactor state. Every busy status maps to the
-    # book, which leaves `thinking` a valid name with no trigger; LISTENING,
-    # CONTINUOUS and ERROR leave the pet plainly awake.
-    _PET_BY_STATE = {"THINKING": "reading", "SPEAKING": "speaking"}
+    # The pet's sprite for each reactor state. States not listed — LISTENING,
+    # CONTINUOUS, ERROR — leave it plainly awake.
+    _PET_BY_STATE = {"THINKING": "thinking", "SPEAKING": "speaking"}
+    # Busy normally means the laptop. These three tools are the agent reading
+    # rather than planning, so they swap the pose to the book.
+    _PET_READ_TOOLS = frozenset(
+        {"read_file", "rag_search", "read_and_summarize"})
+    # Step lines arrive as "Action: <tool>(<input>) -> Result: ...".
+    _STEP_TOOL_LINE = re.compile(r"^Action:\s*([A-Za-z_][A-Za-z0-9_]*)\(")
+
+    def _last_step_tool(self):
+        """The tool named by the newest live step line, or None.
+
+        Read back through _live_steps instead of keeping a flag, so it cannot
+        outlive the turn — every turn start clears the list.
+        """
+        for line in reversed(getattr(self, "_live_steps", []) or []):
+            match = self._STEP_TOOL_LINE.match(line)
+            if match:
+                return match.group(1)
+        return None
+
+    def _pet_state_for(self, name):
+        if (name == "THINKING"
+                and self._last_step_tool() in self._PET_READ_TOOLS):
+            return "reading"
+        return self._PET_BY_STATE.get(name, "idle")
 
     def _sync_hud_state(self):
         hud = getattr(getattr(self, "chat", None), "background_hud", None)
@@ -4236,7 +4259,7 @@ class AgentWindow(QMainWindow):
             # the pet to bed; every other quiet state leaves it awake.
             hud.set_pet_state("sleeping")
         else:
-            hud.set_pet_state(self._PET_BY_STATE.get(name, "idle"))
+            hud.set_pet_state(self._pet_state_for(name))
 
     def _resolve_hud_state(self):
         if time.monotonic() < getattr(self, "_hud_error_until", 0.0):
@@ -4448,6 +4471,9 @@ class AgentWindow(QMainWindow):
         self._live_steps.append(text)
         self._live_steps = self._live_steps[-50:]
         self.panel.set_activity(self._live_steps)
+        # The pet's pose depends on which tool just reported, and set_status
+        # does not fire mid-turn, so each step has to re-sync it.
+        self._sync_hud_state()
 
     def _clear_thinking_message(self):
         message = self._thinking_message

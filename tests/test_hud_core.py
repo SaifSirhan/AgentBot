@@ -943,8 +943,8 @@ class CoreCardIntegrationTests(unittest.TestCase):
             self.app.processEvents()
 
     def test_the_pet_tracks_the_agent_status_through_one_hook(self):
-        """Reading while busy, speaking over TTS, asleep when the mic times out,
-        awake again when the turn ends — all from _sync_hud_state, which
+        """Thinking while busy, speaking over TTS, asleep when the mic times
+        out, awake again when the turn ends — all from _sync_hud_state, which
         set_status already calls, so no per-call-site pet code is needed."""
         import agent_gui_qt as gui
 
@@ -954,20 +954,21 @@ class CoreCardIntegrationTests(unittest.TestCase):
             hud = window.chat.background_hud
             window._recording = False
             window._continuous_listening = False
+            window._live_steps = []
             with mock.patch.object(gui, "_tts_is_speaking", return_value=False):
                 window.set_status("Ready", busy=False)
                 self.assertEqual(pet.pet_state, "idle")
 
                 window.set_status("Thinking…", busy=True)
-                self.assertEqual(pet.pet_state, "reading")
+                self.assertEqual(pet.pet_state, "thinking")
                 self.assertEqual(hud.state, "THINKING")
 
-                # Every busy status shares the book sprite, not just thinking.
+                # With no tool reported yet, every busy status is the laptop.
                 for status in ("Working…", "Browsing…", "Transcribing…",
                                "Verifying…"):
                     with self.subTest(status=status):
                         window.set_status(status, busy=True)
-                        self.assertEqual(pet.pet_state, "reading")
+                        self.assertEqual(pet.pet_state, "thinking")
 
                 window.set_status(
                     "Mic sleeping. Say 'Hey Jarvis' or press F9.", busy=False)
@@ -976,7 +977,7 @@ class CoreCardIntegrationTests(unittest.TestCase):
 
                 window._processing = True
                 window.set_status("Thinking…", busy=True)
-                self.assertEqual(pet.pet_state, "reading")
+                self.assertEqual(pet.pet_state, "thinking")
                 window._end_turn()
                 self.assertEqual(pet.pet_state, "idle")
                 self.assertTrue(window.input_field.isEnabled())
@@ -1067,6 +1068,121 @@ class CoreCardIntegrationTests(unittest.TestCase):
             window.close()
             window.deleteLater()
             self.app.processEvents()
+
+
+class PetToolPoseTests(unittest.TestCase):
+    """Busy is the laptop; the book only while a read tool is what the agent
+    last reported. Steps arrive after execution, so the pose tracks the newest
+    reported tool rather than one that is in flight.
+
+    One window for the class: building an AgentWindow is the expensive part of
+    these tests, and every piece of state they touch is reset per test below.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import agent_gui_qt as gui
+
+        cls.app = QApplication.instance() or QApplication([])
+        cls.gui = gui
+        cls.window = gui.AgentWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.window.close()
+        cls.window.deleteLater()
+        cls.app.processEvents()
+
+    def setUp(self):
+        gui = self.gui
+        window = self.window
+        self.pet = window.chat.pet
+        window._recording = False
+        window._continuous_listening = False
+        window._hud_error_until = 0.0
+        window._live_steps = []
+        self._tts = mock.patch.object(gui, "_tts_is_speaking",
+                                      return_value=False)
+        self._tts.start()
+        window._processing = True
+        window.set_status("Thinking…", busy=True)
+
+    def tearDown(self):
+        self._tts.stop()
+        self.window._processing = False
+        self.app.processEvents()
+
+    def _report(self, tool, result="ok"):
+        self.window._on_worker_step(
+            "Action: %s(some_input) -> Result: %s" % (tool, result))
+
+    def test_the_pose_is_the_laptop_before_any_tool_reports(self):
+        self.assertEqual(self.pet.pet_state, "thinking")
+
+    def test_each_read_tool_swaps_the_pose_to_the_book(self):
+        for tool in ("read_file", "rag_search", "read_and_summarize"):
+            with self.subTest(tool=tool):
+                self.window._live_steps = []
+                self._report(tool)
+                self.assertEqual(self.pet.pet_state, "reading")
+
+    def test_other_tools_keep_the_laptop(self):
+        for tool in ("search_web", "write_file", "patch_file", "open_app",
+                     "system_status", "chat", "find_files", "grep_group_chat"):
+            with self.subTest(tool=tool):
+                self.window._live_steps = []
+                self._report(tool)
+                self.assertEqual(self.pet.pet_state, "thinking")
+
+    def test_the_book_is_shown_for_a_failed_read_too(self):
+        """The step is appended after execution either way, and the agent is
+        still dealing with the read when the error comes back."""
+        self.window._on_worker_step(
+            "Action: read_file(nope.txt) -> ERROR: no such file")
+        self.assertEqual(self.pet.pet_state, "reading")
+
+    def test_the_newest_step_wins(self):
+        self._report("read_file")
+        self.assertEqual(self.pet.pet_state, "reading")
+        self._report("search_web")
+        self.assertEqual(self.pet.pet_state, "thinking")
+        self._report("rag_search")
+        self.assertEqual(self.pet.pet_state, "reading")
+
+    def test_non_tool_lines_leave_the_pose_alone(self):
+        self._report("read_file")
+        for line in ("System: Repeated action - stopped.",
+                    "Done: the answer",
+                    "AI: thinking out loud"):
+            with self.subTest(line=line):
+                self.window._on_worker_step(line)
+                self.assertEqual(self.pet.pet_state, "reading",
+                                 "a non-tool line reset the pose")
+
+    def test_a_step_moves_the_pet_without_any_status_change(self):
+        """set_status does not fire mid-turn, so _on_worker_step has to re-sync
+        the HUD itself or the book would never appear during a turn."""
+        self.assertEqual(self.pet.pet_state, "thinking")
+        with mock.patch.object(self.window, "set_status") as set_status:
+            self._report("read_and_summarize")
+        self.assertEqual(self.pet.pet_state, "reading")
+        set_status.assert_not_called()
+
+    def test_the_book_does_not_leak_into_the_next_turn(self):
+        self._report("read_file")
+        self.assertEqual(self.pet.pet_state, "reading")
+        # Exactly what a new send does.
+        self.window._live_steps = []
+        self.window._processing = True
+        self.window.set_status("Thinking…", busy=True)
+        self.assertEqual(self.pet.pet_state, "thinking")
+
+    def test_the_book_never_shows_when_the_agent_is_not_busy(self):
+        self._report("read_file")
+        self.assertEqual(self.pet.pet_state, "reading")
+        self.window._processing = False
+        self.window.set_status("Ready", busy=False)
+        self.assertEqual(self.pet.pet_state, "idle")
 
 
 if __name__ == "__main__":
