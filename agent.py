@@ -205,7 +205,7 @@ GROUP_MODE = False
 # sends as the user — is blocked. Groups get information-only tools.
 # load_skill is read-only and lets groups read the core_tools manual.
 SAFE_GROUP_TOOLS = {
-    "chat", "search_web", "serp_search", "weather", "air_quality", "news",
+    "chat", "search_web", "weather", "air_quality", "news",
     "current_time", "show_last_result", "read_and_summarize",
     "generate_image", "list_reminders", "list_brains", "load_skill",
 }
@@ -5001,7 +5001,7 @@ NEVER name the tools you have or lack. If you cannot see an image, say so — ne
 # TOOL REGISTRY
 # ---------------------------
 VALID_TOOLS = {
-    "chat", "search_web", "serp_search", "show_last_result", "read_and_summarize",
+    "chat", "search_web", "show_last_result", "read_and_summarize",
     "google_search_and_open", "youtube_search", "get_video_links",
     "play_on_youtube", "queue_on_ytm", "close_music_tab", "stream_media",
     "open_app", "open_website", "run_command", "execute_python", "make_folder",
@@ -5904,14 +5904,6 @@ def _execute_tool_impl(action):
     elif tool == 'set_word_language':
         import office_control
         return office_control.set_word_language(inp.strip() or "en-US")
-    elif tool == 'serp_search':
-        parts = inp.split("|", 1)
-        query = parts[0].strip()
-        engine = parts[1].strip() if len(parts) > 1 else "google"
-        if not query:
-            return "ERROR: serp_search needs a query."
-        import serpapi_tool
-        return serpapi_tool.serp_search(query, engine)
     elif tool == 'patch_file':             return patch_file(inp)
     elif tool == 'list_symbols':           return list_symbols(inp)
     elif tool == 'repo_map':               return repo_map(inp)

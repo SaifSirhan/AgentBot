@@ -45,7 +45,6 @@ FALLBACK_TOOLS = (
 
 DESCRIPTIONS = {
     "search_web": "Search the live web and return titles, URLs, and summaries.",
-    "serp_search": "Structured Google/News/Images/Scholar search via SerpApi.",
     "read_artifact": "Read the full text of a saved large tool-output artifact by id.",
     "read_and_summarize": "Fetch a URL and summarize its contents.",
     "google_search_and_open": "Google search and open the top result.",

@@ -22,7 +22,7 @@ RULES = {
     ),
     "research": (
         "Research: gather evidence from multiple sources before answering; "
-        "use search_web and serp_search for live results and cite real URLs."
+        "use search_web for live results and cite real URLs."
     ),
     "weather": (
         "Weather: use the weather tool for live conditions, temperature, rain, "
@@ -278,7 +278,7 @@ def build_dynamic_prompt(
     # model reports a missing capability the router simply forgot to expose.
     if "research" in intents:
         mandatory.update(
-            name for name in ("search_web", "serp_search") if name in by_name)
+            name for name in ("search_web",) if name in by_name)
 
     if re.search(IMAGE_PATH_PATTERN, positive_request, re.I):
         mandatory.update(name for name in VISION_TOOLS if name in by_name)

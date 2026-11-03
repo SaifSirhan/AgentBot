@@ -353,9 +353,6 @@ Format: name(input) — description. Invoke as {"tool":"name","input":"..."}.
 INFORMATION & WEB
   search_web(input) — search the live web via DeepSeek Search (falls back to
 the legacy engine). Returns titles, URLs and summaries. Use these exact URLs.
-  serp_search(input) — structured web search via SerpApi (Google, News, Images,
-Scholar, Maps, Flights, Hotels, Shopping, YouTube). Format: "query|engine"
-(engine optional, default google). Falls back to search_web if no API key is set.
   show_last_result() — show the previous search result.
   read_and_summarize(input) — fetch and summarize a URL.
   google_search_and_open(input) — Google search, open the top result.

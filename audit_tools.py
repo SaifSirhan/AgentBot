@@ -51,7 +51,6 @@ SPECIAL_TARGETS = {
     "run_recipe": ("recipes.run_recipe",),
     "scan_file": ("security_tools.scan_file",),
     "scan_process": ("security_tools.scan_process",),
-    "serp_search": ("serpapi_tool.serp_search",),
     "set_word_language": ("office_control.set_word_language",),
 }
 

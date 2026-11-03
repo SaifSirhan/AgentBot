@@ -53,10 +53,14 @@ class AdapterTests(unittest.TestCase):
                 self.assertFalse(self.allowed(
                     [("write_file", "notes.txt|hi", output)], "I saved the file."))
 
-    def test_non_mutating_claims_are_out_of_scope(self):
+    def test_read_only_tools_evidence_read_and_completion_claims(self):
         self.assertTrue(self.allowed([("read_file", "notes.txt", "contents")], "I read the file."))
         self.assertTrue(self.allowed([], "I read the file."))
-        self.assertFalse(self.allowed([("read_file", "notes.txt", "contents")], "Done."))
+        # A successful observation proves the turn did something, so "Done."
+        # after a real read is a report, not a fabricated completion.
+        self.assertTrue(self.allowed([("read_file", "notes.txt", "contents")], "Done."))
+        # With nothing executed at all, a bare completion is still a claim.
+        self.assertFalse(self.allowed([], "Done."))
 
     def test_out_of_scope_claim_cannot_smuggle_a_generic_done(self):
         self.assertFalse(self.allowed([], "I read it. Done."))

@@ -1,12 +1,15 @@
 """Host adapter that connects AgentBot's turn log to VerificationEngine.
 
 The engine verifies recorded executions, so this adapter replays the turn's
-successful tool outputs as evidence. Only mutating tools can supply evidence;
-read/search/analyze claims stay on the existing heuristic guards.
+successful tool outputs as evidence. Mutating tools evidence their own action;
+read-only tools evidence `READ_ACTION`, which is what a reply like "I searched
+the web" actually claims. A tool that only looked at something still proves
+nothing about a mutation.
 """
 from __future__ import annotations
 
 import json
+import re
 import traceback
 from collections.abc import Iterable
 from threading import Event
@@ -16,7 +19,9 @@ from verification_engine import (
     ToolResult,
     ToolSpec,
     VerificationEngine,
+    _ACTION_FORMS,
     _COMPLETION,
+    _FIRST_PERSON,
     _check_cancelled,
 )
 
@@ -33,6 +38,76 @@ ENFORCED_ACTIONS = frozenset({
     "rename", "compress", "extract", "restart", "stop", "backup", "restore",
     "connect", "configure", "enable", "disable", "apply", "format", "clean",
 })
+
+# The action a successful observation evidences. Deliberately absent from
+# ENFORCED_ACTIONS: it satisfies "I searched / I read / I checked" and can
+# never satisfy a mutation claim.
+READ_ACTION = "read"
+
+# Names the registry has not migrated yet. Registered tools report their own
+# effect_class, so this list only covers the legacy dispatcher.
+LEGACY_READ_ONLY_TOOLS = frozenset({
+    "rag_search", "web_fetch", "map_site", "crawl_site", "crawl_managed",
+    "describe_image", "describe_images", "analyze_screenshot", "ocr_image",
+    "extract_text", "scrutinize_text", "read_screen", "describe_screen",
+    "get_pixel_color", "clipboard_read", "show_last_result", "inspect_docx",
+    "list_symbols", "repo_map", "list_dir", "system_status",
+    "check_battery_health", "weather", "air_quality", "news", "search_web",
+    "serp_search", "read_file", "find_files", "current_time", "read_artifact",
+    "uia_dump_tree", "uia_get_text", "watch_folder_list",
+})
+
+
+def tool_is_read_only(tool: str) -> bool:
+    """True when the tool only observes. The registry answers for itself."""
+    try:
+        import agent
+        spec = agent.TOOL_REGISTRY.get(tool)
+    except Exception:
+        spec = None
+    if spec is not None:
+        return getattr(spec, "effect_class", None) == "read_only"
+    return tool in LEGACY_READ_ONLY_TOOLS
+
+
+def _first_person_claim(action: str, reply: str) -> bool:
+    """Whether the reply says the *agent* performed this action.
+
+    The engine matches bare past tense ("published") with no subject check, so
+    a sentence reporting someone else's action reads as the agent's claim.
+    Mutation verbs keep their own guard; this only tells "DeepSeek published a
+    paper" apart from "I published the site".
+    """
+    forms = _ACTION_FORMS.get(action)
+    if not forms:
+        return True
+    base, past = forms
+    pattern = re.compile(
+        rf"{_FIRST_PERSON}[^.!?]{{0,40}}\b(?:{base}|{past})\b", re.IGNORECASE)
+    return bool(pattern.search(reply))
+
+
+def _reported_actions(reply: str, enforced, sources) -> set:
+    """Enforced verbs that a successful observation's own text reports.
+
+    Exempting these cannot weaken a real claim: it requires a read-only tool
+    that ran, returned the verb in its output, and a reply that never says the
+    agent did it.
+    """
+    if not sources:
+        return set()
+    reported = set()
+    for action in enforced:
+        forms = _ACTION_FORMS.get(action)
+        if not forms:
+            continue
+        base, past = forms
+        if _first_person_claim(action, reply):
+            continue
+        verb = re.compile(rf"\b(?:{base}|{past})\b", re.IGNORECASE)
+        if any(verb.search(source) for source in sources):
+            reported.add(action)
+    return reported
 
 
 def _post_to_social(tool_input):
@@ -120,6 +195,8 @@ TOOL_EVIDENCE = {
 def _actions_for(tool, tool_input):
     entry = TOOL_EVIDENCE.get(tool)
     if entry is None:
+        if tool_is_read_only(tool):
+            return frozenset({READ_ACTION})
         return frozenset()
     if callable(entry):
         return frozenset(entry(tool_input))
@@ -130,6 +207,22 @@ def _text(output):
     if output is None:
         return ""
     return output if isinstance(output, str) else str(output)
+
+
+def _source_text(execution) -> str:
+    """The recorded output as plain text, for verb matching.
+
+    The engine stores it JSON-encoded, so a bare `execution.output` does not
+    exist — reading the wrong attribute here would raise inside
+    reply_is_supported's catch-all and silently block every reply.
+    """
+    raw = getattr(execution, "output_json", None)
+    if raw is None:
+        return ""
+    try:
+        return _text(json.loads(raw))
+    except (TypeError, ValueError):
+        return _text(raw)
 
 
 def _verified(_arguments, result):
@@ -197,15 +290,22 @@ def reply_is_supported(engine: VerificationEngine, reply: str,
             return True
         claimed = engine.claimed_actions(reply)
         evidenced = set()
+        sources = []
         for execution in engine.executions:
             check()
             if execution.success and execution.has_output:
                 evidenced.update(execution.verified_actions)
+                if READ_ACTION in execution.verified_actions:
+                    sources.append(_source_text(execution))
         enforced = claimed & ENFORCED_ACTIONS
         check()
+        # A verb that the observed source itself reports, in a sentence that
+        # never says the agent did it, is quotation — not a claim to prove.
+        unmet = enforced - evidenced - _reported_actions(reply, enforced, sources)
+        check()
         if _COMPLETION.search(VerificationEngine._normalize(reply)):
-            return bool(evidenced) and enforced <= evidenced
-        return enforced <= evidenced
+            return bool(evidenced) and not unmet
+        return not unmet
     except InterruptedError:
         raise
     except Exception:

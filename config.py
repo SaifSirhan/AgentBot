@@ -23,7 +23,6 @@ DEFAULTS = {
     "AGENT_MEMORY_DIR": "",
     # One client: deepseek-flash serves text, vision and search/fetch.
     "DEEPSEEK_API_KEY": "",
-    "SERPAPI_KEY": "",
     "CRAWLBASE_KEY": "",
     "FIRECRAWL_KEY": "",
     "TYPEFULLY_KEY": "",

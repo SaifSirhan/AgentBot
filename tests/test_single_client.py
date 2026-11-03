@@ -155,6 +155,39 @@ class TelegramServiceClientTests(unittest.TestCase):
             telegram_service._parse_priority(None, True)
 
 
+class SearchClientTests(unittest.TestCase):
+    """DeepSeek search/fetch is the only web-retrieval path."""
+
+    def test_serp_search_tool_is_gone(self):
+        self.assertNotIn("serp_search", agent.VALID_TOOLS)
+
+    def test_serp_search_is_not_dispatched(self):
+        result = agent.execute_tool({"tool": "serp_search", "input": "q"})
+        self.assertTrue(str(result).startswith("ERROR:"), result)
+
+    def test_router_never_pins_a_second_search_backend(self):
+        source = open(os.path.join(ROOT, "prompt_router.py"),
+                      encoding="utf-8").read()
+        self.assertNotIn("serp_search", source)
+
+    def test_serpapi_tool_module_is_not_shipped(self):
+        self.assertFalse(os.path.exists(os.path.join(ROOT, "serpapi_tool.py")))
+
+    def test_config_has_no_serpapi_key(self):
+        self.assertNotIn("SERPAPI_KEY", config.DEFAULTS)
+        source = open(os.path.join(ROOT, "agent_gui_qt.py"),
+                      encoding="utf-8").read()
+        self.assertNotIn("SERPAPI_KEY", source)
+
+    def test_crawl_keys_stay_because_crawl_managed_uses_them(self):
+        """Not inert: crawl_managed.py reads both to scrape via Crawlbase or
+        Firecrawl. Purging them would break a live tool, so they stay."""
+        self.assertIn("CRAWLBASE_KEY", config.DEFAULTS)
+        self.assertIn("FIRECRAWL_KEY", config.DEFAULTS)
+        import crawl_managed
+        self.assertTrue(callable(crawl_managed.crawl_managed))
+
+
 class GuiSettingsClientTests(unittest.TestCase):
     def test_gui_settings_expose_no_removed_provider_keys(self):
         source = open(os.path.join(ROOT, "agent_gui_qt.py"),
