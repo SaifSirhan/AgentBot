@@ -2358,6 +2358,7 @@ class ChatView(QScrollArea):
         self.scanlines.lower()
         self.pet = PetWidget(parent=self.viewport())
         self.pet.sync_to_parent()
+        self.pet.layer_changed.connect(self._apply_pet_layer)
         self.background_hud.set_pet_widget(self.pet)
         self._body.raise_()
         self._center_background_hud()
@@ -2379,6 +2380,20 @@ class ChatView(QScrollArea):
             # The pet anchors itself inside its own rect, so it follows the
             # viewport instead of being re-moved per state like a sized widget.
             pet.sync_to_parent()
+            # The raise above would demote a pet that is meant to be in front,
+            # so the layer the pet has asked for is re-asserted after the resize.
+            self._apply_pet_layer(pet.wants_front)
+
+    def _apply_pet_layer(self, front: bool) -> None:
+        """Stack the pet over the message body only while the cursor is near it."""
+        pet = getattr(self, "pet", None)
+        body = getattr(self, "_body", None)
+        if pet is None or body is None:
+            return
+        if front:
+            pet.raise_()
+        else:
+            body.raise_()
 
     def _center_background_hud(self):
         hud = getattr(self, "background_hud", None)
@@ -3379,6 +3394,41 @@ class MemoryManager(QWidget):
 # ----------------------------------------------------------------------
 # Main window
 # ----------------------------------------------------------------------
+class _ActivityFilter(QObject):
+    """Forward keys and clicks to the window they happened in, as pet activity.
+
+    One instance for the whole application, not one per window: Qt dispatches
+    every event to every installed filter, so a filter per AgentWindow makes the
+    full test suite quadratic in the number of windows it builds — measured at
+    ~95 s of extra runtime before this was shared.
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.KeyPress,
+                            QEvent.Type.MouseButtonPress):
+            if isinstance(obj, QWidget):
+                try:
+                    note = getattr(obj.window(), "_note_pet_activity", None)
+                except RuntimeError:
+                    return False        # the widget was already destroyed
+                if note is not None:
+                    note()
+        return False
+
+
+_activity_filter = None
+
+
+def _ensure_activity_filter():
+    global _activity_filter
+    if _activity_filter is None:
+        app = QApplication.instance()
+        if app is not None:
+            _activity_filter = _ActivityFilter(app)
+            app.installEventFilter(_activity_filter)
+    return _activity_filter
+
+
 class AgentWindow(QMainWindow):
     _command_done = Signal(str)      # background slash-command result
     _scheduled_triggered = Signal(str)  # scheduler fired (from its own thread)
@@ -4054,6 +4104,7 @@ class AgentWindow(QMainWindow):
         self.input_field.setFixedHeight(INPUT_LINE_H)
         self.input_field.textChanged.connect(self._on_input_changed)
         self.input_field.installEventFilter(self)
+        _ensure_activity_filter()
 
         # Prefix and editor share one top edge.
         text_host = QWidget()
@@ -4253,13 +4304,16 @@ class AgentWindow(QMainWindow):
             return
         name = self._resolve_hud_state()
         hud.set_state(name)
-        title = self.windowTitle().lower()
-        if "sleeping" in title:
-            # The 60s continuous-listening timeout is the only thing that puts
-            # the pet to bed; every other quiet state leaves it awake.
-            hud.set_pet_state("sleeping")
-        else:
-            hud.set_pet_state(self._pet_state_for(name))
+        # The mic's 60 s continuous-listening timeout means "quiet", not
+        # "asleep": only the pet's own activity clock puts it to bed, so that
+        # title leaves the pet awake and roaming like any other idle.
+        hud.set_pet_state(self._pet_state_for(name))
+
+    def _note_pet_activity(self):
+        """Tell the pet the user or the agent just did something."""
+        hud = getattr(getattr(self, "chat", None), "background_hud", None)
+        if hud is not None:
+            hud.note_pet_activity()
 
     def _resolve_hud_state(self):
         if time.monotonic() < getattr(self, "_hud_error_until", 0.0):
@@ -4378,6 +4432,7 @@ class AgentWindow(QMainWindow):
         attached = list(self.attachments)
         if not text and not attached:
             return
+        self._note_pet_activity()
         # Every submission joins the prompt history, slash commands included.
         self.input_field.history.add(text)
 
@@ -4473,6 +4528,7 @@ class AgentWindow(QMainWindow):
         self.panel.set_activity(self._live_steps)
         # The pet's pose depends on which tool just reported, and set_status
         # does not fire mid-turn, so each step has to re-sync it.
+        self._note_pet_activity()
         self._sync_hud_state()
 
     def _clear_thinking_message(self):
@@ -4482,6 +4538,7 @@ class AgentWindow(QMainWindow):
 
     def _end_turn(self):
         self._processing = False
+        self._note_pet_activity()
         self._turn_cancellable = False
         self._stop_requested = False
         worker = self._worker

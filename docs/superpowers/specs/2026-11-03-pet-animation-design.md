@@ -210,8 +210,11 @@ that removes a trigger rather than adding one.
 An activity timestamp is updated by:
 
 - sending or receiving a message, a voice transcript, or a tool turn;
-- any keypress or mouse click inside the application window, via one event filter
-  installed on the window;
+- any keypress or mouse click inside the application window. One shared
+  application-level filter forwards these; Qt only delivers an event to filters
+  installed on the object that received it, and a filter per window made the
+  full test suite quadratic in the windows it builds (measured: 168 s against
+  83 s once shared);
 - the cursor entering the pet's proximity radius.
 
 Scrolling without clicking does not count.

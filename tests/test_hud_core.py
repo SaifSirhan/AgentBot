@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
-from PySide6.QtCore import QPoint, Qt, QTimer  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget  # noqa: E402
 
@@ -33,8 +33,14 @@ from hud_core import (  # noqa: E402
     PET_FRAMES_DIR,
     PET_MARGIN,
     PET_POSES,
-    PET_WANDER_AFTER,
-    PET_WANDER_DURATION,
+    PET_PROXIMITY_PX,
+    PET_PROXIMITY_RELEASE_S,
+    PET_ROAM_AFTER,
+    PET_ROAM_FLY_CHANCE,
+    PET_ROAM_PAUSE,
+    PET_ROAM_SPEED,
+    PET_SLEEP_AFTER,
+    PET_SLEEP_AFTER_NIGHT,
     Particle,
     ParticleField,
     PetWidget,
@@ -43,6 +49,8 @@ from hud_core import (  # noqa: E402
     burst_count,
     pet_bob,
     pet_frame_index,
+    pet_is_night,
+    pet_sleep_after,
 )
 
 STATES = (
@@ -488,6 +496,19 @@ def _all_pose_specs():
            ["sleeping:1"]
 
 
+FAR_CURSOR = QPointF(-10000.0, -10000.0)
+
+
+def _far_cursor():
+    """A cursor nowhere near the pet, so proximity never fires unasked.
+
+    The real QCursor.pos() would do: under the offscreen platform the widget
+    sits at the origin and the machine's cursor could land inside the ring,
+    waking the pet mid-test and resetting the clock the test is measuring.
+    """
+    return FAR_CURSOR
+
+
 class PetSpriteTests(unittest.TestCase):
     """Pose selection, frame discovery and the fallbacks, against synthetic art."""
 
@@ -851,7 +872,8 @@ class PetAnimationTests(unittest.TestCase):
         self.asset_dir = _make_sprite_dir(self._tmp.name, *_all_pose_specs())
         self.bus = AudioBus()
         self.hud = ReactorHud(bus=self.bus)
-        self.pet = PetWidget(parent=self.hud, asset_dir=self.asset_dir)
+        self.pet = PetWidget(parent=self.hud, asset_dir=self.asset_dir,
+                             cursor=_far_cursor)
         self.pet.resize(400, 400)
         self.hud.set_pet_widget(self.pet)
         self.hud.show()
@@ -932,7 +954,7 @@ class PetBehaviourTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.asset_dir = _make_sprite_dir(self._tmp.name, *_all_pose_specs())
         self.pet = PetWidget(parent=None, asset_dir=self.asset_dir,
-                             rng=random.Random(11))
+                             rng=random.Random(11), cursor=_far_cursor)
         self.pet.resize(400, 400)
 
     def tearDown(self):
@@ -940,9 +962,10 @@ class PetBehaviourTests(unittest.TestCase):
         self._tmp.cleanup()
         self.app.processEvents()
 
-    def _make_pet(self, seed=5):
+    def _make_pet(self, seed=5, hour=12):
         pet = PetWidget(parent=None, asset_dir=self.asset_dir,
-                        rng=random.Random(seed))
+                        rng=random.Random(seed), cursor=_far_cursor,
+                        hour_of_day=lambda: hour)
         pet.resize(400, 400)
         return pet
 
@@ -1079,25 +1102,183 @@ class PetBehaviourTests(unittest.TestCase):
             quiet.deleteLater()
             noisy.deleteLater()
 
-    # -- wander ----------------------------------------------------------
-    def test_the_pet_wanders_after_a_long_idle_and_returns(self):
-        self._advance(self.pet, PET_WANDER_AFTER + 0.1)
-        self.assertEqual(self.pet.override, "walking")
-        self.assertEqual(self.pet.pose, "walking")
-        self.assertEqual(self.pet.requested_state, "idle")
-        # A margin, not the exact duration: 0.1 s added a step at a time sums
-        # to just under 12.0, and the wander ends on the tick that clears it.
-        self._advance(self.pet, PET_WANDER_DURATION + 0.5)
-        self.assertEqual(self.pet.pose, "idle")
-        self.assertIsNone(self.pet.override)
+    # -- roaming ---------------------------------------------------------
+    def test_roaming_starts_after_the_idle_threshold(self):
+        pet = self._make_pet()
+        self._advance(pet, PET_ROAM_AFTER - 1.0)
+        self.assertFalse(pet.roaming, "roamed early")
+        self._advance(pet, 1.5)
+        self.assertTrue(pet.roaming)
+        self.assertEqual(pet.requested_state, "idle")
+        self.assertIn(pet.pose, ("walking", "flying"))
 
-    def test_walking_does_not_restart_on_the_tick_after_it_ends(self):
-        self._advance(self.pet, PET_WANDER_AFTER + PET_WANDER_DURATION + 0.2)
-        self.assertEqual(self.pet.pet_state, "idle")
-        self.assertLess(self.pet.idle_time, 1.0,
-                        "the idle clock was not reset after the wander")
-        self._advance(self.pet, 2.0)
-        self.assertNotEqual(self.pet.pose, "walking")
+    def test_roaming_walks_towards_its_target_at_the_declared_speed(self):
+        pet = self._make_pet()
+        pet.resize(600, 400)
+        self._advance(pet, PET_ROAM_AFTER + 0.1)
+        pet._roam_pause = 0.0
+        pet._pick_roam_target()
+        pet._roam_flying = False
+        pet._roam_start = pet.roam_x
+        pet._roam_target = -200.0
+        before = pet.roam_x
+        pet.advance(1.0)
+        self.assertAlmostEqual(pet.roam_x - before, -PET_ROAM_SPEED, places=6)
+        self.assertEqual(pet.facing, -1, "walking left must face left")
+
+    def test_a_flight_follows_a_sine_arc_and_uses_the_flying_pose(self):
+        pet = self._make_pet()
+        pet.resize(600, 400)
+        self._advance(pet, PET_ROAM_AFTER + 0.1)
+        pet._roam_pause = 0.0
+        pet._pick_roam_target()
+        pet._roam_flying = True
+        pet._roam_start = 0.0
+        pet._roam_x = 0.0
+        pet._roam_target = -200.0
+        pet._set_pose("flying")
+        heights = []
+        for _tick in range(4):
+            pet.advance(0.5)                  # 20 px per tick, a fifth of the way
+            heights.append(pet._roam_y)
+        self.assertEqual(pet.override, "flying")
+        self.assertTrue(all(h <= 0.0 for h in heights),
+                        "the arc must lift the pet, never drop it")
+        self.assertLess(min(heights), -20.0, "the arc never rose")
+
+    def test_reaching_the_target_pauses_then_picks_another(self):
+        pet = self._make_pet()
+        pet.resize(600, 400)
+        self._advance(pet, PET_ROAM_AFTER + 0.1)
+        pet._roam_pause = 0.0
+        pet._roam_target = -1.0
+        pet._roam_x = 0.0
+        pet.advance(0.5)                      # 20 px of step, target is 1 away
+        self.assertGreaterEqual(pet._roam_pause, PET_ROAM_PAUSE[0] - 0.01)
+        self.assertLessEqual(pet._roam_pause, PET_ROAM_PAUSE[1])
+        self.assertEqual(pet.pose, "idle", "a paused pet is standing still")
+
+    def test_activity_stops_roaming_immediately(self):
+        pet = self._make_pet()
+        self._advance(pet, PET_ROAM_AFTER + 0.5)
+        self.assertTrue(pet.roaming)
+        pet.note_activity()
+        self.assertFalse(pet.roaming)
+        self.assertEqual(pet.pose, "idle")
+        self.assertEqual(pet.idle_time, 0.0)
+
+    def test_a_state_request_stops_roaming(self):
+        pet = self._make_pet()
+        self._advance(pet, PET_ROAM_AFTER + 0.5)
+        self.assertTrue(pet.roaming)
+        pet.set_state("thinking")
+        self.assertFalse(pet.roaming)
+        self.assertEqual(pet.pet_state, "thinking")
+
+    # -- sleep -----------------------------------------------------------
+    def test_night_is_the_ten_pm_to_seven_am_window(self):
+        for hour in range(24):
+            with self.subTest(hour=hour):
+                self.assertEqual(pet_is_night(hour),
+                                 hour >= 22 or hour < 7)
+                expected = (PET_SLEEP_AFTER_NIGHT if hour >= 22 or hour < 7
+                            else PET_SLEEP_AFTER)
+                self.assertEqual(pet_sleep_after(hour), expected)
+
+    def test_the_pet_sleeps_after_half_an_hour_by_day(self):
+        pet = self._make_pet(hour=14)
+        # A coarse step: 30 simulated minutes at the 0.1 s render tick would be
+        # 18k advances for a schedule check that only cares about the threshold.
+        self._advance(pet, PET_SLEEP_AFTER - 5.0, step=5.0)
+        self.assertFalse(pet.sleeping)
+        self._advance(pet, 10.0, step=5.0)
+        self.assertTrue(pet.sleeping)
+        self.assertEqual(pet.pose, "sleeping")
+
+    def test_the_pet_sleeps_after_ten_minutes_at_night(self):
+        pet = self._make_pet(hour=23)
+        self._advance(pet, PET_SLEEP_AFTER_NIGHT - 5.0, step=5.0)
+        self.assertFalse(pet.sleeping)
+        self._advance(pet, 10.0, step=5.0)
+        self.assertTrue(pet.sleeping)
+
+    def test_a_sleeping_pet_does_not_roam_or_blink(self):
+        pet = self._make_pet(hour=2)
+        self._advance(pet, PET_SLEEP_AFTER_NIGHT + 10.0, step=5.0)
+        self.assertTrue(pet.sleeping)
+        self.assertFalse(pet.roaming)
+        self.assertFalse(pet.blinking)
+        self.assertEqual(pet.pose, "sleeping")
+
+    def test_activity_wakes_a_sleeping_pet(self):
+        pet = self._make_pet(hour=2)
+        self._advance(pet, PET_SLEEP_AFTER_NIGHT + 10.0, step=5.0)
+        self.assertTrue(pet.sleeping)
+        pet.note_activity()
+        self.assertFalse(pet.sleeping)
+        self.assertEqual(pet.pet_state, "idle")
+        self.assertEqual(pet.idle_time, 0.0, "waking did not reset the clock")
+
+    # -- cursor proximity ------------------------------------------------
+    def _proximate_pet(self, near, events=None):
+        pet = self._make_pet()
+        pet.resize(400, 400)
+        pet.set_state("idle")
+        rect = pet._sprite_rect()
+        point = (rect.center() if near
+                 else FAR_CURSOR)
+        pet._cursor = (lambda p=point: p)
+        if events is not None:
+            pet.layer_changed.connect(events.append)
+        return pet
+
+    def test_the_pet_raises_when_the_cursor_is_close(self):
+        events = []
+        pet = self._proximate_pet(True, events)
+        pet.advance(0.1)
+        self.assertTrue(pet.wants_front)
+        self.assertEqual(events, [True])
+
+    def test_the_ring_is_a_hundred_and_twenty_pixels(self):
+        pet = self._make_pet()
+        pet.resize(400, 400)
+        rect = pet._sprite_rect()
+        just_inside = QPointF(rect.left() - PET_PROXIMITY_PX + 2,
+                              rect.center().y())
+        just_outside = QPointF(rect.left() - PET_PROXIMITY_PX - 2,
+                               rect.center().y())
+        pet._cursor = lambda: just_inside
+        pet.advance(0.1)
+        self.assertTrue(pet.wants_front)
+        pet._cursor = lambda: just_outside
+        pet.advance(0.1)
+        self.assertTrue(pet.wants_front, "the release delay was skipped")
+        self._advance(pet, PET_PROXIMITY_RELEASE_S + 0.2)
+        self.assertFalse(pet.wants_front)
+
+    def test_leaving_lowers_the_pet_only_after_the_release_delay(self):
+        events = []
+        pet = self._proximate_pet(True, events)
+        pet.advance(0.1)
+        rect = pet._sprite_rect()
+        pet._cursor = lambda: QPointF(rect.left() - PET_PROXIMITY_PX - 50,
+                                      rect.center().y())
+        pet.advance(PET_PROXIMITY_RELEASE_S - 0.2)
+        self.assertTrue(pet.wants_front, "dropped before the delay was up")
+        self.assertEqual(events, [True])
+        pet.advance(0.4)
+        self.assertFalse(pet.wants_front)
+        self.assertEqual(events, [True, False])
+
+    def test_reaching_the_pet_counts_as_activity(self):
+        pet = self._make_pet()
+        pet.resize(400, 400)
+        self._advance(pet, PET_ROAM_AFTER + 1.0)
+        self.assertTrue(pet.roaming)
+        pet._cursor = lambda: pet._sprite_rect().center()
+        pet.advance(0.1)
+        self.assertTrue(pet.wants_front)
+        self.assertFalse(pet.roaming, "the pet kept roaming under the cursor")
 
     def test_the_hud_tick_is_what_drives_the_idle_behaviours(self):
         """advance() is called from ReactorHud._tick, not from a timer of the
@@ -1110,7 +1291,7 @@ class PetBehaviourTests(unittest.TestCase):
         bus = AudioBus()
         hud = ReactorHud(bus=bus)
         pet = PetWidget(parent=hud, asset_dir=self.asset_dir,
-                        rng=random.Random(11))
+                        rng=random.Random(11), cursor=_far_cursor)
         pet.resize(400, 400)
         hud.set_pet_widget(pet)
         try:
@@ -1130,6 +1311,80 @@ class PetBehaviourTests(unittest.TestCase):
         finally:
             pet.deleteLater()
             hud.deleteLater()
+
+
+class PetLayerTests(unittest.TestCase):
+    """P4: the pet comes over the text only while the cursor is close.
+
+    One window for the class — building an AgentWindow is the expensive part, and
+    each test puts the pet back behind the body before it starts.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import agent_gui_qt as gui
+
+        cls.app = QApplication.instance() or QApplication([])
+        cls.window = gui.AgentWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.window.close()
+        cls.window.deleteLater()
+        cls.app.processEvents()
+
+    def setUp(self):
+        chat = self.window.chat
+        self.chat = chat
+        self.pet = chat.pet
+        self.body = chat._body
+        self.viewport = chat.viewport()
+        chat._apply_pet_layer(False)
+        self.pet._cursor = _far_cursor
+        # The proximity latch lives on the widget and outlives a test, so it is
+        # cleared here or the next test starts already raised.
+        self.pet._near = False
+        self.pet._near_time = 0.0
+        self.pet.set_state("idle")
+
+    def tearDown(self):
+        self.pet._cursor = _far_cursor
+        self.pet._near = False
+        self.pet._near_time = 0.0
+        self.chat._apply_pet_layer(False)
+        self.app.processEvents()
+
+    def top(self):
+        """Whichever of the two siblings is stacked last, which Qt draws on top."""
+        order = [w for w in self.viewport.children()
+                 if w is self.pet or w is self.body]
+        return order[-1] if order else None
+
+    def test_the_pet_drops_back_behind_the_text(self):
+        self.chat._apply_pet_layer(True)
+        self.assertIs(self.top(), self.pet)
+        self.chat._apply_pet_layer(False)
+        self.assertIs(self.top(), self.body)
+
+    def test_proximity_raises_and_release_lowers_the_pet(self):
+        self.assertIs(self.top(), self.body)
+        self.pet._cursor = lambda: self.pet._sprite_rect().center()
+        self.pet.advance(0.1)
+        self.assertTrue(self.pet.wants_front)
+        self.assertIs(self.top(), self.pet, "the pet did not come to the front")
+        self.pet._cursor = _far_cursor
+        self.pet.advance(PET_PROXIMITY_RELEASE_S + 0.2)
+        self.assertFalse(self.pet.wants_front)
+        self.assertIs(self.top(), self.body, "the pet did not drop back")
+
+    def test_a_viewport_resize_keeps_the_pet_in_front_when_it_wants_to_be(self):
+        self.pet._cursor = lambda: self.pet._sprite_rect().center()
+        self.pet.advance(0.1)
+        self.assertTrue(self.pet.wants_front)
+        self.chat.resize(self.chat.width() + 40, self.chat.height() + 20)
+        self.app.processEvents()
+        self.assertIs(self.top(), self.pet,
+                      "resizeEvent demoted a pet that should be in front")
 
 
 class CoreCardIntegrationTests(unittest.TestCase):
@@ -1190,9 +1445,10 @@ class CoreCardIntegrationTests(unittest.TestCase):
             self.app.processEvents()
 
     def test_the_pet_tracks_the_agent_status_through_one_hook(self):
-        """Thinking while busy, speaking over TTS, asleep when the mic times
-        out, awake again when the turn ends — all from _sync_hud_state, which
-        set_status already calls, so no per-call-site pet code is needed."""
+        """Thinking while busy, speaking over TTS, awake again when the turn
+        ends — all from _sync_hud_state, which set_status already calls, so no
+        per-call-site pet code is needed. The mic's "sleeping" timeout is quiet,
+        not asleep: only the pet's own activity clock puts it to bed."""
         import agent_gui_qt as gui
 
         window = gui.AgentWindow()
@@ -1219,7 +1475,8 @@ class CoreCardIntegrationTests(unittest.TestCase):
 
                 window.set_status(
                     "Mic sleeping. Say 'Hey Jarvis' or press F9.", busy=False)
-                self.assertEqual(pet.pet_state, "sleeping")
+                self.assertEqual(pet.pet_state, "idle",
+                                 "the mic timeout must leave the pet awake")
                 self.assertEqual(hud.state, "IDLE")
 
                 window._processing = True

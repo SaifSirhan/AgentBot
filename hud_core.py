@@ -27,10 +27,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QLineF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QLineF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QCursor,
     QPainter,
     QPen,
     QPixmap,
@@ -77,8 +78,23 @@ PET_CANVAS = 300
 # timer of its own.
 PET_BLINK_DURATION = 0.18
 PET_BLINK_GAP = (4.0, 7.0)
-PET_WANDER_AFTER = 90.0
-PET_WANDER_DURATION = 12.0
+# Roaming: after this long with nothing happening the pet walks itself around
+# the bottom of the viewport. 40 px/s is about a body length a second.
+PET_ROAM_AFTER = 45.0
+PET_ROAM_SPEED = 40.0
+PET_ROAM_PAUSE = (2.0, 5.0)
+PET_ROAM_FLY_CHANCE = 0.2
+PET_ROAM_ARC = 40.0
+# Sleep: a pet left alone for half an hour goes to bed, and only ten minutes at
+# night. Night is the local clock, 22:00 to 07:00.
+PET_SLEEP_AFTER = 1800.0
+PET_SLEEP_AFTER_NIGHT = 600.0
+PET_NIGHT_START = 22
+PET_NIGHT_END = 7
+# Cursor proximity: within this many pixels of the sprite rect the pet comes to
+# the front of the message body, and drops back after this many seconds away.
+PET_PROXIMITY_PX = 120.0
+PET_PROXIMITY_RELEASE_S = 1.5
 PET_HEIGHT = 190
 PET_MARGIN = 24
 PET_OPACITY = 0.85
@@ -86,6 +102,17 @@ PET_OPACITY = 0.85
 # cycle. Driven by the HUD's own tick, so the pet never needs a timer of its own.
 PET_BOB_RATE = 2.0
 PET_BOB_AMPLITUDE = 5.0
+
+
+def pet_is_night(hour: int) -> bool:
+    """Whether an hour of the local clock falls in the short-sleep window."""
+    hour = int(hour) % 24
+    return hour >= PET_NIGHT_START or hour < PET_NIGHT_END
+
+
+def pet_sleep_after(hour: int) -> float:
+    """Seconds of quiet before the pet sleeps at that hour."""
+    return PET_SLEEP_AFTER_NIGHT if pet_is_night(hour) else PET_SLEEP_AFTER
 
 
 def pet_bob(elapsed: float, rate: float = PET_BOB_RATE,
@@ -389,6 +416,11 @@ class ReactorHud(QWidget):
         self._pet_requested = name
         if self._pet is not None:
             self._pet.set_state(name)
+
+    def note_pet_activity(self) -> None:
+        """Reset the pet's idle clock. Any real activity in the window calls this."""
+        if self._pet is not None:
+            self._pet.note_activity()
 
     # -- animation ------------------------------------------------------
     def showEvent(self, event):
@@ -825,8 +857,13 @@ class PetWidget(QWidget):
     HEIGHT = PET_HEIGHT
     MARGIN = PET_MARGIN
 
+    # True when the pet wants to be in front of the message body. The chat view
+    # owns the stacking, so it listens rather than being polled.
+    layer_changed = Signal(bool)
+
     def __init__(self, parent=None, asset_dir=PET_ASSET_DIR,
-                 opacity: float = PET_OPACITY, rng: random.Random = None):
+                 opacity: float = PET_OPACITY, rng: random.Random = None,
+                 hour_of_day=None, cursor=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
@@ -835,14 +872,28 @@ class PetWidget(QWidget):
         self._frames_dir = Path(asset_dir) / "frames"
         self._opacity = max(0.0, min(1.0, float(opacity)))
         self._rng = rng if rng is not None else random.Random()
+        # Both injected so the sleep schedule and the proximity ring can be
+        # driven from a test without touching the real clock or the real mouse.
+        self._hour = hour_of_day if hour_of_day is not None else (
+            lambda: time.localtime().tm_hour)
+        self._cursor = cursor if cursor is not None else self._cursor_position
         self._requested = None
         self._pose = None
         self._pose_elapsed = 0.0
         self._frame_index = 0
         self._blinking = False
         self._blink_time = 0.0
-        self._wandering = False
-        self._wander_time = 0.0
+        self._roaming = False
+        self._roam_x = 0.0
+        self._roam_start = 0.0
+        self._roam_target = 0.0
+        self._roam_y = 0.0
+        self._roam_pause = 0.0
+        self._roam_flying = False
+        self._facing = 1
+        self._sleeping = False
+        self._near = False
+        self._near_time = 0.0
         self._idle_time = 0.0
         self._next_blink = 0.0
         self._bob = 0.0
@@ -882,11 +933,37 @@ class PetWidget(QWidget):
         return self._blinking
 
     @property
+    def roaming(self) -> bool:
+        """Whether the pet is walking or flying itself around the viewport."""
+        return self._roaming
+
+    @property
+    def roam_x(self) -> float:
+        """Horizontal offset from the home corner, negative is to the left."""
+        return self._roam_x
+
+    @property
+    def facing(self) -> int:
+        """1 when facing right, -1 when the blit is mirrored for left."""
+        return self._facing
+
+    @property
+    def sleeping(self) -> bool:
+        return self._sleeping
+
+    @property
+    def wants_front(self) -> bool:
+        """Whether the cursor is close enough to bring the pet over the text."""
+        return self._near
+
+    @property
     def override(self):
         """The idle behaviour currently layered on, if any."""
         if self._blinking:
             return "blinking"
-        return "walking" if self._wandering else None
+        if self._roaming:
+            return "flying" if self._roam_flying else "walking"
+        return None
 
     @property
     def idle_time(self) -> float:
@@ -912,13 +989,32 @@ class PetWidget(QWidget):
         if name == self._requested:
             return
         self._requested = name
-        self._blinking = False
-        self._blink_time = 0.0
-        self._wandering = False
-        self._wander_time = 0.0
+        self._wake()
         self._idle_time = 0.0
         self._arm_blink()
         self._set_pose(name)
+
+    def note_activity(self) -> None:
+        """Anything the user or the agent does resets the clock and wakes the pet.
+
+        Called for messages, transcripts, tool turns, keys and clicks inside the
+        window, and for the cursor entering the proximity ring.
+        """
+        self._idle_time = 0.0
+        self._arm_blink()
+        self._wake()
+
+    def _wake(self) -> None:
+        """Drop sleep, blink and roaming, and go back to what was asked for."""
+        awake = self._sleeping or self._roaming or self._blinking
+        self._sleeping = False
+        self._blinking = False
+        self._blink_time = 0.0
+        self._roaming = False
+        self._roam_pause = 0.0
+        self._roam_y = 0.0
+        if awake:
+            self._set_pose(self._requested)
 
     def _set_pose(self, pose: str) -> None:
         """Switch pose and rewind its cycle."""
@@ -930,7 +1026,7 @@ class PetWidget(QWidget):
         self._refresh()
 
     def advance(self, dt: float) -> None:
-        """Play the cycle, blink and wander, all off the HUD's tick seconds.
+        """Play the cycle, blink, roam and sleep on the HUD's tick seconds.
 
         A blink freezes the cycle instead of interrupting it: the twin stands in
         for the current frame for `PET_BLINK_DURATION` and playback resumes where
@@ -940,6 +1036,7 @@ class PetWidget(QWidget):
         """
         dt = max(0.0, float(dt))
         self._idle_time += dt
+        self._poll_cursor(dt)
         if self._blinking:
             self._blink_time += dt
             if self._blink_time >= PET_BLINK_DURATION:
@@ -948,32 +1045,124 @@ class PetWidget(QWidget):
                 self._arm_blink()
             self._refresh()
             return
-        self._pose_elapsed += dt
-        self._frame_index = pet_frame_index(
-            self._pose_elapsed, PET_FPS.get(self._pose),
-            len(self._cycle(self._pose)))
-        if self._wandering:
-            self._wander_time += dt
-            if self._wander_time >= PET_WANDER_DURATION:
-                self._wandering = False
-                self._wander_time = 0.0
-                # Without this the wander would re-trigger on the next tick.
-                self._idle_time = 0.0
-                self._arm_blink()
-                self._set_pose(self._requested)
-            else:
-                self._refresh()
+        if self._sleeping:
             return
+        if self._roaming:
+            self._step_roam(dt)
+        else:
+            self._advance_cycle(dt)
+            if (self._requested == PET_FALLBACK
+                    and self._idle_time >= PET_ROAM_AFTER):
+                self._start_roam()
+                return
         if (self._requested == PET_FALLBACK
-                and self._idle_time >= PET_WANDER_AFTER):
-            self._wandering = True
-            self._wander_time = 0.0
-            self._set_pose("walking")
+                and self._idle_time >= pet_sleep_after(self._hour())):
+            self._fall_asleep()
             return
         if self._idle_time >= self._next_blink and self._twin(self._pose):
             self._blinking = True
             self._blink_time = 0.0
         self._refresh()
+
+    def _advance_cycle(self, dt: float) -> None:
+        self._pose_elapsed += dt
+        self._frame_index = pet_frame_index(
+            self._pose_elapsed, PET_FPS.get(self._pose),
+            len(self._cycle(self._pose)))
+
+    # -- roaming --------------------------------------------------------
+    def _start_roam(self) -> None:
+        self._roaming = True
+        self._roam_pause = 0.0
+        self._pick_roam_target()
+
+    def _pick_roam_target(self) -> None:
+        """Choose the next spot along the bottom, and how to get there."""
+        travel = max(0.0, self.width() - self._sprite_width() - 2 * self.MARGIN)
+        self._roam_start = self._roam_x
+        self._roam_target = -self._rng.uniform(0.0, travel)
+        self._roam_flying = self._rng.random() < PET_ROAM_FLY_CHANCE
+        self._roam_y = 0.0
+        self._set_pose("flying" if self._roam_flying else "walking")
+
+    def _step_roam(self, dt: float) -> None:
+        if self._roam_pause > 0.0:
+            self._roam_pause -= dt
+            if self._roam_pause <= 0.0:
+                self._pick_roam_target()
+            self._refresh()
+            return
+        remaining = self._roam_target - self._roam_x
+        step = PET_ROAM_SPEED * dt
+        if abs(remaining) <= step:
+            self._roam_x = self._roam_target
+            self._roam_y = 0.0
+            self._roam_pause = self._rng.uniform(*PET_ROAM_PAUSE)
+            self._set_pose("idle")
+        else:
+            self._roam_x += math.copysign(step, remaining)
+            self._facing = 1 if remaining > 0 else -1
+            if self._roam_flying:
+                span = self._roam_target - self._roam_start
+                progress = 0.0 if span == 0 else (
+                    (self._roam_x - self._roam_start) / span)
+                progress = max(0.0, min(1.0, progress))
+                self._roam_y = -math.sin(math.pi * progress) * PET_ROAM_ARC
+            self._advance_cycle(dt)
+        self._refresh()
+
+    def _sprite_width(self) -> float:
+        sprite = self._sprite
+        if sprite is None:
+            return float(self.HEIGHT)
+        return sprite.width() / (sprite.devicePixelRatio() or 1.0)
+
+    def _sprite_rect(self) -> QRectF:
+        width = self._sprite_width()
+        height = float(self.HEIGHT)
+        x = max(0.0, self.width() - width - self.MARGIN) + self._roam_x
+        y = (max(0.0, self.height() - height - self.MARGIN)
+             + self._bob + self._roam_y)
+        return QRectF(x, y, width, height)
+
+    # -- sleep ----------------------------------------------------------
+    def _fall_asleep(self) -> None:
+        self._sleeping = True
+        self._blinking = False
+        self._blink_time = 0.0
+        self._roaming = False
+        self._roam_pause = 0.0
+        self._roam_y = 0.0
+        self._set_pose("sleeping")
+
+    # -- cursor proximity -----------------------------------------------
+    def _cursor_position(self):
+        return self.mapFromGlobal(QCursor.pos())
+
+    def _poll_cursor(self, dt: float) -> None:
+        """Raise in front within the ring, drop back after the release delay.
+
+        `WA_TransparentForMouseEvents` means the pet never receives an enter or
+        leave event, so this polls instead — on the tick that is already running,
+        never a timer or a global filter of its own.
+        """
+        ring = PET_PROXIMITY_PX
+        near = self._sprite_rect().adjusted(
+            -ring, -ring, ring, ring).contains(QPointF(self._cursor()))
+        if near:
+            self._near_time = 0.0
+            if not self._near:
+                self._near = True
+                # Reaching the pet is activity too, so it wakes and stops roaming.
+                self.note_activity()
+                self.layer_changed.emit(True)
+            return
+        if not self._near:
+            return
+        self._near_time += dt
+        if self._near_time >= PET_PROXIMITY_RELEASE_S:
+            self._near = False
+            self.layer_changed.emit(False)
 
     def _arm_blink(self) -> None:
         self._next_blink = self._idle_time + self._rng.uniform(*PET_BLINK_GAP)
@@ -1102,9 +1291,16 @@ class PetWidget(QWidget):
             dpr = pixmap.devicePixelRatio() or 1.0
             width = pixmap.width() / dpr
             height = pixmap.height() / dpr
-            x = max(0.0, self.width() - width - self.MARGIN)
-            y = max(0.0, self.height() - height - self.MARGIN) + self._bob
-            painter.drawPixmap(QPointF(x, y), pixmap)
+            x = max(0.0, self.width() - width - self.MARGIN) + self._roam_x
+            y = (max(0.0, self.height() - height - self.MARGIN)
+                 + self._bob + self._roam_y)
+            if self._facing < 0:
+                # Facing left needs no extra art: the same blit, mirrored.
+                painter.translate(x + width, y)
+                painter.scale(-1.0, 1.0)
+                painter.drawPixmap(QPointF(0.0, 0.0), pixmap)
+            else:
+                painter.drawPixmap(QPointF(x, y), pixmap)
         finally:
             painter.end()
 
