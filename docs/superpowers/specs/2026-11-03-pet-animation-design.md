@@ -1,0 +1,246 @@
+# Desktop Pet Animation — Design
+
+Date: 2026-11-03
+Status: Approved design, pending implementation plan
+Scope: P1–P4 of the pet roadmap. P5 (generated motion via Kling AI) is explicitly out of scope.
+
+## 1. Problem
+
+`PetWidget` today draws exactly one PNG per state. The pet bobs, blinks by
+swapping to a whole different sprite, and wanders on a timer, but it never
+animates: a walking pet is a still image sliding sideways.
+
+We have 22 poses to work from across three reference sheets, and the owner wants
+a pet that walks, flies, blinks mid-stride, sleeps when left alone, and comes to
+the front of the chat when the cursor approaches.
+
+### Constraints established earlier in this work, still binding
+
+- The pet must never block text input. `WA_TransparentForMouseEvents` stays on.
+- The HUD's existing tick is the only animation clock. No new `QTimer`.
+- True-alpha compositing only: `CompositionMode_SourceOver`, never `Source`, no
+  opaque clear. The pet may not darken the chat canvas.
+- The pet sits behind the message body by default.
+
+## 2. Why not the obvious alternatives
+
+**`QMovie` / animated GIF.** Adds a second timer, gives up control of the
+compositing mode, and makes "blink mid-stride" impossible because a blink has to
+*substitute* a frame rather than interrupt playback. Rejected.
+
+**Slicing the supplied sheets.** Measured: all four attached images are
+`mode=RGB` with alpha range 255–255 and 0% transparent pixels — the transparency
+checkerboard is painted into the pixels. A naive colour key masks 64–74% of the
+frame correctly but destroys the near-white cores of the glow lines. Rejected in
+favour of generating fresh poses from the clean PNGs we already own.
+
+**Third-party skills.** `TamerinTECH/claude-skill-klingai-animation` produces
+*CSS* sprite animations via Kling AI video generation plus `ffmpeg`; there is no
+`ffmpeg` on this machine and no Kling key in `.env`. The `openai` game-studio
+skills are nine web/JavaScript skills. Neither targets PySide6. Borrowed: the
+method (generate motion, extract frames, sequence them). Not installed.
+
+## 3. State model
+
+`PetWidget` currently stores one drawn name. It is replaced by three orthogonal
+values:
+
+| Field | Meaning |
+|---|---|
+| `pose` | `idle` / `walking` / `flying` / `thinking` / `reading` / `speaking` / `sleeping` |
+| `frame_index` | Which frame of that pose's cycle is showing |
+| `blinking` | Whether the current frame is being replaced by its blink twin |
+
+The drawn file is `frames/<pose>/<pose>_<frame_index>.png`, or
+`frames/<pose>/<pose>_1_blink.png` while `blinking` is true.
+
+**Blink semantics, settled explicitly.** A blink freezes `frame_index` and shows
+the pose's single blink twin for `PET_BLINK_DURATION` (0.18 s). It does *not*
+substitute the exact current frame. At 0.18 s the freeze is not perceptible, and
+this keeps the asset count at one twin per pose instead of one per frame. A
+walking pet therefore blinks mid-stride.
+
+`blinking` is a flag, not a pose — the old model had it as a state name and that
+goes away. Consequence: `PET_STATES` loses `blinking`, `set_pet_state("blinking")`
+becomes an unknown name that falls back to `idle`, and the existing
+`test_the_pet_state_set_matches_the_committed_sprites` assertion changes because
+`blinking.png` is no longer a shipped pose. `sleeping` is a pose with no twin
+because its eyes are already shut.
+
+The public API keeps its current shape and names, so the tool-based mapping
+committed in `8963165` still works unchanged — with one exception, described in
+§6: the mic-sleeping timeout stops mapping to `sleeping`. `walking` and `flying`
+are never requested from outside; the pet chooses them.
+
+## 4. Assets
+
+```
+assets/pet/
+  frames/
+    idle/       idle_1.png  idle_2.png  idle_1_blink.png
+    walking/    walking_1.png … walking_4.png  walking_1_blink.png
+    flying/     flying_1.png … flying_3.png   flying_1_blink.png
+    thinking/   thinking_1.png thinking_2.png thinking_1_blink.png
+    reading/    reading_1.png reading_2.png reading_1_blink.png
+    speaking/   speaking_1.png speaking_2.png speaking_1_blink.png
+    sleeping/   sleeping_1.png
+```
+
+22 files. Frame lists are discovered by globbing `<pose>_<n>.png` in sorted
+numeric order; blink twins are excluded from the cycle.
+
+Timing is a code table, mirroring how `ReactorHud._STYLES` already works, so
+there is no new configuration surface:
+
+| Pose | Frames | fps | Blink twin |
+|---|---|---|---|
+| idle | 2 | 1.5 | yes |
+| walking | 4 | 6 | yes |
+| flying | 3 | 8 | yes |
+| thinking | 2 | 2 | yes |
+| reading | 2 | 2 | yes |
+| speaking | 2 | 6 | yes |
+| sleeping | 1 | — | no |
+
+**Migration.** The seven existing flat PNGs in `assets/pet/` become generation
+references only. Once `frames/` is approved, the loader reads `frames/`
+exclusively and the flat files are deleted in the same commit, so there is never
+a window with two sources of truth. `blinking.png` is discarded outright: it is a
+head-only closeup at a different scale from every full-body pose and cannot be
+swapped in or overlaid without looking broken.
+
+## 5. Auto-alignment
+
+Independently generated frames differ in scale and placement. Blitted raw, the
+pet wobbles and appears to jump. Every frame therefore passes through a build
+step that:
+
+1. Mattes the key colour to alpha (flood fill from the edges, feathered 1.2 px —
+   the method proven on the JPEG sources, where it left 0.01–0.46% fringe).
+2. Trims to the bounding box of pixels with alpha > 8.
+3. Pastes onto a common **360×300** canvas — wider than tall, because a
+   wings-spread flying pose has a span larger than its height and a square canvas
+   would clip it. The content is scaled to fit the canvas preserving aspect,
+   horizontally centred, with the bbox bottom edge resting on a fixed baseline at
+   y = 286. Feet-anchored, so legs and wings move while the bird stays planted.
+4. Records the baseline offset in the frame table.
+
+`PET_HEIGHT` (190) then scales the common canvas down at draw time, so every
+pose occupies the same footprint and the corner anchor does not shift when the
+pose changes.
+
+Alignment is deterministic and runs offline at build time, never at draw time.
+Horizontal mirroring for left-facing movement is a draw-time negative x scale,
+which needs no extra art.
+
+## 6. Behaviour
+
+Three layers, all driven by `advance(dt)` from the existing tick.
+
+**Playback.** `frame_index = floor(pose_elapsed * fps) % frame_count`.
+
+**Blink.** Unchanged schedule: 4–7 s random gap (`PET_BLINK_GAP`), 0.18 s
+duration, fires in any awake pose.
+
+**Roaming.** Replaces the current `PET_WANDER_AFTER` / `PET_WANDER_DURATION`
+pair. After `PET_ROAM_AFTER` (45 s) without activity the pet enters roaming: it
+picks a target x within the viewport, walks toward it at `PET_ROAM_SPEED`
+(40 px/s) facing its direction of travel, pauses 2–5 s, picks another target.
+`PET_ROAM_FLY_CHANCE` (0.2) of the time it flies an arc instead, using
+`flying` frames and a sine path. Roaming stops immediately on activity.
+
+**Sleep.** `PET_SLEEP_AFTER` = 1800 s idle by day, `PET_SLEEP_AFTER_NIGHT` =
+600 s between `PET_NIGHT_START` 22:00 and `PET_NIGHT_END` 07:00 local. Any
+activity resets the clock and wakes the pet.
+
+### Decision that changes existing behaviour
+
+`sleeping` is currently triggered by the 60-second "Mic sleeping" continuous-
+listening timeout. Under this design that is far too eager: the pet would sleep
+after a minute of quiet while the 30-minute rule would never fire.
+
+**Resolution:** the mic-sleeping timeout maps to `idle` (awake, waiting,
+roaming). Only the activity-idle threshold produces the `sleeping` pose. This
+revises the mapping approved in `a141865` and is the one behavioural change here
+that removes a trigger rather than adding one.
+
+### Activity definition
+
+An activity timestamp is updated by:
+
+- sending or receiving a message, a voice transcript, or a tool turn;
+- any keypress or mouse click inside the application window, via one event filter
+  installed on the window;
+- the cursor entering the pet's proximity radius.
+
+Scrolling without clicking does not count.
+
+## 7. Cursor proximity and Z-order
+
+`WA_TransparentForMouseEvents` means the pet receives no mouse events, so
+proximity comes from polling `QCursor.pos()` inside `advance(dt)` and mapping it
+into the pet's rect. No global event filter for this, and no new timer.
+
+Within `PET_PROXIMITY_PX` (120) of the sprite rect the pet raises to the front of
+the message body, unconditionally — the owner accepted that it can then sit over
+a code block. After `PET_PROXIMITY_RELEASE_S` (1.5 s) outside the radius it drops
+back behind the body.
+
+`ChatView.resizeEvent` calls `self._body.raise_()`, which would silently demote
+the pet. The pet therefore re-asserts its own order whenever its desired layer
+changes and after any viewport resize.
+
+## 8. Error handling
+
+- Missing pose directory, missing frame, or unreadable PNG: fall back to
+  `idle_1`, then to drawing nothing. Never raise.
+- A pose whose frame list is empty renders the fallback rather than a blank
+  cycle.
+- The blink twin is optional per pose; absent twin means no blink for that pose,
+  not a fallback swap.
+- Frame discovery is cached per widget, so a missing file costs one `stat` for
+  the life of the widget, matching the current sprite cache.
+
+## 9. Testing
+
+**Pure and injectable.** Frame selection, blink substitution, alignment maths,
+roaming steps and the sleep schedule are functions that take `dt`, an injected
+`rng`, and an injected clock — no wall time, no real timer. This follows the
+pattern already in `PetBehaviourTests`.
+
+**Permanent asset guard.** A test asserts that every file named by the frame
+table exists and is genuinely RGBA. This is the class of defect that appeared
+twice in this work — JPEG sources with no alpha channel, then painted
+checkerboards — and it should fail loudly forever rather than be caught by eye.
+
+**Offscreen Qt.** Retains the existing assertions: no pixel darker than the
+canvas floor, `WA_TransparentForMouseEvents` still set, still exactly one
+`QTimer` in the HUD, and the pet still adds no second timer.
+
+**Layer order.** A test that raising on proximity and dropping after the release
+delay survives a viewport resize.
+
+## 10. Generation and approval workflow
+
+1. Generate per-pose batches with `ImageGen`, image-to-image from the clean
+   reference PNGs, each frame on a flat solid magenta `#FF00FF` key colour,
+   full body in frame, feet near the bottom, no shadow.
+2. Matte, align and compose a **contact sheet per batch**, composited over
+   `COLOR_BG` so it is judged against the real dark canvas.
+3. Show the contact sheet. **Nothing is committed until it is approved.**
+4. Repeat per batch. Batch 1 is `idle` + `walking` (8 images): the base standing
+   pose and the walk cycle, which together validate style consistency and
+   feet-anchored alignment before the remaining 14 are generated.
+
+Known risk, stated rather than hidden: generated frames can drift in style
+between calls even with a reference image. If a contact sheet comes back
+inconsistent, the fallback is to reduce scope to the walk and fly cycles and keep
+single poses elsewhere.
+
+## 11. Out of scope
+
+- P5: Kling AI video generation for true in-between motion. Needs an `ffmpeg`
+  install and a paid API key.
+- User-facing configuration for fps, thresholds or night hours. Constants first;
+  a manifest or settings keys only if tuning is actually needed.
+- Sound, particle trails, and any change to the reactor HUD's own layers.
