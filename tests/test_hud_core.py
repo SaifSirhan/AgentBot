@@ -25,16 +25,19 @@ from PySide6.QtWidgets import QApplication, QSizePolicy, QWidget  # noqa: E402
 from audio_bus import AudioBus  # noqa: E402
 from hud_core import (  # noqa: E402
     PARTICLE_CAP,
+    PET_ANCHORS,
     PET_BLINK_DURATION,
     PET_BLINK_GAP,
     PET_BLINK_SKIP,
     PET_BOB_AMPLITUDE,
     PET_CANVAS,
+    PET_FLY_MIN_S,
     PET_FPS,
     PET_FRAMES_DIR,
     PET_IDLE_VARIATION_AFTER,
     PET_IDLE_VARIATION_DURATION,
     PET_MARGIN,
+    PET_POP_OUT_S,
     PET_POSES,
     PET_PROXIMITY_PX,
     PET_PROXIMITY_RELEASE_S,
@@ -42,6 +45,8 @@ from hud_core import (  # noqa: E402
     PET_ROAM_FLY_CHANCE,
     PET_ROAM_PAUSE,
     PET_ROAM_SPEED,
+    PET_SCALE,
+    PET_SCALE_RANGE,
     PET_SLEEP_AFTER,
     PET_SLEEP_AFTER_NIGHT,
     PET_ZZZ_COUNT,
@@ -53,6 +58,7 @@ from hud_core import (  # noqa: E402
     SpikeDetector,
     burst_count,
     pet_bob,
+    pet_ease,
     pet_frame_index,
     pet_is_night,
     pet_sleep_after,
@@ -940,6 +946,150 @@ class PetZzzTests(unittest.TestCase):
         self.assertGreater(self.count_above_sprite(self.render()), 0)
         self.pet.set_state("idle")
         self.assertEqual(self.count_above_sprite(self.render()), 0)
+
+
+class PetCommandTests(unittest.TestCase):
+    """The assistant-facing motion API. Every command only sets a target; the
+    existing tick walks it there, so nothing here can block the GUI thread."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.asset_dir = _make_sprite_dir(self._tmp.name, "idle:1",
+                                          "flying:1")
+        self.pet = PetWidget(parent=None, asset_dir=self.asset_dir,
+                             rng=random.Random(3), cursor=_far_cursor,
+                             hour_of_day=lambda: 12)
+        self.pet.resize(400, 300)
+        self.pet.set_state("idle")
+
+    def tearDown(self):
+        self.pet.deleteLater()
+        self._tmp.cleanup()
+        self.app.processEvents()
+
+    def _advance(self, seconds, step=0.1):
+        for _tick in range(int(round(seconds / step))):
+            self.pet.advance(step)
+
+    def test_ease_is_clamped_and_symmetric(self):
+        self.assertEqual(pet_ease(0.0), 0.0)
+        self.assertEqual(pet_ease(1.0), 1.0)
+        self.assertEqual(pet_ease(-4.0), 0.0)
+        self.assertEqual(pet_ease(4.0), 1.0)
+        self.assertAlmostEqual(pet_ease(0.5), 0.5)
+        self.assertAlmostEqual(pet_ease(0.25) + pet_ease(0.75), 1.0)
+
+    def test_fly_to_glides_then_arrives_without_a_teleport(self):
+        start_x, start_y = self.pet._position()
+        self.assertGreater(start_x, 10.0, "fixture is not on the right")
+        self.pet.fly_to(10, 10)
+        self.assertEqual(self.pet.pose, "flying")
+        self.assertEqual(self.pet._position(), (start_x, start_y),
+                         "the command itself moved the sprite")
+        self.pet.advance(0.1)
+        x, y = self.pet._position()
+        self.assertLess(x, start_x)
+        self.assertGreater(x, 10.0, "the sprite jumped instead of gliding")
+        self._advance(3.0)
+        x, y = self.pet._position()
+        self.assertAlmostEqual(x, 10.0, delta=0.5)
+        self.assertAlmostEqual(y, 10.0, delta=0.5)
+        self.assertEqual(self.pet.pose, "idle", "the flying pose stuck")
+
+    def test_a_flight_lasts_at_least_the_minimum_duration(self):
+        self.pet.fly_to(10, 10)
+        self.pet.advance(PET_FLY_MIN_S * 0.5)
+        self.assertEqual(self.pet.pose, "flying",
+                         "a long hop finished inside half a frame budget")
+
+    def test_fly_around_tours_the_viewport_and_returns_home(self):
+        home_x, home_y = self.pet._home_xy()
+        self.pet.fly_around()
+        seen = set()
+        for _tick in range(300):
+            self.pet.advance(0.1)
+            x, y = self.pet._position()
+            seen.add((round(x), round(y)))
+        self.assertGreater(len(seen), 10, "the tour never moved")
+        x, y = self.pet._position()
+        self.assertAlmostEqual(x, home_x, delta=1.0)
+        self.assertAlmostEqual(y, home_y, delta=1.0)
+        self.assertEqual(self.pet.pose, "idle")
+
+    def test_set_scale_resizes_the_drawn_sprite(self):
+        before = self.pet.sprite.height()
+        self.assertEqual(self.pet.set_scale(1.5), 1.5)
+        self.assertGreater(self.pet.sprite.height(), before)
+
+    def test_set_scale_clamps_and_ignores_junk(self):
+        low, high = PET_SCALE_RANGE
+        self.assertEqual(self.pet.set_scale(99.0), high)
+        self.assertEqual(self.pet.set_scale(0.01), low)
+        self.assertEqual(self.pet.set_scale("junk"), low)
+
+    def test_each_anchor_parks_in_its_corner(self):
+        width, height = self.pet._sprite_size()
+        expected = {
+            "bottom_right": (400 - width - PET_MARGIN, 300 - height - PET_MARGIN),
+            "bottom_left": (PET_MARGIN, 300 - height - PET_MARGIN),
+            "top_right": (400 - width - PET_MARGIN, PET_MARGIN),
+            "top_left": (PET_MARGIN, PET_MARGIN),
+        }
+        for anchor in PET_ANCHORS:
+            with self.subTest(anchor=anchor):
+                self.assertEqual(self.pet.set_position(anchor), anchor)
+                x, y = self.pet._position()
+                self.assertAlmostEqual(x, expected[anchor][0], delta=0.5)
+                self.assertAlmostEqual(y, expected[anchor][1], delta=0.5)
+
+    def test_an_unknown_anchor_falls_back_to_bottom_right(self):
+        self.assertEqual(self.pet.set_position("middle"), "bottom_right")
+
+    def test_pop_out_scales_up_and_fades_in(self):
+        self.pet.pop_out()
+        self.assertEqual(self.pet._fade, 0.0)
+        self.pet.advance(PET_POP_OUT_S * 0.4)
+        self.assertGreater(self.pet._fade, 0.0)
+        self.assertLess(self.pet._fade, 1.0)
+        self._advance(PET_POP_OUT_S)
+        self.assertEqual(self.pet._fade, 1.0)
+        self.assertAlmostEqual(self.pet._pop_scale, 1.0)
+
+    def test_pop_in_finishes_invisible(self):
+        self.pet.pop_in()
+        self._advance(1.0)
+        self.assertEqual(self.pet._fade, 0.0)
+        canvas = QImage(400, 300, QImage.Format.Format_RGB32)
+        canvas.fill(QColor("#0E1116"))
+        painter = QPainter(canvas)
+        self.pet._paint(painter)
+        for y in range(0, 300, 7):
+            for x in range(0, 400, 7):
+                self.assertEqual(canvas.pixelColor(x, y), QColor("#0E1116"),
+                                 "a hidden pet still painted at (%d, %d)"
+                                 % (x, y))
+
+    def test_play_maps_every_action(self):
+        self.assertIn("flying around", self.pet.play("fly_around"))
+        self.assertIn("scale", self.pet.play("set_scale", {"scale": 2.0}))
+        self.assertAlmostEqual(self.pet._scale, 2.0)
+        self.assertIn("top_left", self.pet.play("set_position",
+                                                {"anchor": "top_left"}))
+        self.assertIn("ERROR", self.pet.play("teleport"))
+        self.assertIn("ERROR", self.pet.play("fly_to", {"x": "a"}))
+
+    def test_scale_is_additive_to_the_shipped_default(self):
+        self.assertEqual(self.pet._scale, PET_SCALE)
+        self.pet.fly_to(40, 40)
+        self.pet.play("pop_out")
+        self.pet.advance(0.1)
+        width, height = self.pet._sprite_size()
+        self.assertAlmostEqual(width, self.pet.sprite.width(), delta=1.0)
+        self.assertGreater(height, 0.0)
 
 
 class PetAnimationTests(unittest.TestCase):

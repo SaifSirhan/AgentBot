@@ -541,6 +541,19 @@ MISC
   beep() — short beep.
   list_brains() — list currently available AI providers.
   set_name(input) — rename the assistant.
+  sprite_control(object) — move the desktop pet (the bird in the AgentBot
+    window). Input is a JSON object, not a string:
+      {"action": "fly_around"}
+      {"action": "fly_to", "x": 300, "y": 200}
+      {"action": "pop_out"}        show it (scale up + fade in)
+      {"action": "pop_in"}         hide it (shrink + fade out)
+      {"action": "set_scale", "scale": 1.5}
+      {"action": "set_position", "anchor": "top_left"}
+    Anchors: bottom_right, bottom_left, top_right, top_left. x/y are the
+    sprite's top-left in viewport pixels; it clamps to stay on screen.
+    Use it for "fly around", "get bigger", "move to the top-left", "pop in".
+    It only works while the AgentBot window is open; if it says the pet is not
+    on screen, tell the user to open it rather than retrying.
 
 IMAGE
   generate_image(input) — AI image from a prompt: "prompt|filename"

@@ -111,6 +111,9 @@ DESCRIPTIONS = {
     "quarantine_file": "Move a suspicious file to quarantine.",
     "browse_web": "Run a restricted, allowlisted browser task.",
     "load_skill": "Read the full manual for a skill or tool input format.",
+    "sprite_control": (
+        "Move the desktop pet: fly to a point, fly around, pop in or out, "
+        "resize it, or park it in a corner."),
     "skill_manage": "Create, update, list, read, or delete a reusable skill.",
 }
 
@@ -172,6 +175,9 @@ EXTRA_KEYWORDS = {
     "media_control": ("play", "pause", "skip", "next", "previous", "prev",
                       "stop", "music", "media", "track", "song"),
     "load_skill": ("skill", "manual", "instructions", "format", "tool"),
+    "sprite_control": ("pet", "sprite", "bird", "kestrel", "fly", "flying",
+                       "bigger", "smaller", "shrink", "resize", "pop",
+                       "corner", "move yourself"),
     "watch_system_condition": ("battery", "cpu", "ram", "notify", "notified", "alert", "monitor", "watch"),
     "run_command": ("run", "command", "terminal", "shell", "docker",
                     "server", "code"),

@@ -116,6 +116,21 @@ PET_PROXIMITY_RELEASE_S = 1.5
 PET_HEIGHT = 190
 PET_MARGIN = 24
 PET_OPACITY = 0.85
+# Assistant-controllable motion. Everything below rides the HUD's existing tick:
+# a command sets a target and a duration, and `advance(dt)` walks it there — no
+# second timer, no sleep on the UI thread. `PET_SCALE` can be changed in code or
+# live through `set_scale`.
+PET_SCALE = 1.0
+PET_SCALE_RANGE = (0.4, 3.0)
+PET_FLY_SPEED = 420.0          # px/s, so distance sets the duration
+PET_FLY_MIN_S = 0.35
+PET_FLY_MAX_S = 1.8
+PET_POP_OUT_S = 0.45
+PET_POP_IN_S = 0.35
+PET_POP_SCALE = 0.35           # scale the pet pops in from / shrinks to
+PET_ANCHORS = ("bottom_right", "bottom_left", "top_right", "top_left")
+# A `fly_around` tour as fractions of the viewport, then back to the anchor.
+PET_TOUR = ((0.18, 0.22), (0.78, 0.18), (0.82, 0.60), (0.20, 0.64))
 # `sin(elapsed * PET_BOB_RATE) * PET_BOB_AMPLITUDE` — a 5 px rise over a ~3.1 s
 # cycle. Driven by the HUD's own tick, so the pet never needs a timer of its own.
 PET_BOB_RATE = 2.0
@@ -167,6 +182,16 @@ def pet_zzz_progress(elapsed: float, period: float = PET_ZZZ_PERIOD,
     elapsed = max(0.0, float(elapsed))
     return tuple((elapsed / period + index / float(count)) % 1.0
                  for index in range(count))
+
+
+def pet_ease(progress: float) -> float:
+    """Smoothstep 0..1: zero velocity at both ends, so flight eases in and out.
+
+    Pure and clamped for the same reason as the other pet helpers: a test can
+    assert the endpoints and the midpoint exactly instead of timing an animation.
+    """
+    p = min(1.0, max(0.0, float(progress)))
+    return p * p * (3.0 - 2.0 * p)
 
 
 @dataclass
@@ -936,6 +961,16 @@ class PetWidget(QWidget):
         self._variation_left = 0.0
         self._variation_return = None
         self._next_variation = 0.0
+        # Assistant-controllable motion. `_fly` is the leg being flown, `_tour`
+        # the points still queued behind it, and `_pop` the scale/fade flourish.
+        self._scale = max(PET_SCALE_RANGE[0],
+                          min(PET_SCALE_RANGE[1], float(PET_SCALE)))
+        self._anchor = "bottom_right"
+        self._fly = None
+        self._tour = []
+        self._pop = None
+        self._pop_scale = 1.0
+        self._fade = 1.0
         self._bob = 0.0
         self._drawn = (None, None)
         self._sprite = None
@@ -1033,6 +1068,7 @@ class PetWidget(QWidget):
             return
         self._requested = name
         self._wake()
+        self._cancel_flight()
         self._idle_time = 0.0
         self._arm_blink()
         self._arm_variation(PET_IDLE_VARIATION_AFTER)
@@ -1096,6 +1132,7 @@ class PetWidget(QWidget):
         if self._sleeping or self._pose == "sleeping":
             self._sleep_elapsed += dt
         self._poll_cursor(dt)
+        moving = self._update_motion(dt)
         if self._blinking:
             self._blink_time += dt
             if self._blink_time >= PET_BLINK_DURATION:
@@ -1111,6 +1148,12 @@ class PetWidget(QWidget):
         if (self._requested == PET_FALLBACK
                 and self._idle_time >= pet_sleep_after(self._hour())):
             self._fall_asleep()
+            return
+        if moving:
+            # A flight or pop owns the pet: no roaming, no variation, and the
+            # pose cycle still plays (the flying frames while it is airborne).
+            self._advance_cycle(dt)
+            self._refresh()
             return
         if self._variation:
             self._variation_left -= dt
@@ -1192,12 +1235,9 @@ class PetWidget(QWidget):
         return sprite.width() / (sprite.devicePixelRatio() or 1.0)
 
     def _sprite_rect(self) -> QRectF:
-        width = self._sprite_width()
-        height = float(self.HEIGHT)
-        x = max(0.0, self.width() - width - self.MARGIN) + self._roam_x
-        y = (max(0.0, self.height() - height - self.MARGIN)
-             + self._bob + self._roam_y)
-        return QRectF(x, y, width, height)
+        rect = self._drawn_rect()
+        return QRectF(rect.x(), rect.y() + self._bob,
+                      rect.width(), rect.height())
 
     # -- sleep ----------------------------------------------------------
     def _fall_asleep(self) -> None:
@@ -1210,6 +1250,10 @@ class PetWidget(QWidget):
         self._variation = False
         self._variation_left = 0.0
         self._sleep_elapsed = 0.0
+        self._cancel_flight()
+        self._pop = None
+        self._pop_scale = 1.0
+        self._fade = 1.0
         self._set_pose("sleeping")
 
     # -- cursor proximity -----------------------------------------------
@@ -1262,6 +1306,216 @@ class PetWidget(QWidget):
         # one that was playing when it started, not simply idle.
         self._set_pose((self._variation_return if self._roaming
                         else self._requested) or PET_FALLBACK)
+
+    # -- assistant control ----------------------------------------------
+    def play(self, action: str, params: dict = None) -> str:
+        """Run one named sprite command. Returns a one-line status.
+
+        Reached from the assistant's `sprite_control` tool through
+        `sprite_bus.sprite_controller`; the call is a slot on the GUI thread and
+        only sets targets, so it returns immediately.
+        """
+        action = str(action or "").strip().lower()
+        params = dict(params or {})
+        if action == "fly_to":
+            try:
+                x = float(params.get("x"))
+                y = float(params.get("y"))
+            except (TypeError, ValueError):
+                return "ERROR: fly_to needs numeric x and y."
+            self.fly_to(x, y)
+            return "flying to (%.0f, %.0f)" % (x, y)
+        if action == "fly_around":
+            self.fly_around()
+            return "flying around"
+        if action == "pop_out":
+            self.pop_out()
+            return "popping out"
+        if action == "pop_in":
+            self.pop_in()
+            return "popping in"
+        if action == "set_scale":
+            try:
+                value = float(params.get("scale"))
+            except (TypeError, ValueError):
+                return "ERROR: set_scale needs a number."
+            return "scale is now %.2fx" % self.set_scale(value)
+        if action == "set_position":
+            return "anchored %s" % self.set_position(params.get("anchor"))
+        return "ERROR: unknown sprite action %r." % action
+
+    def _take_control(self) -> None:
+        """A command from the assistant outranks the automatic behaviour."""
+        self._wake()
+        self._idle_time = 0.0
+        self._arm_blink()
+        self._arm_variation(PET_IDLE_VARIATION_AFTER)
+
+    def _cancel_flight(self) -> None:
+        self._fly = None
+        self._tour = []
+
+    def _sprite_size(self):
+        """The sprite's drawn size in widget pixels, before any pop scaling."""
+        sprite = self._sprite
+        height = float(self.HEIGHT) * self._scale
+        if sprite is not None:
+            height = sprite.height() / (sprite.devicePixelRatio() or 1.0)
+        return self._sprite_width(), height
+
+    def _home_xy(self):
+        """Where the anchor preset puts the sprite, before roaming or flight."""
+        width, height = self._sprite_size()
+        right = max(0.0, self.width() - width - self.MARGIN)
+        bottom = max(0.0, self.height() - height - self.MARGIN)
+        x = float(self.MARGIN) if self._anchor.endswith("left") else right
+        y = float(self.MARGIN) if self._anchor.startswith("top") else bottom
+        return x, y
+
+    def _position(self):
+        """Current top-left of the sprite: the anchor plus the live offset.
+
+        Flight and roaming both write the offset, so a pet that lands somewhere
+        stays there — the offset is the single source of truth for "not home".
+        """
+        home_x, home_y = self._home_xy()
+        return home_x + self._roam_x, home_y + self._roam_y
+
+    def _drawn_rect(self) -> QRectF:
+        """Rect the frame is blitted into, with the pop scale applied.
+
+        Scaling is anchored at the bottom centre so the feet stay planted while
+        the pet pops in or out.
+        """
+        width, height = self._sprite_size()
+        drawn_w = width * self._pop_scale
+        drawn_h = height * self._pop_scale
+        x, y = self._position()
+        x += (width - drawn_w) / 2.0
+        y += height - drawn_h
+        return QRectF(x, y, drawn_w, drawn_h)
+
+    def _clamped_target(self, x, y):
+        width, height = self._sprite_size()
+        max_x = max(0.0, self.width() - width)
+        max_y = max(0.0, self.height() - height)
+        return min(max(0.0, float(x)), max_x), min(max(0.0, float(y)), max_y)
+
+    def set_scale(self, factor) -> float:
+        """Resize the sprite live. Returns the scale actually applied."""
+        try:
+            value = float(factor)
+        except (TypeError, ValueError):
+            return self._scale
+        if not math.isfinite(value):
+            return self._scale
+        low, high = PET_SCALE_RANGE
+        self._scale = max(low, min(high, value))
+        # Frames are cached at the drawn height, so a new scale has to reload.
+        self._cache.clear()
+        self._drawn = (None, None)
+        self._take_control()
+        self._refresh()
+        self.update()
+        return self._scale
+
+    def set_position(self, anchor) -> str:
+        """Park the pet in a corner preset. Returns the preset applied."""
+        name = (str(anchor or "").strip().lower()
+                .replace("-", "_").replace(" ", "_"))
+        if name not in PET_ANCHORS:
+            name = "bottom_right"
+        self._anchor = name
+        self._cancel_flight()
+        self._roam_x = 0.0
+        self._roam_y = 0.0
+        self._take_control()
+        self.update()
+        return name
+
+    def fly_to(self, x, y) -> None:
+        """Glide to a top-left position (widget pixels) with an ease in/out."""
+        self._cancel_flight()
+        self._take_control()
+        self._begin_flight(x, y)
+
+    def fly_around(self) -> None:
+        """Fly a loop of viewport waypoints, then return to the anchor."""
+        self._cancel_flight()
+        self._take_control()
+        home_x, home_y = self._home_xy()
+        self._tour = [(self.width() * fx, self.height() * fy)
+                      for fx, fy in PET_TOUR]
+        self._tour.append((home_x, home_y))
+        self._start_next_leg()
+
+    def _start_next_leg(self) -> None:
+        if not self._tour:
+            self._set_pose(self._requested)
+            return
+        x, y = self._tour.pop(0)
+        self._begin_flight(x, y)
+
+    def _begin_flight(self, x, y) -> None:
+        target_x, target_y = self._clamped_target(x, y)
+        start_x, start_y = self._position()
+        distance = math.hypot(target_x - start_x, target_y - start_y)
+        duration = min(PET_FLY_MAX_S,
+                       max(PET_FLY_MIN_S, distance / PET_FLY_SPEED))
+        self._fly = {"x": start_x, "y": start_y,
+                     "x0": start_x, "y0": start_y,
+                     "x1": target_x, "y1": target_y,
+                     "t": 0.0, "duration": duration}
+        self._facing = 1 if target_x >= start_x else -1
+        self._set_pose("flying")
+
+    def pop_out(self) -> None:
+        """Scale up and fade in at the pet's spot."""
+        self._take_control()
+        self._pop = {"s0": PET_POP_SCALE, "s1": 1.0, "f0": 0.0, "f1": 1.0,
+                     "t": 0.0, "duration": PET_POP_OUT_S}
+        self._pop_scale = PET_POP_SCALE
+        self._fade = 0.0
+        self.update()
+
+    def pop_in(self) -> None:
+        """Shrink back down and fade out."""
+        self._take_control()
+        self._pop = {"s0": self._pop_scale, "s1": PET_POP_SCALE,
+                     "f0": self._fade, "f1": 0.0,
+                     "t": 0.0, "duration": PET_POP_IN_S}
+
+    def _update_motion(self, dt: float) -> bool:
+        """Advance any flight or pop; True while one is still running."""
+        active = False
+        if self._fly is not None:
+            active = True
+            fly = self._fly
+            fly["t"] += dt
+            progress = pet_ease(fly["t"] / fly["duration"])
+            fly["x"] = fly["x0"] + (fly["x1"] - fly["x0"]) * progress
+            fly["y"] = fly["y0"] + (fly["y1"] - fly["y0"]) * progress
+            home_x, home_y = self._home_xy()
+            self._roam_x = fly["x"] - home_x
+            self._roam_y = fly["y"] - home_y
+            if fly["t"] >= fly["duration"]:
+                self._fly = None
+                if self._tour:
+                    self._start_next_leg()
+                else:
+                    self._set_pose(self._requested)
+        if self._pop is not None:
+            active = True
+            pop = self._pop
+            pop["t"] += dt
+            progress = pet_ease(pop["t"] / pop["duration"])
+            self._pop_scale = pop["s0"] + (pop["s1"] - pop["s0"]) * progress
+            self._fade = pop["f0"] + (pop["f1"] - pop["f0"]) * progress
+            if pop["t"] >= pop["duration"]:
+                self._pop = None
+                self._pop_scale = pop["s1"]
+                self._fade = pop["f1"]
+        return active
 
     def _resolve(self):
         """(pose, frame key, pixmap) to draw, after the fallbacks in the spec.
@@ -1356,7 +1610,7 @@ class PetWidget(QWidget):
             if not source.isNull():
                 dpr = max(1.0, float(self.devicePixelRatio() or 1.0))
                 pixmap = source.scaledToHeight(
-                    int(round(self.HEIGHT * dpr)),
+                    max(1, int(round(self.HEIGHT * self._scale * dpr))),
                     Qt.TransformationMode.SmoothTransformation)
                 pixmap.setDevicePixelRatio(dpr)
         self._cache[cache_key] = pixmap
@@ -1381,26 +1635,36 @@ class PetWidget(QWidget):
             painter.setCompositionMode(
                 QPainter.CompositionMode.CompositionMode_SourceOver)
             pixmap = self.sprite
-            if pixmap is None:
+            if pixmap is None or self._fade <= 0.01:
                 return
-            painter.setOpacity(self._opacity)
-            dpr = pixmap.devicePixelRatio() or 1.0
-            width = pixmap.width() / dpr
-            height = pixmap.height() / dpr
-            x = max(0.0, self.width() - width - self.MARGIN) + self._roam_x
-            y = (max(0.0, self.height() - height - self.MARGIN)
-                 + self._bob + self._roam_y)
-            if self._facing < 0:
-                # Facing left needs no extra art: the same blit, mirrored.
-                painter.save()
-                painter.translate(x + width, y)
-                painter.scale(-1.0, 1.0)
-                painter.drawPixmap(QPointF(0.0, 0.0), pixmap)
-                painter.restore()
+            painter.setOpacity(self._opacity * self._fade)
+            rect = self._drawn_rect()
+            x, y = rect.x(), rect.y() + self._bob
+            if self._pop_scale == 1.0:
+                # Steady state: blit the cached pixmap at its native size, the
+                # same fast path as before pops existed.
+                if self._facing < 0:
+                    painter.save()
+                    painter.translate(x + rect.width(), y)
+                    painter.scale(-1.0, 1.0)
+                    painter.drawPixmap(QPointF(0.0, 0.0), pixmap)
+                    painter.restore()
+                else:
+                    painter.drawPixmap(QPointF(x, y), pixmap)
             else:
-                painter.drawPixmap(QPointF(x, y), pixmap)
+                target = QRectF(x, y, rect.width(), rect.height())
+                source = QRectF(pixmap.rect())
+                if self._facing < 0:
+                    painter.save()
+                    painter.translate(x + rect.width(), y)
+                    painter.scale(-1.0, 1.0)
+                    painter.drawPixmap(QRectF(0.0, 0.0, rect.width(),
+                                              rect.height()), pixmap, source)
+                    painter.restore()
+                else:
+                    painter.drawPixmap(target, pixmap, source)
             if self._drawn[0] == "sleeping":
-                self._paint_zzz(painter, x, y, width)
+                self._paint_zzz(painter, x, y, rect.width())
         finally:
             painter.end()
 

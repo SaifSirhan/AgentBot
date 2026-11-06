@@ -140,6 +140,7 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
         "uia_type",
         "set_volume",
         "read_artifact",
+        "sprite_control",
     }
 
     def setUp(self):

@@ -293,7 +293,36 @@ canvas floor, `WA_TransparentForMouseEvents` still set, still exactly one
 **Layer order.** A test that raising on proximity and dropping after the release
 delay survives a viewport resize.
 
-## 10. Generation and approval workflow
+## 10. Assistant sprite control
+
+The assistant drives the pet through one tool, `sprite_control`, so "fly around"
+or "get bigger" actually moves the bird instead of being described.
+
+| Command | Effect |
+|---|---|
+| `fly_to(x, y)` | ease in/out to that top-left; duration from distance at 420 px/s, clamped to 0.35–1.8 s |
+| `fly_around()` | four viewport waypoints (`PET_TOUR`), one eased leg each, then back to the anchor |
+| `pop_out()` / `pop_in()` | scale up from `PET_POP_SCALE` while fading in over 0.45 s; the reverse over 0.35 s |
+| `set_scale(factor)` | live resize, clamped to `PET_SCALE_RANGE`; reloads the frame cache |
+| `set_position(anchor)` | one of the four corner presets; resets the offset |
+
+**No new timer.** Every command only writes a target; `advance(dt)` on the HUD's
+existing tick walks the ease and repaints. Nothing sleeps on the GUI thread.
+
+**Threading.** Tools run on a worker and the pet is a QWidget, so the tool calls
+`sprite_bus.sprite_controller.play(...)`; the GUI registers a `QObject` relay and
+a `Signal(str, dict)` hops the call onto the GUI thread (AutoConnection: direct
+on the GUI thread, queued from a worker). With no window open the tool answers
+"the desktop pet is not on screen" rather than pretending.
+
+**Position is one number.** Flight and roaming both write `_roam_x/_roam_y`, the
+offset from the anchor, so a pet that lands somewhere stays there;
+`set_position` is the only thing that zeroes it.
+
+**Size.** `PET_SCALE` is the shipped default and `set_scale` is the live
+override; it is not persisted.
+
+## 11. Generation and approval workflow
 
 **Amended during batch 1.** The original plan was one `ImageGen` call per frame.
 Batch 1 proved that wrong twice: separately-called frames came back at four
@@ -326,7 +355,7 @@ Two facts about the generator that the pipeline must accommodate, both measured:
 Known risk, still true: poses can drift between sheets. Head-width normalisation
 measures the drift and the batch is rejected if it exceeds a few percent.
 
-## 11. Out of scope
+## 12. Out of scope
 
 - P5: Kling AI video generation for true in-between motion. Needs an `ffmpeg`
   install and a paid API key.

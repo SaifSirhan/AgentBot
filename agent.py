@@ -29,6 +29,7 @@ import gmail_tool
 import scheduler
 import memory
 import artifact_store
+import sprite_bus
 from tool_registry import (
     InputValidationError,
     MAX_BATCH_ACTIONS,
@@ -4962,7 +4963,7 @@ VALID_TOOLS = {
     "search_group_chat", "grep_group_chat", "rag_search",
     "edit_document", "post_to_social", "read_word_doc", "set_word_language",
     "inspect_docx", "edit_docx_safe",
-    "skill_manage", "load_skill", "browse_web",
+    "skill_manage", "load_skill", "browse_web", "sprite_control",
 }
 
 
@@ -5526,6 +5527,39 @@ def _current_time_tool(_input=""):
     return current_time()
 
 
+# Actions `sprite_control` forwards to the live pet, with the line the model
+# gets back. The widget replies with its own status, but a queued signal cannot
+# return a value across threads, so the tool's answer is composed here.
+_SPRITE_REPLIES = {
+    "fly_to": "the pet is flying to that spot",
+    "fly_around": "the pet is flying around",
+    "pop_out": "the pet popped out",
+    "pop_in": "the pet popped in",
+    "set_position": "the pet moved to that corner",
+}
+
+
+def sprite_control(inp):
+    """Control the desktop pet: fly, pop in/out, resize, move to a corner.
+
+    The pet only exists while the AgentBot window is open; every failure mode is
+    an honest sentence rather than an exception, because the model reads this
+    string back.
+    """
+    data = inp if isinstance(inp, dict) else {}
+    action = str(data.get("action", "")).strip().lower()
+    if action not in sprite_bus.SPRITE_ACTIONS:
+        return ("ERROR: unknown sprite action %r. Use one of: %s."
+                % (action, ", ".join(sprite_bus.SPRITE_ACTIONS)))
+    params = {key: value for key, value in data.items() if key != "action"}
+    if not sprite_bus.sprite_controller.play(action, params):
+        return "ERROR: the desktop pet is not on screen."
+    if action == "set_scale":
+        return "the pet is now %.2fx its usual size" % float(
+            params.get("scale", 1.0))
+    return _SPRITE_REPLIES.get(action, "the pet did %s" % action)
+
+
 def _build_tool_registry():
     """Register the migrated core tools. Everything else stays legacy."""
     registry = ToolRegistry()
@@ -5742,6 +5776,31 @@ def _build_tool_registry():
             timeout=20,
             func=telegram_user_send,
         ),
+        ToolSpec(
+            name="sprite_control",
+            description=(
+                "Move the desktop pet: fly to a point, fly around, pop in or "
+                "out, resize it, or park it in a corner. Input is an object "
+                "{\"action\": ..., \"x\", \"y\", \"scale\", \"anchor\"}."),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "enum": list(sprite_bus.SPRITE_ACTIONS)},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "scale": {"type": "number", "minimum": 0.3,
+                              "maximum": 3.0},
+                    "anchor": {"type": "string",
+                               "enum": list(sprite_bus.SPRITE_ANCHORS)},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+            effect_class="write",
+            timeout=10,
+            func=sprite_control,
+        ),
     )
     for spec in specs:
         registry.register(spec)
@@ -5758,7 +5817,7 @@ def _live_tool_func(func):
 
 
 # Tools whose input is a structured envelope rather than a "a|b" string.
-OBJECT_INPUT_TOOLS = frozenset({"edit_docx_safe"})
+OBJECT_INPUT_TOOLS = frozenset({"edit_docx_safe", "sprite_control"})
 
 
 def _execute_tool_impl(action):

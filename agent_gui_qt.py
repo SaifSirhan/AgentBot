@@ -38,7 +38,6 @@ import threading
 import time
 import traceback
 from pathlib import Path
-
 from PySide6.QtCore import (
     Qt,
     QBuffer,
@@ -108,6 +107,7 @@ except Exception:
     scheduler = None
 
 import memory
+import sprite_bus
 from hud_core import PetWidget, ReactorHud
 from window_chrome import FramelessChrome
 
@@ -2302,6 +2302,20 @@ class TerminalInput(QPlainTextEdit):
         super().focusOutEvent(event)
 
 
+class _SpriteRelay(QObject):
+    """Marshals tool-thread sprite commands onto the GUI thread.
+
+    Tools run on a worker; the pet is a widget. AutoConnection picks the right
+    hop on both sides — direct when the caller is already on the GUI thread,
+    queued when it is not — so `sprite_bus` never touches a QWidget itself.
+    """
+
+    command = Signal(str, dict)
+
+    def forward(self, action, params):
+        self.command.emit(action, params)
+
+
 class ChatView(QScrollArea):
     """
     Scrollable chat column.
@@ -2359,6 +2373,13 @@ class ChatView(QScrollArea):
         self.pet = PetWidget(parent=self.viewport())
         self.pet.sync_to_parent()
         self.pet.layer_changed.connect(self._apply_pet_layer)
+        # The assistant's `sprite_control` tool reaches this pet through
+        # sprite_bus; the relay is what hops from the tool thread to the GUI.
+        self._sprite_relay = _SpriteRelay(self)
+        self._sprite_relay.command.connect(self.pet.play)
+        forward = self._sprite_relay.forward
+        sprite_bus.register(forward)
+        self.destroyed.connect(lambda *_: sprite_bus.unregister(forward))
         self.background_hud.set_pet_widget(self.pet)
         self._body.raise_()
         self._center_background_hud()
