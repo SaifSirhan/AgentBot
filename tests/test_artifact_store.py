@@ -27,7 +27,7 @@ class ArtifactStoreTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def artifact_path(self, artifact_id, suffix=".txt"):
-        return (self.root / "AgentMemory" / "artifacts"
+        return (self.root / "Kestrel" / "AgentMemory" / "artifacts"
                 / f"{artifact_id}{suffix}")
 
     def test_text_roundtrip_under_localappdata(self):

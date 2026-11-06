@@ -27,6 +27,18 @@ class MemoryDirTests(unittest.TestCase):
         self.addCleanup(env.stop)
         os.environ.pop("AGENT_MEMORY_DIR", None)
 
+    def test_default_config_and_memory_use_kestrel(self):
+        import runpy
+
+        with mock.patch.dict(os.environ, APPDATA=str(self.root / "roaming"),
+                             LOCALAPPDATA=str(self.root / "local")):
+            isolated = runpy.run_path(str(Path(config.__file__)))
+            self.assertEqual(isolated["CONFIG_PATH"],
+                             str(self.root / "roaming" / "Kestrel" / "config.json"))
+            self.assertEqual(isolated["memory_path"]("rag_db"),
+                             str(self.root / "local" / "Kestrel" / "AgentMemory" / "rag_db"))
+            self.assertTrue(Path(isolated["memory_dir"]()).is_dir())
+
     def test_default_when_unset(self):
         self.assertEqual(config.memory_dir(), config.DEFAULT_MEMORY_DIR)
 

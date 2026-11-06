@@ -1,9 +1,9 @@
 """Wake-word listener built on openWakeWord and PyAudio.
 
 The pre-trained openWakeWord models are alexa, hey_mycroft, hey_jarvis,
-hey_rhasspy, weather and timers. There is no "agent" model, so the default
-``agent`` name resolves to a custom ``agent.onnx``/``agent.tflite`` in
-%LOCALAPPDATA%\\AgentMemory\\wakeword or the repo's models/ directory. If that
+hey_rhasspy, weather and timers. There is no "vex" model, so the default
+``vex`` name resolves to a custom ``vex.onnx``/``vex.tflite`` in
+%LOCALAPPDATA%\\Kestrel\\AgentMemory\\wakeword or the repo's models/ directory. If that
 file is missing the service refuses to start instead of listening for a
 different phrase. Set ``WAKE_WORD_MODEL`` to a pretrained name (for example
 ``hey_jarvis``) to exercise the pipeline without a custom model.
@@ -34,7 +34,7 @@ DEFAULT_THRESHOLD = 0.5
 DEFAULT_COOLDOWN = 1.5
 MAX_READ_FAILURES = 5
 
-CUSTOM_MODEL_NAME = "agent"
+CUSTOM_MODEL_NAME = "vex"
 MODEL_DIRS = (
     Path(_cfg.memory_path("wakeword")),
     Path(__file__).resolve().parent / "models",
@@ -48,7 +48,7 @@ class WakeWordError(Exception):
 def resolve_model(spec: str) -> str:
     """Return a model path or a pre-trained model name.
 
-    Raises WakeWordError when a path/default "agent" model does not exist.
+    Raises WakeWordError when a path/default "vex" model does not exist.
     """
     spec = (spec or "").strip() or CUSTOM_MODEL_NAME
 
@@ -71,9 +71,9 @@ def resolve_model(spec: str) -> str:
                     return str(candidate)
         locations = " or ".join(str(d) for d in MODEL_DIRS)
         raise WakeWordError(
-            "No 'agent' wake-word model was found. openWakeWord has no "
-            "pre-trained 'agent' model; train one and place agent.onnx or "
-            f"agent.tflite in {locations}, or set WAKE_WORD_MODEL to a "
+            "No 'vex' wake-word model was found. openWakeWord has no "
+            "pre-trained 'vex' model; train one and place vex.onnx or "
+            f"vex.tflite in {locations}, or set WAKE_WORD_MODEL to a "
             "pre-trained name such as hey_jarvis."
         )
 

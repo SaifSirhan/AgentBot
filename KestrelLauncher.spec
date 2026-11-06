@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='Agent',
+    name='Kestrel',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -35,5 +35,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:/Users/USER/AgentBot/icons8-futurama-bender.ico'],
 )

@@ -341,9 +341,21 @@ class WakeWordTests(unittest.TestCase):
             )
 
         with mock.patch.object(wake_word, "MODEL_DIRS", (self.tmp / "empty",)):
-            with self.assertRaisesRegex(wake_word.WakeWordError, "No 'agent'"):
+            with self.assertRaisesRegex(wake_word.WakeWordError, "No 'vex'"):
                 wake_word.WakeWordService(
-                    on_detect=lambda score: None, model="agent")
+                    on_detect=lambda score: None, model="vex")
+
+    def test_default_resolves_vex_not_an_old_agent_model(self):
+        model = self.tmp / "vex.onnx"
+        model.write_bytes(b"fake-model")
+        with mock.patch.object(wake_word, "MODEL_DIRS", (self.tmp,)):
+            self.assertEqual(wake_word.resolve_model(""), str(model))
+            self.assertEqual(wake_word.resolve_model("VEX"), str(model))
+
+    def test_missing_vex_refuses_to_use_another_phrase(self):
+        with mock.patch.object(wake_word, "MODEL_DIRS", (self.tmp,)):
+            with self.assertRaisesRegex(wake_word.WakeWordError, "No 'vex'"):
+                wake_word.resolve_model("vex")
 
     def test_pretrained_name_passes_through(self):
         self.assertEqual(wake_word.resolve_model("hey_jarvis"), "hey_jarvis")

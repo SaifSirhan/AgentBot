@@ -2,12 +2,12 @@
 Central config — reads API keys from a JSON file the user edits via the GUI,
 falling back to environment variables.
 
-Location: %APPDATA%\\AgentBot\\config.json
+Location: %APPDATA%\\Kestrel\\config.json
 """
 import os
 import json
 
-APP_DIR = os.path.join(os.environ.get("APPDATA", ""), "AgentBot")
+APP_DIR = os.path.join(os.environ.get("APPDATA", ""), "Kestrel")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 DEFAULTS = {
@@ -17,7 +17,7 @@ DEFAULTS = {
         
         
     ],
-    # Where conversation/facts/mood/RAG/state live. Empty = %LOCALAPPDATA%\AgentMemory.
+    # Where conversation/facts/mood/RAG/state live. Empty = %LOCALAPPDATA%\Kestrel\AgentMemory.
     # Point it at a dedicated drive (e.g. D:\AgentBrain); the environment
     # variable of the same name overrides the file.
     "AGENT_MEMORY_DIR": "",
@@ -56,10 +56,10 @@ DEFAULTS = {
 "BROWSER_VISION_ENABLED": False,
 "BROWSER_VISION_MODEL": "deepseek-flash",
 # Option 3 — wake word. Off by default; enable only after installing
-# openwakeword/pyaudio and providing a custom "agent" model (none is
-# pre-trained) or choosing a pretrained fallback such as hey_jarvis.
+# openwakeword/pyaudio and providing a custom "vex" model (none is
+# pre-trained).
     "WAKE_WORD_ENABLED": True,
-    "WAKE_WORD_MODEL": "hey_jarvis",
+    "WAKE_WORD_MODEL": "vex",
     "WAKE_WORD_THRESHOLD": 0.5,
     "WAKE_WORD_DEVICE": "",
     "WAKE_WORD_COOLDOWN": 1.5,
@@ -125,7 +125,7 @@ def get(key, default=""):
 
 DEFAULT_MEMORY_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
-    "AgentMemory",
+    "Kestrel", "AgentMemory",
 )
 
 

@@ -1782,7 +1782,7 @@ class CoreCardIntegrationTests(unittest.TestCase):
                         self.assertEqual(pet.pet_state, "thinking")
 
                 window.set_status(
-                    "Mic sleeping. Say 'Hey Jarvis' or press F9.", busy=False)
+                    "Mic sleeping. Say 'VEX' or press F9.", busy=False)
                 self.assertEqual(pet.pet_state, "idle",
                                  "the mic timeout must leave the pet awake")
                 self.assertEqual(hud.state, "IDLE")
@@ -1831,12 +1831,12 @@ class CoreCardIntegrationTests(unittest.TestCase):
             window.set_status("Listening (Continuous)…", busy=True)
             self.assertEqual(hud.state, "CONTINUOUS")
             self.assertEqual(
-                window.windowTitle(), "Agent — Listening (Continuous)…")
+                window.windowTitle(), "KESTREL — Listening (Continuous)…")
 
             window._on_voice_event("continuous:idle:")
             self.assertEqual(
                 window.windowTitle(),
-                "Agent — Mic sleeping. Say 'Hey Jarvis' or press F9.")
+                "KESTREL — Mic sleeping. Say 'VEX' or press F9.")
             self.assertEqual(hud.state, "IDLE")
 
             window._recording = False
@@ -1874,7 +1874,7 @@ class CoreCardIntegrationTests(unittest.TestCase):
             get_voice.return_value.cancel_recording.assert_called_once()
             self.assertFalse(window._recording)
             self.assertFalse(window._continuous_listening)
-            self.assertEqual(window.windowTitle(), "Agent — Ready")
+            self.assertEqual(window.windowTitle(), "KESTREL — Ready")
             self.assertEqual(hud.state, "IDLE")
         finally:
             window.close()

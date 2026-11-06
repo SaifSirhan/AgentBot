@@ -1,6 +1,6 @@
 """Filesystem storage for oversized tool outputs.
 
-Artifacts live under %LOCALAPPDATA%\\AgentMemory\\artifacts as <uuid>.txt;
+Artifacts live under %LOCALAPPDATA%\\Kestrel\\AgentMemory\\artifacts as <uuid>.txt;
 a <uuid>.json sidecar records the source and size for provenance.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ _ID_RE = re.compile(r"^[0-9a-f]{32}$")
 def artifacts_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     root = Path(base) if base else Path.home() / "AppData" / "Local"
-    return root / "AgentMemory" / "artifacts"
+    return root / "Kestrel" / "AgentMemory" / "artifacts"
 
 
 def _normalize_id(artifact_id: Any) -> str:

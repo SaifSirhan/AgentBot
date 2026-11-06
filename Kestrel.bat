@@ -1,5 +1,5 @@
 @echo off
-rem AgentBot launcher — PySide6 GUI (agent_gui_qt.py).
+rem Kestrel launcher — PySide6 GUI (agent_gui_qt.py).
 rem Pin this file to the taskbar if you want a one-click start.
 setlocal
 set "PYW=C:\Users\USER\.pyenv\pyenv-win\versions\3.11.9\pythonw.exe"

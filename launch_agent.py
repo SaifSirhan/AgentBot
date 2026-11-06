@@ -16,7 +16,7 @@ HERE        = os.path.dirname(sys.executable if getattr(sys, "frozen", False)
 CONFIG      = os.path.join(HERE, "agentbot_launcher.json")
 LOG         = os.path.join(tempfile.gettempdir(), "agentbot_launcher.log")
 CHILD_LOG   = os.path.join(tempfile.gettempdir(), "agentbot_child.log")
-APP_ID      = "AgentBot.Local.1"
+APP_ID      = "Kestrel.Local.1"
 
 DEFAULT_SCRIPT = r"C:\Users\USER\AgentBot\agent_gui_qt.py"
 
@@ -142,7 +142,7 @@ def _err(msg):
     try:
         import tkinter as tk, tkinter.messagebox as mb
         r = tk.Tk(); r.withdraw()
-        mb.showerror("AgentBot Launcher", msg)
+        mb.showerror("Kestrel Launcher", msg)
         r.destroy()
     except Exception:
         log("dialog failed: " + traceback.format_exc())

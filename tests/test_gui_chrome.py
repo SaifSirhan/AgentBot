@@ -48,6 +48,14 @@ class TitleBarPresenceTests(unittest.TestCase):
         self.window.close()
         self.app.processEvents()
 
+    def test_brand_and_callsign_survive_status_changes(self):
+        self.assertEqual(self.window.windowTitle(), "KESTREL")
+        self.assertEqual(self.window.prompt_prefix.text(), "root@vex:~# ")
+        self.window.set_status("Thinking…", busy=True)
+        self.assertEqual(self.window.windowTitle(), "KESTREL — Thinking…")
+        self.window.set_status("")
+        self.assertEqual(self.window.windowTitle(), "KESTREL")
+
     def test_bar_exists_only_where_the_chrome_is_implemented(self):
         if g._FRAMELESS_SUPPORTED:
             self.assertIsInstance(self.window._title_bar, g.TitleBar)

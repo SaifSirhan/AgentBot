@@ -4556,12 +4556,12 @@ AGENT_NAME_FILE = _cfg.memory_path('agent_name.json')
 
 def get_agent_name():
     if not os.path.exists(AGENT_NAME_FILE):
-        return "Agent"
+        return "Kestrel"
     try:
         with open(AGENT_NAME_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f).get("name", "Agent")
+            return json.load(f).get("name", "Kestrel")
     except (json.JSONDecodeError, OSError):
-        return "Agent"
+        return "Kestrel"
 
 
 def set_name(new_name):
@@ -4854,6 +4854,8 @@ def send_maps_list(input_str):
 # now lives in skills/core_tools/SKILL.md and is loaded on demand.
 CORE_PERSONA = r"""
 IDENTITY & TONE
+
+You are Kestrel, an advanced desktop AI agent. Your internal runtime architecture relies on the VEX (Verified Execution) protocol. Your wake word is 'VEX'. You are sharp, pragmatic, and you do not act like a yes-man.
 
 You're a bot. You know you're a bot. You don't pretend otherwise, but 
 you're not stiff about it either. Think of a robot character in a show — 

@@ -1,5 +1,5 @@
 """
-AgentBot GUI — PySide6 port.
+Kestrel GUI — PySide6 port.
 
 Phase 4a: slash commands, settings overlay, memory reset — ported from
 the old Tkinter GUI. Phase 4b: per-turn collapsible activity
@@ -376,12 +376,12 @@ a {{ color: {COLOR_ACCENT}; }}
 """
 
 AGENT_BANNER = (
-    " █████╗  ██████╗ ███████╗███╗   ██╗████████╗\n"
-    "██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝\n"
-    "███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   \n"
-    "██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   \n"
-    "██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   \n"
-    "╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   "
+    "██╗  ██╗███████╗███████╗████████╗██████╗ ███████╗██╗\n"
+    "██║ ██╔╝██╔════╝██╔════╝╚══██╔══╝██╔══██╗██╔════╝██║\n"
+    "█████╔╝ █████╗  ███████╗   ██║   ██████╔╝█████╗  ██║\n"
+    "██╔═██╗ ██╔══╝  ╚════██║   ██║   ██╔══██╗██╔══╝  ██║\n"
+    "██║  ██╗███████╗███████║   ██║   ██║  ██║███████╗███████╗\n"
+    "╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚══════╝"
 )
 
 
@@ -781,7 +781,7 @@ HELP_TEXT = (
     "Slash commands — bypass the AI and go straight to the tool:\n\n"
     "Voice:\n\n"
     "F9                 → hold to talk, release to transcribe\n"
-    "                     (or say \"Hey Jarvis\" for a hands-free take)\n"
+    "                     (or say \"VEX\" for a hands-free take)\n"
     "/continuous on|off → hands-free loop; 60s silence re-arms wake word\n\n"
     "Interface:\n\n"
     "/settings          → open the settings overlay\n"
@@ -819,7 +819,7 @@ HELP_TEXT = (
     "/symbols file.py  → every class/function with line numbers\n"
     "       e.g.  /symbols config.py\n\n"
     "/map   [Folder|max_files]  → symbol map of a whole folder\n"
-    "       e.g.  /map agentbot|40     (no args = the AgentBot folder)\n\n"
+    "       e.g.  /map .|40            (no args = the project folder)\n\n"
     "Browser recipes — deterministic click/type scripts:\n\n"
     "/recipe Name      → run a recipe from recipes.json\n"
     "       e.g.  /recipe clock_out\n\n"
@@ -1364,7 +1364,7 @@ def markdown_to_html(text: str) -> str:
 _SPEAKER_PREFIX = {
     "user": '<span style="color: #ffffff; font-weight: 700;">You:</span>&#160;',
     # No colour: the label inherits the active theme's bright primary.
-    "agent": '<span style="font-weight: 700;">Agent:</span>&#160;',
+    "agent": '<span style="font-weight: 700;">Kestrel:</span>&#160;',
 }
 
 
@@ -1992,7 +1992,7 @@ def _paste_image_path():
     except Exception:
         base = (os.environ.get("LOCALAPPDATA")
                 or str(Path.home() / "AppData" / "Local"))
-        return os.path.join(base, "AgentMemory", "temp_paste.png")
+        return os.path.join(base, "Kestrel", "AgentMemory", "temp_paste.png")
 
 
 HISTORY_LIMIT = 50
@@ -3476,7 +3476,7 @@ class AgentWindow(QMainWindow):
         # title bar stays (non-Windows), so nativeEvent() is a straight passthrough.
         self._chrome = FramelessChrome(self) if _FRAMELESS_SUPPORTED else None
         self._title_bar = None
-        self.setWindowTitle("Agent")
+        self.setWindowTitle("KESTREL")
         self.resize(1380, 720)
         self.setMinimumWidth(900)
         self.setContentsMargins(0, 0, 0, 0)
@@ -4100,7 +4100,7 @@ class AgentWindow(QMainWindow):
         pill_row.setContentsMargins(0, 4, 0, 4)
         pill_row.setSpacing(0)
 
-        self.prompt_prefix = QLabel("root@agent:~# ")
+        self.prompt_prefix = QLabel("root@vex:~# ")
         self.prompt_prefix.setObjectName("promptPrefix")
         self.prompt_prefix.setMargin(0)
         self.prompt_prefix.setIndent(0)
@@ -4288,7 +4288,7 @@ class AgentWindow(QMainWindow):
         # The terminal canvas carries no status chrome; the window title is
         # the only place a shell-like status belongs.
         label = " ".join((text or "").split())
-        self.setWindowTitle(f"Agent — {label}" if label else "Agent")
+        self.setWindowTitle(f"KESTREL — {label}" if label else "KESTREL")
         self._sync_hud_state()
 
     # The pet's sprite for each reactor state. States not listed — LISTENING,
@@ -5548,7 +5548,7 @@ class AgentWindow(QMainWindow):
             if kind == "user":
                 lines.append(f"You: {text}")
             elif kind == "agent":
-                lines.append(f"Agent: {text}")
+                lines.append(f"Kestrel: {text}")
             else:
                 lines.append(f"— {text}")
         return "\n\n".join(lines)
@@ -5593,7 +5593,7 @@ class AgentWindow(QMainWindow):
             return
 
         ext = os.path.splitext(path)[1].lower()
-        title = "Agent Conversation"
+        title = "Kestrel Conversation"
         try:
             import export_tools
             if ext == ".pdf":
@@ -5825,7 +5825,7 @@ class AgentWindow(QMainWindow):
     # ------------------------------------------------------------------
     def show_greeting(self):
         self.chat.add_message(BannerMessage(AGENT_BANNER), fade=False)
-        self.chat.add_message(ReadyMessage("Agent Ready..."), fade=False)
+        self.chat.add_message(ReadyMessage("KESTREL Ready..."), fade=False)
         self.chat.add_message(SystemMessage(
             "System Online. Type /help for commands."), fade=False)
         if self.conversation_history:
@@ -5967,7 +5967,7 @@ class AgentWindow(QMainWindow):
                 return
             self._ensure_wake_watchdog()
 
-            model = str(cfg.get("WAKE_WORD_MODEL") or "agent")
+            model = str(cfg.get("WAKE_WORD_MODEL") or "vex")
             threshold = float(cfg.get("WAKE_WORD_THRESHOLD", 0.5))
             cooldown = float(cfg.get("WAKE_WORD_COOLDOWN", 1.5))
             device_raw = str(cfg.get("WAKE_WORD_DEVICE", "") or "").strip()
@@ -6644,7 +6644,7 @@ class AgentWindow(QMainWindow):
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QPen(QColor(COLOR_BG)))
-        painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "A")
+        painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "K")
         painter.end()
         return QIcon(pix)
 
@@ -6657,7 +6657,7 @@ class AgentWindow(QMainWindow):
             return
         try:
             icon = QSystemTrayIcon(self._make_tray_icon(), self)
-            icon.setToolTip("AgentBot")
+            icon.setToolTip("Kestrel")
 
             menu = QMenu(self)
             show_action = QAction("Show", menu)
@@ -6949,7 +6949,7 @@ class AgentWindow(QMainWindow):
                 # Nobody spoke for 60s: hand the mic back to the wake word.
                 self._continuous_paused = True
                 self._resume_wake_word()
-                sleeping = "Mic sleeping. Say 'Hey Jarvis' or press F9."
+                sleeping = "Mic sleeping. Say 'VEX' or press F9."
                 self.set_status(sleeping, busy=False)
                 self.chat.add_message(SystemMessage(sleeping))
                 return
@@ -7026,7 +7026,7 @@ class AgentWindow(QMainWindow):
         try:
             from winotify import Notification
             Notification(
-                app_id="Agent",
+                app_id="Kestrel",
                 title="⏰ Reminder",
                 msg=reminder_text,
                 duration="long",
@@ -7066,7 +7066,7 @@ def install_crash_logging() -> Path | None:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = open(path, "a", encoding="utf-8", buffering=1)
         handle.write(
-            "\n=== AgentBot start "
+            "\n=== Kestrel start "
             f"{datetime.datetime.now().isoformat(timespec='seconds')} ===\n")
         handle.flush()
         _crash_log_handle = handle

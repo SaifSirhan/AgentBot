@@ -40,7 +40,7 @@ class CrashLoggingTests(unittest.TestCase):
                     ))
                     gui._crash_log_handle.flush()
                     text = path.read_text(encoding="utf-8")
-                self.assertIn("=== AgentBot start", text)
+                self.assertIn("=== Kestrel start", text)
                 self.assertIn("main boom", text)
                 self.assertIn("thread boom", text)
                 self.assertIn("worker-test", text)
