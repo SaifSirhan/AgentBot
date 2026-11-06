@@ -781,8 +781,8 @@ HELP_TEXT = (
     "Slash commands — bypass the AI and go straight to the tool:\n\n"
     "Voice:\n\n"
     "F9                 → hold to talk, release to transcribe\n"
-    "                     (or say \"VEX\" for a hands-free take)\n"
-    "/continuous on|off → hands-free loop; 60s silence re-arms wake word\n\n"
+    "                     (wake word off until a VEX model is installed)\n"
+    "/continuous on|off → hands-free loop; 60s silence pauses it\n\n"
     "Interface:\n\n"
     "/settings          → open the settings overlay\n"
     "/memories          → manage saved memories (global + project)\n"
@@ -1994,6 +1994,10 @@ def _paste_image_path():
                 or str(Path.home() / "AppData" / "Local"))
         return os.path.join(base, "Kestrel", "AgentMemory", "temp_paste.png")
 
+
+# No VEX ONNX model is trained yet. F9 push-to-talk stays fully functional;
+# flip this only once a verified model ships.
+WAKE_WORD_STARTUP_ENABLED = False
 
 HISTORY_LIMIT = 50
 
@@ -5945,6 +5949,12 @@ class AgentWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _start_wake_word_service(self):
         """Start the openWakeWord listener when WAKE_WORD_ENABLED is true."""
+        if not WAKE_WORD_STARTUP_ENABLED:
+            if not self._wake_watchdog_disabled:
+                self._wake_watchdog_disabled = True
+                print("[wake] startup disabled pending a trained VEX model; "
+                      "F9 push-to-talk is available")
+            return
         if not self._wake_ready:
             self.set_status(
                 "Wake word unavailable" if self._wake_failed
@@ -6171,7 +6181,7 @@ class AgentWindow(QMainWindow):
             self.chat.add_message(AssistantMessage(
                 "Usage: /continuous on|off\n"
                 "ON keeps the mic open after each reply; 60s of silence "
-                "returns to the wake word."))
+                "pauses it. Press F9 to resume."))
             return
 
         self._continuous_enabled = mode == "on"
@@ -6184,20 +6194,20 @@ class AgentWindow(QMainWindow):
 
         if self._continuous_enabled:
             self.chat.add_message(SystemMessage(
-                "Continuous listening ON \u2014 speak without the wake word. "
-                "60s of silence returns to the wake word."))
+                "Continuous listening ON \u2014 speak without pressing F9. "
+                "60s of silence pauses it."))
             self._schedule_continuous_listen()
         else:
             self._cancel_continuous_listening()
             self.chat.add_message(SystemMessage(
-                "Continuous listening OFF \u2014 wake word required."))
+                "Continuous listening OFF \u2014 press F9 to talk."))
 
     def _start_continuous_if_configured(self):
         if not self._continuous_enabled:
             return
         self.chat.add_message(SystemMessage(
-            "Continuous listening ON \u2014 speak without the wake word. "
-            "60s of silence returns to the wake word."))
+            "Continuous listening ON \u2014 speak without pressing F9. "
+            "60s of silence pauses it."))
         self._schedule_continuous_listen(1000)
 
     def _schedule_continuous_listen(self, delay_ms=300):
@@ -6818,8 +6828,8 @@ class AgentWindow(QMainWindow):
         if not self._voice_loading_notice_shown:
             self._voice_loading_notice_shown = True
             self.chat.add_message(SystemMessage(
-                "Voice loading… F9 and the wake word activate once the "
-                "speech models finish importing."))
+                "Voice loading… F9 activates once the speech models "
+                "finish importing."))
 
     def _on_hotkey_changed(self, pressed):
         """GUI-thread slot for F9 press/release."""
@@ -6949,7 +6959,7 @@ class AgentWindow(QMainWindow):
                 # Nobody spoke for 60s: hand the mic back to the wake word.
                 self._continuous_paused = True
                 self._resume_wake_word()
-                sleeping = "Mic sleeping. Say 'VEX' or press F9."
+                sleeping = "Mic sleeping. Press F9 to talk."
                 self.set_status(sleeping, busy=False)
                 self.chat.add_message(SystemMessage(sleeping))
                 return

@@ -55,10 +55,9 @@ DEFAULTS = {
 "BROWSER_APPROVAL_TIMEOUT": 120,
 "BROWSER_VISION_ENABLED": False,
 "BROWSER_VISION_MODEL": "deepseek-flash",
-# Option 3 — wake word. Off by default; enable only after installing
-# openwakeword/pyaudio and providing a custom "vex" model (none is
-# pre-trained).
-    "WAKE_WORD_ENABLED": True,
+# Option 3 — wake word. Off until a VEX ONNX model is trained; F9
+# push-to-talk remains available.
+    "WAKE_WORD_ENABLED": False,
     "WAKE_WORD_MODEL": "vex",
     "WAKE_WORD_THRESHOLD": 0.5,
     "WAKE_WORD_DEVICE": "",

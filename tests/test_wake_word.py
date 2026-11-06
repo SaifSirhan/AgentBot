@@ -357,6 +357,26 @@ class WakeWordTests(unittest.TestCase):
             with self.assertRaisesRegex(wake_word.WakeWordError, "No 'vex'"):
                 wake_word.resolve_model("vex")
 
+    def test_broken_model_reports_error_without_escaping(self):
+        errors = []
+
+        class BrokenModel:
+            def __init__(self, **_kwargs):
+                raise RuntimeError("bad ONNX model: input shape mismatch")
+
+        with mock.patch.object(
+                wake_word, "_load_dependencies",
+                lambda: (FakePyAudioModule(self.audio), np, BrokenModel)):
+            service = self.make_service(lambda score: None,
+                                        on_error=errors.append)
+            service.start()
+            try:
+                self.assertTrue(self.wait_for(lambda: bool(errors)))
+            finally:
+                service.stop()
+        self.assertIn("input shape mismatch", errors[0])
+        self.assertFalse(service.is_running())
+
     def test_pretrained_name_passes_through(self):
         self.assertEqual(wake_word.resolve_model("hey_jarvis"), "hey_jarvis")
 

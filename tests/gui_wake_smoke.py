@@ -36,13 +36,29 @@ with mock.patch.object(g, "read_config_file_raw", return_value={
     w._start_wake_word_service()
 assert w._wake_word_service is None
 
-# Enabled but no custom "agent" model: clear error in the transcript.
+# Startup is hard-gated off until a VEX model exists.
 tmp = Path(tempfile.mkdtemp(prefix="wake_gui_"))
+w._wake_watchdog_disabled = False
+with mock.patch.object(g, "WAKE_WORD_STARTUP_ENABLED", False), \
+        mock.patch.object(g, "read_config_file_raw", return_value={
+            "WAKE_WORD_ENABLED": True,
+            "WAKE_WORD_MODEL": "vex",
+        }):
+    w._start_wake_word_service()
+assert w._wake_word_service is None
+assert w._wake_watchdog_disabled
+
+# Even with the safety gate lifted, a missing VEX model reports cleanly.
+w._wake_ready = True
+fake_voice = mock.Mock()
+fake_voice.resolve_input_device.return_value = (0, "Fake Microphone")
 before = len(w.chat.chat_log)
-with mock.patch.object(g, "read_config_file_raw", return_value={
-    "WAKE_WORD_ENABLED": True,
-    "WAKE_WORD_MODEL": "agent",
-}), mock.patch.object(wake_word, "MODEL_DIRS", (tmp / "empty",)):
+with mock.patch.object(g, "WAKE_WORD_STARTUP_ENABLED", True), \
+        mock.patch.object(g, "get_voice", return_value=fake_voice), \
+        mock.patch.object(g, "read_config_file_raw", return_value={
+            "WAKE_WORD_ENABLED": True,
+            "WAKE_WORD_MODEL": "vex",
+        }), mock.patch.object(wake_word, "MODEL_DIRS", (tmp / "empty",)):
     w._start_wake_word_service()
 
 assert w._wake_word_service is None

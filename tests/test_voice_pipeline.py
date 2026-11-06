@@ -31,6 +31,9 @@ class ConfigVoiceDefaultsTests(unittest.TestCase):
     def test_wake_record_window_is_three_and_a_half_seconds(self):
         self.assertEqual(config.DEFAULTS["WAKE_RECORD_MS"], 3500)
 
+    def test_wake_word_is_off_by_default_until_a_model_is_trained(self):
+        self.assertIs(config.DEFAULTS["WAKE_WORD_ENABLED"], False)
+
 
 class VadTimeoutTests(unittest.TestCase):
     def setUp(self):
@@ -573,7 +576,7 @@ class GuiVoicePipelineTests(unittest.TestCase):
             for label in notice.findChildren(g.QLabel)
         ]
         self.assertTrue(
-            any("Mic sleeping. Say" in text and "or press F9." in text
+            any("Mic sleeping. Press F9 to talk." in text
                 for text in labels), labels)
 
     def test_continuous_transcript_sends_without_resuming_wake(self):
@@ -694,6 +697,14 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self.assertEqual(service.stopped, 1)
         start.assert_called_once()
         self.assertIsNone(self.window._wake_word_service)
+
+    def test_f9_records_when_wake_startup_is_disabled(self):
+        self.window._wake_word_service = None
+        self.window._wake_watchdog_disabled = True
+        with mock.patch.object(
+                self.window, "_start_recording") as start:
+            self.window._on_hotkey_changed(True)
+        start.assert_called_once()
 
     def test_f9_before_voice_ready_shows_loading_without_recording(self):
         self.window._voice_ready = False
@@ -841,6 +852,60 @@ class GuiVoicePipelineTests(unittest.TestCase):
             self.window._on_preload_ready("voice")
         start.assert_called_once()
 
+    def test_wake_startup_stays_off_even_when_config_enables_it(self):
+        fake_wake = mock.Mock()
+        fake_wake.WakeWordService.side_effect = AssertionError(
+            "the wake listener must stay off until a VEX model exists")
+        self.window._wake_word_service = None
+        self.window._wake_watchdog_disabled = False
+        with mock.patch.dict(sys.modules, {"wake_word": fake_wake}), \
+                mock.patch.object(
+                    g, "read_config_file_raw",
+                    return_value={"WAKE_WORD_ENABLED": True}):
+            self.window._start_wake_word_service()
+        fake_wake.WakeWordService.assert_not_called()
+        self.assertIsNone(self.window._wake_word_service)
+        self.assertTrue(self.window._wake_watchdog_disabled)
+
+    def test_missing_vex_model_reports_without_raising(self):
+        import tempfile
+        import wake_word
+        empty = tempfile.TemporaryDirectory(prefix="no_vex_models_")
+        self.addCleanup(empty.cleanup)
+        fake_voice = mock.Mock()
+        fake_voice.resolve_input_device.return_value = (3, "USB Microphone")
+        with mock.patch.object(g, "WAKE_WORD_STARTUP_ENABLED", True), \
+                mock.patch.object(g, "get_voice", return_value=fake_voice), \
+                mock.patch.object(
+                    g, "read_config_file_raw",
+                    return_value={"WAKE_WORD_ENABLED": True,
+                                  "WAKE_WORD_MODEL": "vex"}), \
+                mock.patch.object(wake_word, "MODEL_DIRS", (Path(empty.name),)):
+            self.window._start_wake_word_service()
+        self.assertIsNone(self.window._wake_word_service)
+        texts = [text for _kind, text in self.window.chat.chat_log]
+        self.assertTrue(any("Wake word disabled" in text for text in texts),
+                        texts)
+
+    def test_mismatched_vex_model_reports_without_raising(self):
+        fake_wake = mock.Mock()
+        fake_wake.WakeWordService.side_effect = RuntimeError(
+            "bad ONNX model: input shape mismatch")
+        fake_voice = mock.Mock()
+        fake_voice.resolve_input_device.return_value = (3, "USB Microphone")
+        with mock.patch.object(g, "WAKE_WORD_STARTUP_ENABLED", True), \
+                mock.patch.dict(sys.modules, {"wake_word": fake_wake}), \
+                mock.patch.object(g, "get_voice", return_value=fake_voice), \
+                mock.patch.object(
+                    g, "read_config_file_raw",
+                    return_value={"WAKE_WORD_ENABLED": True,
+                                  "WAKE_WORD_MODEL": "vex"}):
+            self.window._start_wake_word_service()
+        self.assertIsNone(self.window._wake_word_service)
+        texts = [text for _kind, text in self.window.chat.chat_log]
+        self.assertTrue(any("input shape mismatch" in text for text in texts),
+                        texts)
+
     def test_wake_listener_uses_the_resolved_stt_microphone(self):
         captured = {}
 
@@ -858,7 +923,8 @@ class GuiVoicePipelineTests(unittest.TestCase):
         fake_voice = mock.Mock()
         fake_voice.resolve_input_device.return_value = (3, "USB Microphone")
         self.window._wake_word_service = None
-        with mock.patch.dict(sys.modules, {"wake_word": fake_wake}), \
+        with mock.patch.object(g, "WAKE_WORD_STARTUP_ENABLED", True), \
+                mock.patch.dict(sys.modules, {"wake_word": fake_wake}), \
                 mock.patch.object(
                     g, "get_voice", return_value=fake_voice), \
                 mock.patch.object(

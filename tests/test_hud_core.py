@@ -1782,7 +1782,7 @@ class CoreCardIntegrationTests(unittest.TestCase):
                         self.assertEqual(pet.pet_state, "thinking")
 
                 window.set_status(
-                    "Mic sleeping. Say 'VEX' or press F9.", busy=False)
+                    "Mic sleeping. Press F9 to talk.", busy=False)
                 self.assertEqual(pet.pet_state, "idle",
                                  "the mic timeout must leave the pet awake")
                 self.assertEqual(hud.state, "IDLE")
@@ -1836,7 +1836,7 @@ class CoreCardIntegrationTests(unittest.TestCase):
             window._on_voice_event("continuous:idle:")
             self.assertEqual(
                 window.windowTitle(),
-                "KESTREL — Mic sleeping. Say 'VEX' or press F9.")
+                "KESTREL — Mic sleeping. Press F9 to talk.")
             self.assertEqual(hud.state, "IDLE")
 
             window._recording = False
