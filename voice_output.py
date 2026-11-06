@@ -17,6 +17,7 @@ import threading
 import time
 import warnings
 import os
+import sys
 import numpy as np
 
 from audio_bus import audio_bus
@@ -327,6 +328,30 @@ def _force_cached_downloads():
 
 
 # =============================================================
+# Import guard
+# =============================================================
+# kokoro's package __init__ registers its loguru sink with sys.stderr at import
+# time. Under pythonw.exe sys.stderr is None, and loguru rejects a None sink
+# with "Cannot log to objects of type 'NoneType'" before KPipeline exists.
+_kokoro_log_sink = None
+
+
+def _import_kokoro_pipeline():
+    global _kokoro_log_sink
+    if sys.stderr is not None:
+        from kokoro import KPipeline
+        return KPipeline
+    if _kokoro_log_sink is None:
+        _kokoro_log_sink = open(os.devnull, "w", encoding="utf-8")
+    sys.stderr = _kokoro_log_sink
+    try:
+        from kokoro import KPipeline
+    finally:
+        sys.stderr = None
+    return KPipeline
+
+
+# =============================================================
 # Pipeline cache
 # =============================================================
 _pipelines = {}
@@ -343,7 +368,7 @@ def _get_pipeline(lang_code):
         if cached_pipeline is not None:
             return cached_pipeline
         try:
-            from kokoro import KPipeline
+            KPipeline = _import_kokoro_pipeline()
             device = "cpu"
             try:
                 import torch

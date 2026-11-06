@@ -5,6 +5,7 @@ Run: python -m unittest tests.test_tts_speech -v
 import queue
 import sys
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -313,6 +314,42 @@ class MaxCharsSpeechTests(unittest.TestCase):
         self.assertGreaterEqual(len(spoken), 30, "threw away too much")
         following = text[len(spoken):len(spoken) + 1]
         self.assertIn(following, (" ", "."), "sliced through a word")
+
+
+class KokoroImportGuardTests(unittest.TestCase):
+    """kokoro registers its loguru sink with sys.stderr while importing.
+
+    Under pythonw.exe sys.stderr is None, which loguru rejects. The guard must
+    supply a real sink for the import and restore the original state.
+    """
+
+    def test_import_gets_a_real_stderr_under_pythonw(self):
+        sentinel = object()
+        seen = []
+
+        class RecordingKokoro(types.ModuleType):
+            def __getattr__(self, name):
+                if name == "KPipeline":
+                    seen.append(sys.stderr)
+                    return sentinel
+                raise AttributeError(name)
+
+        original_stderr = sys.stderr
+        with mock.patch.dict(sys.modules, {"kokoro": RecordingKokoro("kokoro")}):
+            sys.stderr = None
+            try:
+                self.assertIs(voice_output._import_kokoro_pipeline(), sentinel)
+                self.assertEqual(len(seen), 1)
+                self.assertIsNotNone(seen[0],
+                                     "kokoro must see a real stderr sink")
+                self.assertIsNone(sys.stderr,
+                                  "the guard must restore sys.stderr")
+            finally:
+                sys.stderr = original_stderr
+                sink = voice_output._kokoro_log_sink
+                voice_output._kokoro_log_sink = None
+                if sink is not None:
+                    sink.close()
 
 
 if __name__ == "__main__":

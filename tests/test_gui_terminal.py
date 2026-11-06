@@ -66,6 +66,18 @@ class TerminalChromeTests(unittest.TestCase):
             (radius.group(1).strip() if radius else "0"), "0px",
             "the rounded pill must be flattened")
 
+    def test_prompt_row_has_no_divider(self):
+        body = rule_body("QFrame#promptRow")
+        self.assertNotRegex(body, r"\bborder-top\s*:")
+        self.assertNotRegex(body, r"\boutline\s*:")
+        self.assertIn("border: none", body)
+        self.assertIn("background-color: transparent", body,
+                      "the prompt must blend into the canvas")
+        self.assertEqual(rule_body("QFrame#promptRow:focus"), "",
+                         "focus must not reintroduce a top border")
+        self.assertEqual(rule_body("QFrame#promptRow:hover"), "",
+                         "hover must not reintroduce a top border")
+
     def test_canvas_is_matte_black(self):
         self.assertEqual(g.COLOR_BG.upper(), "#0B0E13")
         self.assertIn("#0B0E13", rule_body("QMainWindow, QDialog"))

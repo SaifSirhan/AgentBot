@@ -121,18 +121,13 @@ QPlainTextEdit:focus, QLineEdit:focus {
     border: 1px solid #00E5FF;
 }
 
-/* Prompt: one lifted pill holding the shell prefix, the editor and the
-   trailing buttons. The editor itself is chrome-less inside it, so the pill
-   reads as a single control instead of three boxed widgets. */
+/* Prompt: one full-width line holding the shell prefix and the editor. It
+   paints nothing, so the terminal reads as one flat canvas with no divider
+   above the input. */
 QFrame#promptRow {
     background-color: transparent;
     border: none;
-    border-top: 1px solid #263041;
     border-radius: 0px;
-}
-
-QFrame#promptRow:focus, QFrame#promptRow:hover {
-    border-top-color: #00E5FF;
 }
 
 QLabel#promptPrefix {
