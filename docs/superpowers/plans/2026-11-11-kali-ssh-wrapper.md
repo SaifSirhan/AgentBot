@@ -38,6 +38,8 @@
 
 Create `kali/tests/test_kestrel_run.py`:
 
+> **Superseded by the hardening amendment (fix round 1):** this block is the original brief; `kali/kestrel_run.py` and `kali/tests/test_kestrel_run.py` on branch `kali-ssh-wrapper` are authoritative.
+
 ```python
 import json
 import os
@@ -375,6 +377,8 @@ Expected: `ModuleNotFoundError: No module named 'kestrel_run'`.
 - [ ] **Step 3: Write the minimal wrapper**
 
 Create `kali/kestrel_run.py`:
+
+> **Superseded by the hardening amendment (fix round 1):** this block is the original brief; `kali/kestrel_run.py` on branch `kali-ssh-wrapper` is authoritative.
 
 ```python
 #!/usr/bin/env python3
@@ -1024,6 +1028,57 @@ Expected: all wrapper tests pass on Windows or Kali.
 git add kali/kestrel_run.py kali/tests/test_kestrel_run.py
 git commit -m "feat(kali): add policy-enforced SSH wrapper"
 ```
+
+#### Hardening amendment (fix round 1)
+
+Review found the brief's mechanism bypassable; the controller ruled that the
+spec's default-deny guarantee outranks it. The two code blocks above are
+superseded — `kali/kestrel_run.py` on this branch is authoritative. The
+hardened policy (commit `fix(kali): fail closed on unvalidated tokens, paths,
+and scripts`):
+
+- **R1 — Fail-closed token walk.** Every token is accounted for: a bare token
+  must parse as a target or be the value of a known value-taking flag
+  (`VALUE_FLAGS`), else refusal — no silent drops. `--flag=value` and bundled
+  short flags are expanded and checked; unknown flags stay permitted but
+  their values must still pass R2/R3. Tokens with `,`, `*`, or `_` are
+  refused; one trailing dot is stripped from an FQDN before matching.
+- **R2 — Structural path confinement.** Any path-like value (write flags and
+  unknown flags alike) must resolve under `OUTPUT_ROOT` after symlink
+  resolution; the root itself is refused. Known read flags
+  (ffuf/gobuster/feroxbuster `-w`/`--wordlist`, openssl
+  `-in`/`-CAfile`/`-cert`/`-key`/`-untrusted`) may also resolve under
+  `/usr/share/wordlists`, `/usr/share/seclists`, `/usr/share/nmap`,
+  `/usr/share/whatweb`, `/etc/ssl/certs` — nothing else. The write-flag table
+  stays as an extra layer and gains curl `-D`/`--dump-header`,
+  `-c`/`--cookie-jar`, `--trace`, `--trace-ascii`, `--stderr` and openssl
+  `-sess_out`.
+- **R3 — URL rules.** Only `http`/`https` URLs with a hostname are targets.
+  Redirect following is denied (curl `-L`/`--location`/`--location-trusted`,
+  ffuf `-r`, feroxbuster `-r`/`--redirects`, nuclei `-follow-redirects`,
+  whatweb `--follow-redirect`), as are random/list inputs (nmap `-iR`,
+  `--excludefile`, `-D` decoys; dig `-f`; masscan `-iL`/`--excludefile`) on
+  top of the existing `-iL`/`-l`/`-request`/`-K` denials.
+- **R4 — NSE allowlist.** `--script` accepts a comma-separated list where
+  every name is a built-in name (no `*`, no path) and is either a category
+  (`default`, `safe`, `version`, `discovery`) or on the fixed `NSE_ALLOWLIST`
+  (banner, http-title, http-headers, http-server-header, http-robots.txt,
+  http-favicon, ssl-cert, ssl-enum-ciphers, ssh-hostkey, ssh2-enum-algos,
+  ftp-anon, smb-os-discovery, smb-protocols, dns-service-discovery,
+  mysql-info). `DANGEROUS_NSE` stays as a second layer; `--script-args`
+  values are path-confined and scope-checked (`newtargets` refused).
+- **R5 — No environment configuration.** `KESTREL_SCOPE`/`KESTREL_AUDIT`/
+  `KESTREL_OUTPUT` reads are deleted; `DEFAULT_SCOPE`, `DEFAULT_AUDIT`,
+  `OUTPUT_ROOT` are constants. Tests patch module attributes and pass
+  `main(scope_path=..., audit_path=...)`.
+- **R6 — Control characters.** NUL and every C0 control byte are refused in
+  any argv token, alongside the existing shell-metacharacter denial.
+- **R7 — OUTPUT_ROOT sanity.** Refuse to run if `OUTPUT_ROOT` is a symlink
+  or, on POSIX, exists with a different owner or a mode other than `0700`.
+
+Test count: 63 (33 original + 30 hardening tests), green on Windows including
+`-W error::ResourceWarning`; the controller probe's 19 bypass cases are all
+DENIED and its three controls are unchanged.
 
 ---
 

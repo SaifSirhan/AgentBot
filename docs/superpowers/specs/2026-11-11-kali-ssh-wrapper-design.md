@@ -291,17 +291,32 @@ Kestrel cannot write it. The user edits it on Kali for phase 1.
 - `allow_public` defaults to false. If false, public IPs and domains are denied
   even if they appear in the lists.
 - Localhost and link-local addresses are denied unless explicitly listed.
-- Target extraction is flag-aware and binary-aware. Known file-argument flags
-  (`-w`, `--wordlist`, `-in`, `-CAfile`, and the output flags in §7.3) are
-  treated as paths; `-T` is timing for nmap and upload for curl. Every other
-  IP, CIDR, URL host, `host:port` value, `@resolver` token, bracketed IPv6
-  address, and hostname-like token is validated as a target even if a file
-  with the same name exists. A command with no target is allowed only for a
-  binary in the local-safe list (`searchsploit`, `openssl`; openssl `s_client`
-  still needs a validated `-connect` target).
-- Target-list and request-file flags are denied in phase 1 because they can
-  hide out-of-scope targets: `nmap -iL`, `nuclei -l`, `ffuf -request`, and
-  `curl -K`. The wrapper only accepts targets written directly in the argv.
+- Target extraction is a fail-closed, flag-aware, binary-aware walk: every
+  token must be accounted for. A bare token must parse as a target — IP,
+  CIDR, URL host, `host:port` value, `@resolver` token, bracketed IPv6
+  address, or hostname — or the request is refused; nothing is silently
+  dropped, even when a file with the same name exists. Known value-taking
+  flags consume their value, which is still checked: path-like values are
+  confined per §7.3 and target-like values are scope-checked. Unknown flags
+  stay permitted, but their values must pass the same rules. `--flag=value`
+  forms and bundled short flags (`-so`, `-sO`, `-vL`) are expanded and
+  checked the same way; `-T` is timing for nmap and upload for curl. Tokens
+  containing `,`, `*`, or `_` are not valid single targets and are refused.
+  One trailing dot is stripped from an FQDN before matching, so
+  `example.com.` is refused as public rather than dropped. Only `http` and
+  `https` URLs with a hostname are accepted as destinations. A command with
+  no target is allowed only for a binary in the local-safe list
+  (`searchsploit`, `openssl`; openssl `s_client` still needs a validated
+  `-connect` target).
+- Target-list, request-file, and random-target flags are denied in phase 1
+  because they can hide out-of-scope targets: `nmap -iL`, `-iR`,
+  `--excludefile`, and `-D` (decoys); `nuclei -l`; `ffuf -request`;
+  `curl -K`/`--config`; `dig -f`; `masscan -iL` and `--excludefile`. The
+  wrapper only accepts targets written directly in the argv.
+- The scope file, audit destination, and output root are policy constants
+  (`/etc/kestrel/scope.json`, `/var/log/kestrel/audit.jsonl`, `/tmp/kestrel`).
+  No `KESTREL_*` environment variable is read, so an SSH client cannot
+  redirect policy through `AcceptEnv`.
 
 ### 7.2 Binary allowlist and risk tiers
 
@@ -329,26 +344,48 @@ Denied outright in phase 1:
 
 - `sqlmap`: `--os-shell`, `--os-pwn`, `--os-cmd`, `--file-write`,
   `--file-dest`, `--sql-shell`
-- `nmap`: `--script` with exploitation or brute categories; `--script-args`
-  carrying shell/file writes
+- `nmap`: `--script` outside the allowlist below; `--script-args` carrying
+  shell/file writes or `newtargets`
 - `curl`: `-o` / `--output` outside `/tmp/kestrel`, `-T` / `--upload-file`
 - `nc`: `-e` / `--exec`, `-c`
 - Any argv containing `;`, `|`, `&`, `$`, backticks, newline, or redirection
-  tokens where they would imply a shell
-- Output-path flags (`nmap -oN/-oX/-oG/-oA/-oS`, the ffuf, gobuster,
-  feroxbuster, nuclei, nikto and masscan output flags, `curl -o`, whatweb
-  `--log-*`, and openssl `-out`/`-keylogfile`/`-writerand`) must resolve under
-  `/tmp/kestrel`; relative paths resolve there. `~` and `..` escapes are
-  denied.
+  tokens where they would imply a shell, and any NUL or other C0 control
+  character in any token (an embedded NUL would make `Popen` raise)
+- Path confinement is structural, not a per-flag denylist: any value that
+  looks like a filesystem path (starts with `/`, `./`, `../`, `~`, or
+  contains `/` or `\`) must resolve under `/tmp/kestrel` after symlink
+  resolution — for the output-path flags (`nmap -oN/-oX/-oG/-oA/-oS`, the
+  ffuf, gobuster, feroxbuster, nuclei, nikto and masscan output flags,
+  `curl -o`, whatweb `--log-*`, openssl `-out`/`-keylogfile`/`-writerand`,
+  plus curl `-D`/`--dump-header`, `-c`/`--cookie-jar`, `--trace`,
+  `--trace-ascii`, `--stderr` and openssl `-sess_out`) and for any unknown
+  flag alike. Relative paths resolve under the root; `~` and `..` escapes
+  and a path equal to the root itself are denied. The known read-only flags
+  (ffuf/gobuster/feroxbuster `-w`/`--wordlist`, openssl
+  `-in`/`-CAfile`/`-cert`/`-key`/`-untrusted`) may additionally resolve under
+  `/usr/share/wordlists`, `/usr/share/seclists`, `/usr/share/nmap`,
+  `/usr/share/whatweb`, `/etc/ssl/certs` — nothing else.
+- The wrapper refuses to run if `/tmp/kestrel` is a symlink or, on POSIX,
+  exists with a different owner or a mode other than `0700`.
 - `curl -O`/`--remote-name` and proxy flags (`-x`, `--proxy`, SOCKS variants,
   `--preproxy`) are denied. Proxy flags are also denied for ffuf, gobuster,
   feroxbuster, nikto, nuclei, whatweb, and openssl's `s_client`.
-- `nmap --script` accepts only comma-separated built-in names or categories;
-  `exploit`, `brute`, `dos`, `malware`, `fuzzer`, `external`, and `broadcast`
-  are denied. `--datadir`, `--script-args-file`, and `--script-updatedb` are
+- Redirect following is denied because a redirect leaves the validated
+  destination: `curl -L`/`--location`/`--location-trusted`, `ffuf -r`,
+  `gobuster -r`/`--followredirect`, `feroxbuster -r`/`--redirects`,
+  `nuclei -follow-redirects`, and `whatweb --follow-redirect`.
+- `nmap --script` accepts only a comma-separated list of built-in names: the
+  categories `default`, `safe`, `version`, `discovery`, or a fixed allowlist
+  of named safe scripts (`banner`, `http-title`, `http-headers`,
+  `http-server-header`, `http-robots.txt`, `http-favicon`, `ssl-cert`,
+  `ssl-enum-ciphers`, `ssh-hostkey`, `ssh2-enum-algos`, `ftp-anon`,
+  `smb-os-discovery`, `smb-protocols`, `dns-service-discovery`, `mysql-info`).
+  Wildcards (`*`), paths, and expressions are refused; the `exploit`, `brute`,
+  `dos`, `malware`, `fuzzer`, `external`, and `broadcast` denial stays as a
+  second layer. `--datadir`, `--script-args-file`, and `--script-updatedb` are
   denied because they load or write arbitrary NSE code.
 - Nuclei custom templates, workflows, code templates, and headless mode are
-  denied (`-t`, `-templates`, `-w`, `-workflow`, `-code`, `-headless`).
+  denied (`-t`, `-templates`, `-workflow`, `-code`, `-headless`).
   Whatweb custom plugins are denied.
 - `openssl` is limited to `s_client` and `x509`; `-engine` and `-provider`
   flags are denied because they load native code.
