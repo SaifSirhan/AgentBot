@@ -60,6 +60,17 @@ before installing tools.
   command="/usr/local/bin/kestrel-run",no-port-forwarding,no-agent-forwarding,no-pty,no-X11-forwarding ssh-ed25519 AAAA...
   ```
 
+- `/home/kestrel` and `~kestrel/.ssh` are root-owned (`0755`), and
+  `authorized_keys` is root-owned (`0644`). The `kestrel` account can read the
+  public key but cannot rewrite its own SSH state, so an allowlisted tool that
+  writes a file cannot replace the forced command.
+- The home directory has no user-writable shell startup files
+  (`~/.bashrc`, `~/.profile`, `~/.bash_logout`). SSHD runs the forced command
+  through the account's shell, so a writable startup file would execute code
+  before the wrapper.
+- Tool steps run with `HOME` and the working directory set to `/tmp/kestrel`,
+  with a minimal environment (no proxy variables). Output-path flags are
+  restricted to `/tmp/kestrel`.
 - No Kestrel memory, API keys, or personal accounts on this VM.
 - A `lab` snapshot is taken before intrusive work; the user can roll back.
 
@@ -281,11 +292,13 @@ Kestrel cannot write it. The user edits it on Kali for phase 1.
   even if they appear in the lists.
 - Localhost and link-local addresses are denied unless explicitly listed.
 - Target extraction is flag-aware and binary-aware. Known file-argument flags
-  (`-w`, `--wordlist`, `-o`, `-oN`, `-oX`, and curl's upload `-T`) are treated
-  as paths; `-T` is timing for nmap and upload for curl. Every other IP, CIDR,
-  URL host, and hostname-like token is validated as a target even if a file
+  (`-w`, `--wordlist`, `-in`, `-CAfile`, and the output flags in §7.3) are
+  treated as paths; `-T` is timing for nmap and upload for curl. Every other
+  IP, CIDR, URL host, `host:port` value, `@resolver` token, bracketed IPv6
+  address, and hostname-like token is validated as a target even if a file
   with the same name exists. A command with no target is allowed only for a
-  binary in the local-safe list.
+  binary in the local-safe list (`searchsploit`, `openssl`; openssl `s_client`
+  still needs a validated `-connect` target).
 - Target-list and request-file flags are denied in phase 1 because they can
   hide out-of-scope targets: `nmap -iL`, `nuclei -l`, `ffuf -request`, and
   `curl -K`. The wrapper only accepts targets written directly in the argv.
@@ -322,6 +335,23 @@ Denied outright in phase 1:
 - `nc`: `-e` / `--exec`, `-c`
 - Any argv containing `;`, `|`, `&`, `$`, backticks, newline, or redirection
   tokens where they would imply a shell
+- Output-path flags (`nmap -oN/-oX/-oG/-oA/-oS`, the ffuf, gobuster,
+  feroxbuster, nuclei, nikto and masscan output flags, `curl -o`, whatweb
+  `--log-*`, and openssl `-out`/`-keylogfile`/`-writerand`) must resolve under
+  `/tmp/kestrel`; relative paths resolve there. `~` and `..` escapes are
+  denied.
+- `curl -O`/`--remote-name` and proxy flags (`-x`, `--proxy`, SOCKS variants,
+  `--preproxy`) are denied. Proxy flags are also denied for ffuf, gobuster,
+  feroxbuster, nikto, nuclei, whatweb, and openssl's `s_client`.
+- `nmap --script` accepts only comma-separated built-in names or categories;
+  `exploit`, `brute`, `dos`, `malware`, `fuzzer`, `external`, and `broadcast`
+  are denied. `--datadir`, `--script-args-file`, and `--script-updatedb` are
+  denied because they load or write arbitrary NSE code.
+- Nuclei custom templates, workflows, code templates, and headless mode are
+  denied (`-t`, `-templates`, `-w`, `-workflow`, `-code`, `-headless`).
+  Whatweb custom plugins are denied.
+- `openssl` is limited to `s_client` and `x509`; `-engine` and `-provider`
+  flags are denied because they load native code.
 
 The wrapper never invokes a shell, so shell metacharacters are inert; they are
 still rejected to keep plans honest and prevent confusion.
