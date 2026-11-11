@@ -1120,6 +1120,53 @@ Test count: 76 (63 + 13 round-2 tests), green on Windows including
 controls unchanged. Round-2 probe: 8/8 must-DENY cases DENIED, 11/11 must-ALLOW
 cases ALLOWED.
 
+#### Hardening amendment (fix round 3)
+
+Round 3 closes the two remaining policy defects and the execution/audit
+robustness defects deferred from rounds 1-2. Commit `fix(kali): confine @file
+values, license credentials and numbers, harden execution and audit`:
+
+- **R13 — `@file` references are confined.** A leading `@` is stripped before
+  path confinement for every path-like value, so `@/etc/passwd` can no longer
+  resolve as a relative name under `OUTPUT_ROOT`. For the curl flags that
+  really read files (`-d`, `--data`, `--data-raw`, `--data-binary`,
+  `--data-ascii`, `--data-urlencode`, `-F`, `--form`, `--form-string`) the
+  value is a file reference when it carries `@file`, `name=@file`, `name=<file`
+  or (for `--data-urlencode`, with no `=`) `name@file`; the referenced path is
+  confined and is not target-parsed. A plain `-d name=value` stays allowed, and
+  every other flag keeps R8's target-or-path rule, so no denial is weakened.
+- **R14 — credentials and numbers are licensed.** curl `-u`/`--user` accepts a
+  credential pair unless it contains `@`, `/` or a URL scheme. A flag licensed
+  as a number accepts `^\d+(\.\d+)?$` or a comma list of those, decided before
+  target parsing (a four-octet IP never matches, so `curl -m 8.8.8.8` is still
+  refused). `nmap --spoof-mac` stays unlicensed and denied.
+- **I5 — byte pipes.** `Popen` no longer uses `text=True`; the readers cap and
+  collect BYTES, `run_step` decodes once with `errors="replace"`, and the read
+  loop records any failure in the result (`read_errors`) instead of letting a
+  traceback escape the thread. Non-UTF-8 output is preserved, not dropped.
+- **I6 — one shared byte budget.** Both streams are capped per step, the total
+  budget is enforced across both streams and across steps in real bytes, cuts
+  land on UTF-8 character boundaries, and `stdout_sha256`/`stderr_sha256` are
+  computed after truncation so they hash exactly the delivered text.
+- **I7 — audit before execute, and no traceback.** An `execute_intent` record
+  is written before any step runs; an `OSError` there refuses execution with a
+  JSON error (no audit, no run). The `execute` result record follows, the
+  `check` record is unchanged, `mode` defaults to `check`, the protocol version
+  check uses `type(v) is int` (so `true` and `1.0` are refused), `run_steps`
+  stops once the total deadline passes instead of granting every remaining
+  step 1s, the post-kill wait is bounded, and `main` has a catch-all that emits
+  a JSON error and a non-zero exit. An IPv6 network against an IPv4-only scope
+  is a denial, not a `TypeError`.
+- **Accepted, not fixed:** the `OUTPUT_ROOT` mkdir TOCTOU window (the installer
+  pre-creates `/tmp/kestrel` 0700 owned by `kestrel`; a local attacker on the
+  single-purpose VM is outside the threat model).
+
+Test count: 111 (76 + 35 round-3 tests), green on Windows including
+`-W error::ResourceWarning`, with the two POSIX-only ownership/mode skips.
+Round-1 probe: 19/19 DENIED, controls unchanged. Round-2 probe: 8/8 DENY,
+11/11 ALLOW. Round-3 probe: every case `ok`, non-UTF-8 output preserved as
+U+FFFD, total output within the cap, and the hash matches the delivered stdout.
+
 ---
 
 ### Task 2: Kali install assets and operator setup

@@ -82,13 +82,15 @@ writable by `kestrel`.
 Responsibilities:
 
 1. Read one JSON request from stdin.
-2. Dispatch on `mode`: `execute` (default), `scope`, or `check`.
+2. Dispatch on `mode`: `check` (default), `scope`, or `execute`. A request
+   that does not explicitly ask to execute never runs a command.
 3. Load and validate `/etc/kestrel/scope.json`.
 4. Validate every command argument against the binary allowlist and scope.
 5. Classify risk and refuse destructive flags.
-6. Execute each step with `shell=False`, a timeout, a process-group kill, and
-   an output cap.
-7. Write a JSONL audit record.
+6. Write a JSONL audit *intent* record before executing; if that write fails,
+   refuse to execute.
+7. Execute each step with `shell=False`, a timeout, a bounded process-group
+   kill, and an output cap, then write the JSONL result record.
 8. Return one JSON response on stdout.
 
 `mode: "scope"` is read-only: it returns the current scope so Kestrel can plan
@@ -265,9 +267,13 @@ Limits:
 - Maximum 8 steps per task.
 - Per-step timeout: 1–600 seconds; default 120.
 - Total timeout: 1–1800 seconds; default 300.
-- Output cap: 256 KB per stream per step; 1 MB total. Truncated output is
-  marked.
-- Steps run sequentially and stop after the first failed step.
+- Output cap: 256 KB per stream per step; 1 MB total, shared by both streams
+  and by every step and counted in bytes. Truncated output is marked, and
+  `stdout_sha256`/`stderr_sha256` are computed after truncation so they hash
+  exactly the delivered text. Pipes are read as bytes and decoded once with
+  replacement characters, so non-UTF-8 output is preserved, never dropped.
+- Steps run sequentially and stop after the first failed step or once the
+  total deadline passes; no step is started after it.
 
 ## 7. Policy
 
@@ -304,7 +310,10 @@ Kestrel cannot write it. The user edits it on Kali for phase 1.
   script names, aggression levels). A host-shaped value — one that matches
   `[A-Za-z0-9._:*@+-]+` and carries `.`, `:` or `@` — must parse as a target or
   be refused; it can never be licensed away, and a value that parses as a
-  target is always scope-checked. Comma-separated values are split and each
+  target is always scope-checked. The only values decided before target
+  parsing are the three narrow §7.3 licences that cannot name a destination:
+  a curl `@file` reference (confined as a path), a credential pair, and a
+  decimal number for a numeric flag. Comma-separated values are split and each
   part gets the same treatment, so `8.8.8.8,1.1.1.1` is refused part by part.
   Userinfo forms (`user@host`, `user:pass@host:port`) are stripped to the host,
   which is then scope-checked. Unknown flags stay permitted, but their values
@@ -385,6 +394,23 @@ Denied outright in phase 1:
   `-in`/`-CAfile`/`-cert`/`-key`/`-untrusted`) may additionally resolve under
   `/usr/share/wordlists`, `/usr/share/seclists`, `/usr/share/nmap`,
   `/usr/share/whatweb`, `/etc/ssl/certs` — nothing else.
+- A file-reference sigil is not part of a path name: a leading `@` is stripped
+  before confinement for every path-like value, so `@/etc/passwd` can never be
+  resolved as a relative name under the root. For the curl flags that really
+  read files (`-d`, `--data`, `--data-raw`, `--data-binary`, `--data-ascii`,
+  `--data-urlencode`, `-F`, `--form`, `--form-string`) the value is a file
+  reference when it carries `@file`, `name=@file`, `name=<file` or (for
+  `--data-urlencode`, with no `=`) `name@file`; the referenced path is confined
+  to `/tmp/kestrel` and is not target-parsed. A plain `-d name=value` stays
+  allowed. Elsewhere a leading `@` keeps the §7.1 target-or-path rule.
+- Two value classes are licensed before target parsing because the host-shaped
+  rule would otherwise refuse legitimate values, and neither can name a
+  destination: curl `-u`/`--user` accepts a credential pair unless it contains
+  `@`, `/` or a URL scheme; a flag licensed as a number (timeouts, delays,
+  rates, retries, thread counts, aggression levels) accepts `^\d+(\.\d+)?$` or
+  a comma list of those. A four-octet IP never matches that pattern, so
+  `curl -m 8.8.8.8` is still refused, and an unlicensed flag such as
+  `nmap --spoof-mac` gains nothing.
 - The wrapper refuses to run if `/tmp/kestrel` is a symlink or, on POSIX,
   exists with a different owner or a mode other than `0700`.
 - `curl -O`/`--remote-name` and proxy flags (`-x`, `--proxy`, SOCKS variants,
@@ -494,7 +520,16 @@ Windows user. The host key is pinned; `StrictHostKeyChecking=yes` and
 - Audit log: `/var/log/kestrel/audit.jsonl`, owned by `kestrel`, mode `0600`,
   rotated by logrotate. The directory is owned by `kestrel`, mode `0700`.
 - Each record includes timestamp, objective hash, argv, target checks, risk,
-  approval result, exit code, duration, and stdout SHA-256.
+  approval result, exit code, duration, and the stdout and stderr SHA-256 of
+  the delivered (post-truncation) text.
+- An `execute` request writes two distinguishable records: `execute_intent`
+  (the approved plan) **before** any step runs, then `execute` (the per-step
+  results) afterwards. `check` writes its single `check` record and `scope`
+  its single `scope` record, unchanged.
+- If the intent write raises `OSError`, the wrapper refuses to execute and
+  returns a JSON error: no audit, no run. If the result write fails after
+  execution, the response carries the results and an explicit error instead of
+  a traceback.
 - Full stdout/stderr are not written to the audit log. Phase 1 returns them in
   the tool response with caps. Phase 3 writes large outputs under
   `/var/log/kestrel/runs/<id>/` with mode `0600` and adds `scp` retrieval.
@@ -513,6 +548,8 @@ Windows user. The host key is pinned; `StrictHostKeyChecking=yes` and
 | Destructive flag | Refuse and name the flag. |
 | Dialog denied/unavailable | Do not execute; return "not approved". |
 | Step timeout | Kill the process group; return partial output with `timed_out: true`. |
+| Audit log unwritable | Refuse to execute; return a JSON error. Nothing runs without an intent record. |
+| Unexpected internal error | Return a JSON error object and a non-zero exit; never a traceback. |
 | Nonzero exit | Return the result; Kestrel reports the failure and does not claim success. |
 | Malformed response | Treat as failure; do not retry blindly. |
 
@@ -555,12 +592,23 @@ turn. A remote kill channel is phase 3.
 - Denies `bash`, `sh`, `python3`, `rm`, and shell metacharacters.
 - Denies destructive flags.
 - Classifies `nmap` as recon, `ffuf` as intrusive, and returns the highest tier.
-- Runs two steps in one request and stops after a failed step.
-- Kills a process group on timeout and marks `timed_out`.
-- Truncates output at the cap and marks `truncated`.
-- Writes an audit record with hashes, not raw stdout.
+- Runs two steps in one request and stops after a failed step or a spent total
+  deadline.
+- Kills a process group on timeout, marks `timed_out`, and proves the child is
+  dead.
+- Truncates output at the cap and marks `truncated`; the total byte cap holds
+  across both streams and steps, and the hashes match the delivered text.
+- Preserves non-UTF-8 child output as replacement characters, with no reader
+  thread traceback.
+- Writes an audit record with hashes, not raw stdout; the execute intent is
+  written before running, and an unwritable audit log blocks execution.
 - Scope mode returns the scope without executing anything.
-- Check mode returns risk and targets without executing anything.
+- Check mode returns risk and targets without executing anything, and is the
+  default when the request omits `mode`.
+- Refuses malformed JSON, a non-integer or wrong protocol version, a missing
+  objective, too many steps, and out-of-range timeouts, each as JSON.
+- Confines curl `@file` references and licenses credential pairs and decimal
+  numbers without licensing a destination.
 
 ### Kestrel tests (Windows)
 
