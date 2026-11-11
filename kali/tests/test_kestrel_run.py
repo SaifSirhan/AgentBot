@@ -1,7 +1,9 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -885,17 +887,32 @@ class PositiveControlTests(TempOutputRoot):
 
 class ExecutionTests(TempOutputRoot):
     def test_timeout_kills_the_process(self):
+        # Part C: elapsed time alone does not prove the child died. The child
+        # beats into a file every 50 ms; after the kill the beat must stop.
+        beat = self.root / "beat.txt"
+        code = ("import pathlib, time\n"
+                "p = pathlib.Path(%r)\n"
+                "for i in range(400):\n"
+                "    p.write_text(str(i), encoding='utf-8')\n"
+                "    time.sleep(0.05)\n" % str(beat))
         started = time.monotonic()
-        result = kr.run_step(
-            [sys.executable, "-c", "import time; time.sleep(5)"], 0.3)
+        result = kr.run_step([sys.executable, "-c", code], 1.0)
         self.assertTrue(result["timed_out"])
         self.assertLess(time.monotonic() - started, 3.0)
+        self.assertTrue(beat.exists())
+        first = beat.read_text(encoding="utf-8")
+        time.sleep(0.4)
+        self.assertEqual(beat.read_text(encoding="utf-8"), first,
+                         "the child is still running after the timeout kill")
 
     def test_output_is_capped(self):
         result = kr.run_step(
             [sys.executable, "-c", "print('x' * 400000)"], 10)
         self.assertTrue(result["truncated"])
         self.assertLessEqual(len(result["stdout"]), kr.MAX_STREAM_BYTES)
+        # I6: the cap is a byte cap, so the delivered bytes must fit too.
+        self.assertLessEqual(len(result["stdout"].encode("utf-8")),
+                             kr.MAX_STREAM_BYTES)
 
     def test_a_failed_step_stops_the_sequence(self):
         results = kr.run_steps([
@@ -1095,3 +1112,653 @@ class CliTests(TempOutputRoot):
         record = json.loads(self.audit.read_text().splitlines()[0])
         self.assertEqual(record["event"], "check")
         self.assertNotIn("stdout", record)
+
+
+def run_cli(scope, audit, payload=None, raw=None):
+    """Drive main() with explicit paths and capture BOTH streams.
+
+    stderr is captured so a test can prove that no traceback (including a
+    reader-thread traceback) reached it.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    text = raw if raw is not None else json.dumps(payload)
+    with mock.patch.object(sys, "stdin", io.StringIO(text)):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = kr.main(scope_path=scope, audit_path=audit)
+    return subprocess.CompletedProcess(
+        args=["kestrel_run.py"], returncode=status,
+        stdout=out.getvalue(), stderr=err.getvalue())
+
+
+class FileReferencePolicyTests(TempOutputRoot):
+    """R13: `@file` is curl's file-reference syntax, not a relative path."""
+
+    def setUp(self):
+        super().setUp()
+        self.scope = kr.load_scope(write_scope(self.temp.name))
+
+    def validate(self, argv):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], self.scope)
+
+    def denied(self, argv):
+        with self.assertRaises(kr.PolicyError):
+            self.validate(argv)
+
+    def test_r13_the_probe_argv_is_denied(self):
+        for argv in (
+            ["curl", "-d", "@/etc/passwd", "http://app.lab.local/"],
+            ["curl", "-F", "file=@/etc/shadow", "http://app.lab.local/"],
+            ["curl", "--data-binary", "@/home/kestrel/.ssh/id_ed25519",
+             "http://app.lab.local/"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+    def test_r13_every_data_and_form_flag_confines_the_reference(self):
+        for flag in ("-d", "--data", "--data-raw", "--data-binary",
+                     "--data-ascii", "--data-urlencode", "-F", "--form",
+                     "--form-string"):
+            for value in ("@/etc/passwd", "file=@/etc/shadow",
+                          "file=</etc/shadow", "@/etc/passwd",
+                          "@../../etc/passwd"):
+                with self.subTest(flag=flag, value=value):
+                    self.denied(["curl", flag, value, "http://app.lab.local/"])
+                    self.denied(["curl", flag + "=" + value,
+                                 "http://app.lab.local/"])
+
+    def test_r13_urlencode_name_at_file_and_attached_short_forms(self):
+        for argv in (
+            ["curl", "--data-urlencode", "name@/etc/passwd",
+             "http://app.lab.local/"],
+            ["curl", "-d@/etc/passwd", "http://app.lab.local/"],
+            ["curl", "-Ffile=@/etc/shadow", "http://app.lab.local/"],
+            ["curl", "--unknown", "@/etc/passwd", "http://app.lab.local/"],
+            ["curl", "-o", "@/home/kestrel/.ssh/authorized_keys",
+             "http://app.lab.local/"],
+            ["curl", "-d", "@http://app.lab.local/x",
+             "http://app.lab.local/"],
+            ["nmap", "--script", "http-title", "--script-args",
+             "userdb=@/etc/shadow", "192.168.56.10"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+    def test_r13_a_sigil_on_a_non_file_flag_keeps_the_r8_rule(self):
+        # R13 licenses file reads only where the sigil is real curl syntax.
+        # For every other flag a leading "@" is still R8's business: the value
+        # is target-parsed and scope-checked, so no denial is weakened.
+        self.denied(["nmap", "--exclude", "@8.8.8.8", "192.168.56.10"])
+        self.denied(["openssl", "s_client", "-connect", "@8.8.8.8:443"])
+        _, targets = self.validate(
+            ["nmap", "--exclude", "@192.168.56.11", "192.168.56.10"])
+        self.assertIn("192.168.56.11", targets)
+
+    def test_r13_confined_references_and_plain_data_still_work(self):
+        for argv in (
+            ["curl", "-d", "@" + self.out("payload.json"),
+             "http://app.lab.local/"],
+            ["curl", "-d", "@payload.json", "http://app.lab.local/"],
+            ["curl", "-F", "file=@" + self.out("upload.bin"),
+             "http://app.lab.local/"],
+            ["curl", "--data-urlencode", "name@" + self.out("p.txt"),
+             "http://app.lab.local/"],
+            # curl's urlencode grammar: with a "=" this is name=content and
+            # is encoded literally, so it is not a file reference.
+            ["curl", "--data-urlencode", "x=y@/etc/passwd",
+             "http://app.lab.local/"],
+            ["curl", "-d", "name=value", "http://app.lab.local/"],
+            ["curl", "-F", "field=plain", "http://app.lab.local/"],
+            ["curl", "-d", "name=value", "-X", "POST",
+             "http://app.lab.local/"],
+        ):
+            with self.subTest(argv=argv):
+                risk, targets = self.validate(argv)
+                self.assertEqual(targets, ["app.lab.local"])
+        self.assertEqual(
+            self.validate(["curl", "-d", "name=value",
+                           "http://app.lab.local/"])[0], "intrusive")
+
+
+class CredentialNumberPolicyTests(TempOutputRoot):
+    """R14: credential pairs and decimal numbers are licensed, IPs are not."""
+
+    def setUp(self):
+        super().setUp()
+        self.scope = kr.load_scope(write_scope(self.temp.name))
+        self.words = "/usr/share/wordlists/dirb/common.txt"
+
+    def validate(self, argv):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], self.scope)
+
+    def denied(self, argv):
+        with self.assertRaises(kr.PolicyError):
+            self.validate(argv)
+
+    def test_r14_curl_credentials_are_licensed(self):
+        for argv in (
+            ["curl", "-u", "user:pass", "http://app.lab.local/"],
+            ["curl", "--user", "user:pass", "http://app.lab.local/"],
+            ["curl", "--user=user:pass", "http://app.lab.local/"],
+            ["curl", "-u", "user", "http://app.lab.local/"],
+        ):
+            with self.subTest(argv=argv):
+                _, targets = self.validate(argv)
+                self.assertEqual(targets, ["app.lab.local"])
+
+    def test_r14_a_credential_may_not_carry_a_destination(self):
+        for value in ("user:pass@8.8.8.8", "user@192.168.56.11",
+                      "user:pass@192.168.56.11:21", "http://app.lab.local/",
+                      "https://app.lab.local/", "ftp:evil.com",
+                      "file:///etc/passwd", "@/etc/passwd", "/etc/passwd",
+                      "user:pass/../../etc"):
+            with self.subTest(value=value):
+                self.denied(["curl", "-u", value, "http://app.lab.local/"])
+
+    def test_r14_numeric_flags_accept_decimals_and_decimal_lists(self):
+        for argv in (
+            ["curl", "-m", "0.5", "http://app.lab.local/"],
+            ["curl", "--max-time", "0.5", "http://app.lab.local/"],
+            ["curl", "--connect-timeout", "2.5", "http://app.lab.local/"],
+            ["ffuf", "-p", "0.5", "-u", "http://app.lab.local/FUZZ",
+             "-w", self.words],
+            ["ffuf", "--delay", "0.5", "-u", "http://app.lab.local/FUZZ",
+             "-w", self.words],
+            ["nmap", "--scan-delay", "0.5", "192.168.56.10"],
+            ["nmap", "--max-rtt-timeout", "0.5,1.5", "192.168.56.10"],
+            ["whatweb", "--wait", "0.5", "http://app.lab.local/"],
+            ["nuclei", "-rl", "0.5", "-u", "http://app.lab.local/"],
+            ["masscan", "--rate", "100.5", "192.168.56.10"],
+        ):
+            with self.subTest(argv=argv):
+                self.validate(argv)
+
+    def test_r14_a_number_licence_cannot_hide_a_destination(self):
+        for argv in (
+            ["curl", "-m", "8.8.8.8", "http://app.lab.local/"],
+            ["curl", "-m", "0.5.6", "http://app.lab.local/"],
+            ["curl", "-m", "1e3", "http://app.lab.local/"],
+            ["curl", "-m", "soon", "http://app.lab.local/"],
+            ["ffuf", "-p", "0.5", "-u", "http://8.8.8.8/FUZZ",
+             "-w", self.words],
+            ["nmap", "--exclude", "0.5", "192.168.56.10"],
+            ["curl", "--unknown", "0.5", "http://app.lab.local/"],
+            # --spoof-mac has no licence: 0 stays denied, and so does 0.5.
+            ["nmap", "--spoof-mac", "0", "192.168.56.10"],
+            ["nmap", "--spoof-mac", "0.5", "192.168.56.10"],
+            ["nmap", "--spoof-mac", "00:11:22:33:44:55", "192.168.56.10"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+
+class _BrokenPipe:
+    """A pipe that fails mid-read, so the reader's error path is exercised."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def read(self, size):
+        self.calls += 1
+        if self.calls == 1:
+            return b"partial"
+        raise OSError("pipe broke")
+
+
+class ExecutionRobustnessTests(TempOutputRoot):
+    """I5/I6: byte pipes, replacement decoding, a held cap, honest hashes."""
+
+    def cap_total(self, limit):
+        saved = kr.MAX_TOTAL_BYTES
+        kr.MAX_TOTAL_BYTES = limit
+        self.addCleanup(setattr, kr, "MAX_TOTAL_BYTES", saved)
+
+    def assert_hashes(self, result):
+        for key in ("stdout", "stderr"):
+            self.assertEqual(
+                result[key + "_sha256"],
+                hashlib.sha256(result[key].encode("utf-8")).hexdigest(),
+                "%s hash does not match the delivered text" % key)
+
+    def test_non_utf8_output_is_preserved_and_no_thread_traceback(self):
+        child = [sys.executable, "-c",
+                 "import os; os.write(1, b'\\xff\\xfe\\x80binary'); "
+                 "os.write(2, b'err')"]
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            result = kr.run_step(child, 30)
+        self.assertEqual(captured.getvalue(), "")
+        self.assertEqual(result["stdout"], "\ufffd\ufffd\ufffdbinary")
+        self.assertEqual(result["stderr"], "err")
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["read_errors"], [])
+        self.assert_hashes(result)
+
+    def test_reader_records_io_failures_instead_of_raising(self):
+        holder = {}
+        kr._read_stream(_BrokenPipe(), 1024, holder)
+        self.assertEqual(holder["bytes"], b"partial")
+        self.assertIn("OSError", holder["error"])
+        self.assertFalse(holder["truncated"])
+
+    def test_reader_errors_reach_the_result_dict(self):
+        # A real child and a real read; only the I/O failure is injected, so
+        # the assertion is on run_step's result, not on a mock's call count.
+        real = kr._read_stream
+
+        def failing(stream, limit, holder):
+            real(stream, limit, holder)
+            holder["error"] = "OSError: injected pipe failure"
+
+        with mock.patch.object(kr, "_read_stream", failing):
+            result = kr.run_step([sys.executable, "-c", "print('ok')"], 30)
+        self.assertEqual(result["stdout"].strip(), "ok")
+        self.assertEqual(result["read_errors"],
+                         ["stdout: OSError: injected pipe failure",
+                          "stderr: OSError: injected pipe failure"])
+
+    def test_total_cap_holds_across_both_streams_and_hashes_match(self):
+        self.cap_total(20)
+        child = [sys.executable, "-c",
+                 "import os; os.write(1, b'A' * 100); os.write(2, b'B' * 100)"]
+        result = kr.run_steps([{"argv": child, "timeout": 30}], 60)[0]
+        out = result["stdout"].encode("utf-8")
+        err = result["stderr"].encode("utf-8")
+        self.assertLessEqual(len(out) + len(err), 20)
+        self.assertTrue(result["truncated"])
+        self.assert_hashes(result)
+
+    def test_each_stream_is_capped(self):
+        saved = kr.MAX_STREAM_BYTES
+        kr.MAX_STREAM_BYTES = 64
+        self.addCleanup(setattr, kr, "MAX_STREAM_BYTES", saved)
+        child = [sys.executable, "-c",
+                 "import os; os.write(1, b'A' * 500); os.write(2, b'B' * 500)"]
+        result = kr.run_step(child, 30)
+        self.assertLessEqual(len(result["stdout"].encode("utf-8")), 64)
+        self.assertLessEqual(len(result["stderr"].encode("utf-8")), 64)
+        self.assertTrue(result["truncated"])
+        self.assert_hashes(result)
+
+    def test_the_budget_is_shared_across_steps(self):
+        self.cap_total(30)
+        steps = [{"argv": [sys.executable, "-c",
+                           "import os; os.write(1, b'%s' * 20)" % letter],
+                  "timeout": 30} for letter in ("A", "B")]
+        results = kr.run_steps(steps, 60)
+        self.assertEqual(len(results), 2)
+        total = sum(len(r["stdout"].encode("utf-8"))
+                    + len(r["stderr"].encode("utf-8")) for r in results)
+        self.assertLessEqual(total, 30)
+        self.assertEqual(len(results[0]["stdout"]), 20)
+        self.assertEqual(len(results[1]["stdout"]), 10)
+        self.assertTrue(results[1]["truncated"])
+        for result in results:
+            self.assert_hashes(result)
+
+    def test_byte_accounting_counts_bytes_not_characters(self):
+        self.cap_total(10)
+        child = [sys.executable, "-c",
+                 "import os; os.write(1, b'\\xc3\\xa9' * 20)"]
+        result = kr.run_steps([{"argv": child, "timeout": 30}], 60)[0]
+        data = result["stdout"].encode("utf-8")
+        self.assertLessEqual(len(data), 10)
+        self.assertTrue(result["truncated"])
+        # The cut lands on a character boundary: no replacement character.
+        self.assertNotIn("\ufffd", result["stdout"])
+        self.assertEqual(result["stdout"], data.decode("utf-8"))
+        self.assert_hashes(result)
+
+    def test_a_normal_run_hashes_the_delivered_text(self):
+        result = kr.run_step(
+            [sys.executable, "-c", "import os; os.write(1, b'hi'); "
+             "os.write(2, b'warn')"], 30)
+        self.assertEqual(result["stdout"], "hi")
+        self.assertEqual(result["stderr"], "warn")
+        self.assertFalse(result["truncated"])
+        self.assert_hashes(result)
+
+
+class DeadlineTests(TempOutputRoot):
+    """I7: the total deadline is a deadline, not a per-step 1s grant."""
+
+    def test_the_total_deadline_stops_the_sequence(self):
+        # The first child outlives the 0.5s budget but finishes inside the 1s
+        # grant the old code handed out, so the second step used to run too.
+        marker = self.root / "second.txt"
+        first = [sys.executable, "-c", "import time; time.sleep(0.6)"]
+        second = [sys.executable, "-c",
+                  "import pathlib; pathlib.Path(%r).write_text('ran')"
+                  % str(marker)]
+        started = time.monotonic()
+        results = kr.run_steps([{"argv": first, "timeout": 30},
+                                {"argv": second, "timeout": 30}], 0.5)
+        elapsed = time.monotonic() - started
+        self.assertEqual(len(results), 1,
+                         "a step was started after the total deadline")
+        self.assertTrue(results[0]["timed_out"])
+        self.assertFalse(marker.exists(), "the second step ran")
+        self.assertLess(elapsed, 3.0)
+
+    def test_a_step_keeps_its_own_shorter_timeout(self):
+        started = time.monotonic()
+        results = kr.run_steps([
+            {"argv": [sys.executable, "-c", "import time; time.sleep(10)"],
+             "timeout": 1},
+        ], 60)
+        self.assertTrue(results[0]["timed_out"])
+        self.assertLess(time.monotonic() - started, 3.0)
+
+
+class ScopeOptionTests(TempOutputRoot):
+    """Part C: allow_public and IPv6. Policy-only — nothing is executed and
+    no address here is ever contacted (the suite's existing 8.8.8.8 denial
+    cases use the same addresses the same way)."""
+
+    def validate(self, argv, scope):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], scope)
+
+    def test_allow_public_true_licenses_only_listed_public_targets(self):
+        private = kr.load_scope(write_scope(self.temp.name))
+        public = kr.load_scope(write_scope(
+            self.temp.name, allow_public=True, networks=["8.8.8.0/24"],
+            domains=["example.com"]))
+        for argv, target in ((["nmap", "8.8.8.8"], "8.8.8.8"),
+                             (["curl", "http://example.com/"], "example.com")):
+            with self.subTest(argv=argv):
+                with self.assertRaises(kr.PolicyError):
+                    self.validate(argv, private)
+                risk, targets = self.validate(argv, public)
+                self.assertEqual(risk, "recon")
+                self.assertEqual(targets, [target])
+        # allow_public is not a bypass of the network/domain lists.
+        for argv in (["nmap", "1.1.1.1"], ["curl", "http://other.com/"]):
+            with self.subTest(argv=argv):
+                with self.assertRaises(kr.PolicyError):
+                    self.validate(argv, public)
+
+    def test_ipv6_targets_are_validated(self):
+        scope = kr.load_scope(write_scope(
+            self.temp.name, networks=["192.168.56.0/24", "2001:db8::/64"]))
+        for argv, target in (
+            (["nmap", "-6", "2001:db8::10"], "2001:db8::10"),
+            (["nmap", "2001:db8::/64"], "2001:db8::/64"),
+            (["curl", "http://[2001:db8::10]/"], "2001:db8::10"),
+            (["openssl", "s_client", "-connect", "[2001:db8::10]:443"],
+             "2001:db8::10"),
+        ):
+            with self.subTest(argv=argv):
+                _, targets = self.validate(argv, scope)
+                self.assertIn(target, targets)
+        for argv in (
+            ["nmap", "2001:db8:1::10"],
+            ["nmap", "2606:4700::1111"],
+            ["curl", "http://[2606:4700::1111]/"],
+            ["nmap", "2001:db8::/48"],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaises(kr.PolicyError):
+                    self.validate(argv, scope)
+
+    def test_an_ipv6_network_against_an_ipv4_scope_is_denied_not_a_crash(self):
+        scope = kr.load_scope(write_scope(self.temp.name))
+        for argv in (["nmap", "2001:db8::/64"], ["nmap", "2001:db8::10"]):
+            with self.subTest(argv=argv):
+                with self.assertRaises(kr.PolicyError):
+                    self.validate(argv, scope)
+
+
+class ProtocolCliTests(TempOutputRoot):
+    """Part C: every protocol refusal is JSON with exit 3 and no audit."""
+
+    def setUp(self):
+        super().setUp()
+        self.scope = write_scope(self.temp.name)
+        self.audit = self.root / "audit.jsonl"
+        self.step = {"argv": ["nmap", "-sV", "192.168.56.10"], "timeout": 5}
+        self.calls = 0
+
+    def cli(self, payload=None, raw=None):
+        # A fresh audit path per request, so "nothing was audited" is asserted
+        # for this request and not polluted by an earlier subTest.
+        self.calls += 1
+        self.audit = self.root / ("audit-%d.jsonl" % self.calls)
+        return run_cli(self.scope, self.audit, payload, raw)
+
+    def request(self, **overrides):
+        payload = {"version": 1, "mode": "check", "objective": "scan",
+                   "steps": [self.step], "total_timeout": 10}
+        payload.update(overrides)
+        return payload
+
+    def refused(self, completed):
+        self.assertEqual(completed.returncode, 3)
+        self.assertEqual(completed.stderr, "")
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["denied"])
+        self.assertFalse(self.audit.exists(), "a refused request was audited")
+        return payload
+
+    def test_bad_json_is_refused(self):
+        for raw in ("{not json", "", "[]", "null", '"text"'):
+            with self.subTest(raw=raw):
+                self.refused(self.cli(raw=raw))
+        with self.assertRaises(kr.ProtocolError):
+            kr.parse_request("{not json")
+
+    def test_version_must_be_the_integer_one(self):
+        for version in (2, 0, "1", True, 1.0, None, [1], {"a": 1}):
+            with self.subTest(version=version):
+                self.refused(self.cli(self.request(version=version)))
+                with self.assertRaises(kr.ProtocolError):
+                    kr.parse_request(json.dumps(self.request(version=version)))
+        missing = self.request()
+        del missing["version"]
+        self.refused(self.cli(missing))
+        with self.assertRaises(kr.ProtocolError):
+            kr.parse_request(json.dumps(missing))
+
+    def test_objective_is_required(self):
+        for objective in (None, "", "   ", 42, ["scan"]):
+            with self.subTest(objective=objective):
+                payload = self.request()
+                if objective is None:
+                    del payload["objective"]
+                else:
+                    payload["objective"] = objective
+                self.refused(self.cli(payload))
+
+    def test_step_count_and_shape_are_limited(self):
+        many = [self.step] * (kr.MAX_STEPS + 1)
+        for steps in ([], many, "nmap", [None],
+                      [{"argv": [], "timeout": 5}],
+                      [{"argv": ["nmap", 1], "timeout": 5}],
+                      [{"argv": "nmap", "timeout": 5}],
+                      [{"timeout": 5}]):
+            with self.subTest(steps=steps):
+                self.refused(self.cli(self.request(steps=steps)))
+        # The boundary itself is accepted, so the refusal is not vacuous.
+        completed = self.cli(self.request(steps=[self.step] * kr.MAX_STEPS))
+        self.assertEqual(completed.returncode, 0)
+
+    def test_step_timeout_must_be_in_range(self):
+        for timeout in (0, -1, kr.MAX_STEP_TIMEOUT + 1, True, "5", 1.5):
+            with self.subTest(timeout=timeout):
+                self.refused(self.cli(self.request(
+                    steps=[{"argv": self.step["argv"], "timeout": timeout}])))
+
+    def test_total_timeout_must_be_in_range(self):
+        for total in (0, -1, kr.MAX_TOTAL_TIMEOUT + 1, True, "300", 1.5):
+            with self.subTest(total=total):
+                self.refused(self.cli(self.request(total_timeout=total)))
+
+    def test_unknown_mode_is_refused(self):
+        for mode in ("run", "EXECUTE", None, 1):
+            with self.subTest(mode=mode):
+                self.refused(self.cli(self.request(mode=mode)))
+
+    def test_a_valid_request_is_accepted(self):
+        completed = self.cli(self.request())
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stderr, "")
+        self.assertTrue(json.loads(completed.stdout)["ok"])
+
+
+class CliExecuteTests(TempOutputRoot):
+    """I7 + Part C: real check/execute runs through main() with a real child.
+
+    The policy only permits fixed binary names, so the fixture copies the
+    running interpreter to <temp>/bin/searchsploit(.exe) and points the child
+    PATH at it (plus the interpreter's own directory, so Windows finds its
+    DLL). `searchsploit` is local-safe and takes free positionals, so
+    ["searchsploit", <script>, <marker>, ...] passes the walk and really runs:
+    the child itself writes the marker, and a witness file records what the
+    audit log already contained when the child started. Nothing is mocked.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.scope = write_scope(self.temp.name)
+        self.audit = self.root / "audit.jsonl"
+        self.bindir = self.root / "bin"
+        self.bindir.mkdir()
+        name = "searchsploit.exe" if os.name == "nt" else "searchsploit"
+        fake = self.bindir / name
+        shutil.copyfile(sys.executable, fake)
+        os.chmod(fake, 0o755)
+        pydir = str(Path(sys.executable).resolve().parent)
+        saved = kr.SAFE_PATH
+        kr.SAFE_PATH = str(self.bindir) + os.pathsep + pydir
+        self.addCleanup(setattr, kr, "SAFE_PATH", saved)
+        if os.name == "nt":
+            # CreateProcess resolves a bare binary name through the PARENT's
+            # PATH, not the child env, so the fixture must be visible there.
+            patcher = mock.patch.dict(
+                os.environ,
+                {"PATH": str(self.bindir) + os.pathsep
+                 + os.environ.get("PATH", "")})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.script = self.root / "fake_step.py"
+        self.script.write_text(
+            "import pathlib, sys\n"
+            "pathlib.Path(sys.argv[1]).write_text('ran', encoding='utf-8')\n"
+            "if len(sys.argv) > 3:\n"
+            "    audit = pathlib.Path(sys.argv[2])\n"
+            "    seen = audit.read_text(encoding='utf-8') if audit.exists() else ''\n"
+            "    pathlib.Path(sys.argv[3]).write_text(seen, encoding='utf-8')\n"
+            "print('ok')\n",
+            encoding="utf-8")
+
+    def step(self, witness_name=None):
+        marker = self.root / "marker.txt"
+        argv = ["searchsploit", str(self.script), str(marker)]
+        if witness_name:
+            argv += [str(self.audit), str(self.root / witness_name)]
+        return {"argv": argv, "timeout": 30}, marker
+
+    def request(self, step, mode="execute", **extra):
+        payload = {"version": 1, "objective": "lab check", "steps": [step],
+                   "total_timeout": 60}
+        if mode is not None:
+            payload["mode"] = mode
+        payload.update(extra)
+        return payload
+
+    def events(self):
+        return [json.loads(line)["event"]
+                for line in self.audit.read_text(encoding="utf-8").splitlines()]
+
+    def test_execute_returns_results_and_writes_intent_then_result(self):
+        step, marker = self.step(witness_name="witness.txt")
+        completed = run_cli(self.scope, self.audit,
+                            self.request(step, approval="yes"))
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stderr, "")
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["risk"], "recon")
+        self.assertEqual(payload["targets"], [])
+        result = payload["results"][0]
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["stdout"].strip(), "ok")
+        self.assertFalse(result["timed_out"])
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["read_errors"], [])
+        for key in ("stdout", "stderr"):
+            self.assertEqual(
+                result[key + "_sha256"],
+                hashlib.sha256(result[key].encode("utf-8")).hexdigest())
+        self.assertTrue(marker.exists(), "the child did not really run")
+        self.assertEqual(self.events(), ["execute_intent", "execute"])
+        records = [json.loads(line) for line in
+                   self.audit.read_text(encoding="utf-8").splitlines()]
+        objective_hash = hashlib.sha256(b"lab check").hexdigest()
+        for record in records:
+            self.assertIn("ts", record)
+            self.assertEqual(record["objective_sha256"], objective_hash)
+            self.assertEqual(record["approval"], "yes")
+            self.assertEqual(record["risk"], "recon")
+        self.assertEqual(records[1]["results"][0]["stdout_sha256"],
+                         result["stdout_sha256"])
+        self.assertEqual(records[1]["results"][0]["stderr_sha256"],
+                         result["stderr_sha256"])
+        self.assertNotIn("stdout", records[1]["results"][0])
+        # The child saw the intent record on disk before it ran.
+        witness = (self.root / "witness.txt").read_text(encoding="utf-8")
+        self.assertEqual(json.loads(witness.splitlines()[0])["event"],
+                         "execute_intent")
+
+    def test_check_mode_is_side_effect_free(self):
+        step, marker = self.step()
+        completed = run_cli(self.scope, self.audit,
+                            self.request(step, mode="check"))
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stderr, "")
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["risk"], "recon")
+        self.assertEqual(payload["steps"], [step["argv"]])
+        self.assertNotIn("results", payload)
+        self.assertFalse(marker.exists(), "check mode executed the step")
+        self.assertEqual(self.events(), ["check"])
+
+    def test_mode_defaults_to_check(self):
+        step, marker = self.step()
+        completed = run_cli(self.scope, self.audit,
+                            self.request(step, mode=None))
+        self.assertEqual(completed.returncode, 0)
+        payload = json.loads(completed.stdout)
+        self.assertNotIn("results", payload)
+        self.assertEqual(payload["risk"], "recon")
+        self.assertFalse(marker.exists(), "a modeless request executed")
+        self.assertEqual(self.events(), ["check"])
+
+    def test_audit_write_failure_blocks_execution(self):
+        # I7: the audit parent is a regular file, so the write raises OSError.
+        blocker = self.root / "blocker"
+        blocker.write_text("not a directory", encoding="utf-8")
+        audit = blocker / "audit.jsonl"
+        step, marker = self.step()
+        completed = run_cli(self.scope, audit, self.request(step))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stderr, "")
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(marker.exists(), "execution ran without an audit")
+        self.assertFalse(audit.exists())
+
+    def test_an_unexpected_failure_is_json_not_a_traceback(self):
+        step, marker = self.step()
+        with mock.patch.object(kr, "run_steps",
+                               side_effect=RuntimeError("boom")):
+            completed = run_cli(self.scope, self.audit, self.request(step))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stderr, "")
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIn("boom", payload["error"])
+        self.assertFalse(marker.exists())
+        # The intent was recorded; the result record could not be.
+        self.assertEqual(self.events(), ["execute_intent"])

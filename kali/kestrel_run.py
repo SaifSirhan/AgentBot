@@ -28,6 +28,11 @@ MAX_STEP_TIMEOUT = 600
 MAX_TOTAL_TIMEOUT = 1800
 MAX_STREAM_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024
+# I5/I6: pipes are read as bytes, in chunks, and capped in bytes.
+READ_CHUNK_BYTES = 8192
+# I7: the post-kill wait is bounded so a stuck child cannot hang the wrapper.
+KILL_WAIT_SECONDS = 5
+READER_JOIN_SECONDS = 2
 
 RECON = frozenset({"nmap", "whatweb", "dig", "host", "whois", "curl",
                    "openssl", "searchsploit"})
@@ -282,7 +287,7 @@ NON_DESTINATION_VALUES = {
         "--form-string": "text", "-X": "method", "--request": "method",
         "-m": "number", "--max-time": "number",
         "--connect-timeout": "number", "-w": "text", "--write-out": "text",
-        "-u": "text", "--user": "text", "--retry": "number",
+        "-u": "credential", "--user": "credential", "--retry": "number",
         "--retry-delay": "number", "--retry-max-time": "number",
         "-C": "number", "--continue-at": "number", "-r": "range",
         "--range": "range", "-y": "number", "--speed-time": "number",
@@ -370,6 +375,10 @@ HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH",
 # port-spec protocol prefix), so a structured match may be accepted before the
 # host-shaped rule -- that is what keeps `nmap -p T:80` usable. "text" can
 # contain anything, so a text-licensed value is still host-shaped-checked.
+# R14 adds two licences that are decided BEFORE target parsing, because the
+# host-shaped rule would otherwise refuse legitimate values: a credential pair
+# (no "@", no "/", no URL scheme) and a decimal number for a numeric flag
+# (digits with at most one dot, which a four-octet IP can never match).
 VALUE_CLASSES = {
     "number": re.compile(r"[0-9]+(?:ms|s|m|h|d|[kKmMgG])?"),
     # A port spec: a number, a range, `-` (all ports), a service name, or any
@@ -381,14 +390,30 @@ VALUE_CLASSES = {
     "word": re.compile(r"[A-Za-z0-9_-]+"),
     "record": RECORD_TYPES,
     "method": HTTP_METHODS,
+    # R14: the pattern excludes "@" and "/"; _class_matches additionally
+    # refuses a URL scheme, so `user:pass` is licensed but `ftp:host` is not.
+    "credential": re.compile(r"[^@/]+"),
     "text": re.compile(r".+", re.DOTALL),
 }
 STRUCTURED_CLASSES = frozenset(VALUE_CLASSES) - {"text"}
+# R14: `^\d+(\.\d+)?$`. Only a flag licensed "number" may use it, and only
+# before target parsing: `0.5` would otherwise parse as the public domain
+# "0.5". A four-octet IP has three dots and can never fullmatch this.
+DECIMAL_NUMBER_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 # R8: a value that fullmatches this and carries ".", ":" or "@" is host-shaped:
 # it must parse as a target and be scope-checked, or be refused.
 HOST_SHAPED_RE = re.compile(r"[A-Za-z0-9._:*@+-]+")
 # R8: an NSE script-argument name is an identifier, never a destination.
 SCRIPT_ARG_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
+# R13: these curl flags READ a file when the value carries a file sigil, so
+# the value is a path and not a destination. Elsewhere a leading "@" is not
+# file syntax (dig's @resolver is a bare token), so R8 keeps deciding it.
+FILE_REFERENCE_FLAGS = {
+    "curl": frozenset({"-d", "--data", "--data-raw", "--data-binary",
+                       "--data-ascii", "--data-urlencode", "-F", "--form",
+                       "--form-string"}),
+}
+DATA_URLENCODE_FLAG = "--data-urlencode"
 # Binaries that really do bundle short flags (getopt style). The Go/Perl/Ruby
 # scanners take single-dash flags atomically, so `-mc` is one flag, not `-m -c`.
 BUNDLE_FLAGS = frozenset({"curl", "nmap", "nc"})
@@ -456,7 +481,8 @@ def load_scope(path):
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise PolicyError("scope file is missing or invalid") from exc
-    if not isinstance(data, dict) or data.get("version") != 1:
+    if (not isinstance(data, dict) or type(data.get("version")) is not int
+            or data["version"] != 1):
         raise PolicyError("scope file must have version 1")
     expires = data.get("expires")
     if not isinstance(expires, str):
@@ -723,6 +749,38 @@ def _is_path_like(value):
             or "/" in value or "\\" in value)
 
 
+def _file_reference(value, binary, flag):
+    """R13: the path curl would READ, or None when there is no file sigil.
+
+    A leading `@` (`-d @file`), a form/data field's `=@` or `=<`
+    (`-F file=@file`, `-F field=<file`), and `--data-urlencode name@file` all
+    name a file. The sigil is not part of the name: treating `@/etc/passwd` as
+    a relative path kept it "under" OUTPUT_ROOT while curl read the absolute
+    file. A plain `name=value` carries no sigil and stays ordinary data.
+    An attached `-f=value` leaves a leading "=" on the value, which is not
+    part of the name either, so it is stripped before the sigil is read.
+    Only the flags that really read files get this licence; every other value
+    keeps R8's target-or-confined-path rule, and `_confine_path` strips a
+    leading "@" for all of them, so no sigil can hide an absolute path.
+    """
+    if flag not in FILE_REFERENCE_FLAGS.get(binary, ()):
+        return None
+    while value.startswith("="):
+        value = value[1:]
+    if value.startswith("@"):
+        return value[1:]
+    _, separator, rest = value.partition("=")
+    if separator and rest[:1] in ("@", "<"):
+        return rest[1:]
+    if flag == DATA_URLENCODE_FLAG and "=" not in value:
+        # curl's grammar: `name@filename` only when there is no "=" at all;
+        # with one, the value is `name=content` and is encoded literally.
+        name, separator, rest = value.partition("@")
+        if separator and name:
+            return rest
+    return None
+
+
 def _path_roots(binary, flag):
     if flag in READ_FLAGS.get(binary, ()):
         return (OUTPUT_ROOT,) + READ_ONLY_DIRS
@@ -735,7 +793,11 @@ def _confine_path(value, roots):
     The root itself is not a writable destination: a path that resolves to
     OUTPUT_ROOT (or a read-only root) exactly is refused, not just paths
     that escape it.
+    R13: a leading `@` is curl's file-reference sigil, so the real path is
+    confined, not a relative name that happens to start with "@".
     """
+    if value.startswith("@"):
+        value = value[1:]
     if not value:
         raise PolicyError("a path value is required")
     if "://" in value:
@@ -785,10 +847,31 @@ def _class_matches(licensed, part):
     pattern = VALUE_CLASSES[licensed]
     if isinstance(pattern, frozenset):
         return part.upper() in pattern
-    return pattern.fullmatch(part) is not None
+    if pattern.fullmatch(part) is None:
+        return False
+    if licensed == "credential":
+        # R14: a credential may not carry a URL scheme either.
+        scheme = SCHEME_ONLY_RE.match(part)
+        return not (scheme and scheme.group(1).lower() in URL_SCHEMES)
+    return True
 
 
-def _inspect_part(part, licensed, scope, targets, label):
+def _inspect_reference(part, binary, flag):
+    """R13: account for a file reference; True when one was present.
+
+    The referenced path is confined to OUTPUT_ROOT. It is a file, not a
+    destination, so it is not target-parsed: `@payload.json` is a name under
+    the root, and `@8.8.8.8` is a file name too, never a host to dial.
+    """
+    reference = _file_reference(part, binary, flag)
+    if reference is None:
+        return False
+    _confine_path(reference, (OUTPUT_ROOT,))
+    return True
+
+
+def _inspect_part(part, licensed, scope, targets, label, binary=None,
+                  flag=None):
     """R8: one value part ends as a target, a confined path or a licence.
 
     There is no fourth outcome. A structured class (ports, numbers, record
@@ -797,7 +880,20 @@ def _inspect_part(part, licensed, scope, targets, label):
     Anything that parses as a target is scope-checked. A host-shaped part that
     does not parse is refused, a path-like part is confined, and only then may
     a free-text licence apply. An unlicensed part is a refusal.
+    R13: a curl file reference is resolved first, so the path curl actually
+    reads is the path that gets confined.
+    R14: a credential pair and a decimal number are decided before target
+    parsing -- both are host-shaped, and neither can name a destination.
     """
+    if _inspect_reference(part, binary, flag):
+        return
+    if licensed == "credential":
+        if _class_matches(licensed, part):
+            return
+        raise PolicyError(
+            "%s value %r is not a plain credential pair" % (label, part))
+    if licensed == "number" and DECIMAL_NUMBER_RE.fullmatch(part):
+        return
     target = _target_from_token(part)
     if target is not None:
         targets.append(_validate_target(target[0], target[1], scope))
@@ -858,11 +954,17 @@ def _inspect_value(binary, flag, value, scope, targets):
             or flag in READ_FLAGS.get(binary, ())):
         _confine_path(value, _path_roots(binary, flag))
         return
+    label = "flag %s" % flag
+    # R13: a file reference is ONE path, even when the name contains a comma,
+    # so it is resolved before the comma split. Mixed values still get the
+    # per-part check below.
+    if _inspect_reference(value, binary, flag):
+        return
     licensed = NON_DESTINATION_VALUES.get(binary, {}).get(flag)
     for part in value.split(","):
         if not part:
             raise PolicyError("flag %s has an empty value part" % flag)
-        _inspect_part(part, licensed, scope, targets, "flag %s" % flag)
+        _inspect_part(part, licensed, scope, targets, label, binary, flag)
 
 
 def _check_dig_option(token, scope, targets):
@@ -968,7 +1070,10 @@ def _validate_target(kind, value, scope):
     if kind == "network":
         if _public_ip(value.network_address) and not scope.allow_public:
             raise PolicyError("public network %s is outside scope" % value)
-        if not any(value.subnet_of(network) for network in scope.networks):
+        # An IPv6 network is never inside an IPv4 scope network: subnet_of
+        # raises TypeError across versions, which must be a denial, not a crash.
+        if not any(value.subnet_of(network) for network in scope.networks
+                   if network.version == value.version):
             raise PolicyError("target %s is outside scope" % value)
         return str(value)
     if not _private_domain(value) and not scope.allow_public:
@@ -1102,21 +1207,57 @@ def validate_steps(steps, scope):
 
 
 def _read_stream(stream, limit, holder):
+    """I5: read BYTES, cap in bytes, and never let an error escape the thread.
+
+    Decoding happens once, in run_step, with errors="replace": a child that
+    emits non-UTF-8 bytes must not kill a reader thread (which used to leave
+    stdout empty, truncated False and a traceback on stderr). The loop keeps
+    draining after the cap so the child never blocks on a full pipe. The
+    buffer is published up front and extended in place, so a read failure
+    still delivers the partial output and is recorded instead of raised.
+    """
     total = 0
-    chunks = []
-    while True:
-        chunk = stream.read(8192)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total <= limit:
-            chunks.append(chunk)
-        else:
-            remaining = limit - (total - len(chunk))
-            if remaining > 0:
-                chunks.append(chunk[:remaining])
-    holder["text"] = "".join(chunks)
+    data = bytearray()
+    holder["bytes"] = data
+    try:
+        while True:
+            chunk = stream.read(READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total <= limit:
+                data.extend(chunk)
+            else:
+                remaining = limit - (total - len(chunk))
+                if remaining > 0:
+                    data.extend(chunk[:remaining])
+    except Exception as exc:
+        holder["error"] = "%s: %s" % (type(exc).__name__, exc)
     holder["truncated"] = total > limit
+
+
+def _stream_text(holder):
+    """I5: one decode, with replacement characters for undecodable bytes."""
+    return holder.get("bytes", b"").decode("utf-8", errors="replace")
+
+
+def _cut_utf8(data, limit):
+    """I6: cut to at most limit bytes without splitting a UTF-8 character."""
+    if limit <= 0:
+        return b""
+    cut = data[:limit]
+    while cut and (cut[-1] & 0xC0) == 0x80:
+        cut = cut[:-1]
+    if cut and cut[-1] >= 0xC0:
+        cut = cut[:-1]
+    return cut
+
+
+def _hash_outputs(result):
+    """I6: hash exactly the delivered text, after every truncation."""
+    for key in ("stdout", "stderr"):
+        result[key + "_sha256"] = hashlib.sha256(
+            result[key].encode("utf-8")).hexdigest()
 
 
 def _stop_process(process):
@@ -1126,7 +1267,12 @@ def _stop_process(process):
             return
         except ProcessLookupError:
             return
-    process.kill()
+        except OSError:
+            pass                 # fall back to killing the child alone
+    try:
+        process.kill()
+    except OSError:
+        pass                     # already gone; the bounded wait below decides
 
 
 def run_step(argv, timeout):
@@ -1144,7 +1290,6 @@ def run_step(argv, timeout):
             env=_safe_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             start_new_session=True,
         )
     except OSError as exc:
@@ -1169,25 +1314,35 @@ def run_step(argv, timeout):
     except subprocess.TimeoutExpired:
         timed_out = True
         _stop_process(process)
-        process.wait()
+        try:
+            # I7: bounded, so an unkillable child cannot hang the wrapper.
+            process.wait(timeout=KILL_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
     for reader in readers:
-        reader.join(2)
+        reader.join(READER_JOIN_SECONDS)
     for stream in (process.stdout, process.stderr):
         if stream is not None:
-            stream.close()
+            try:
+                stream.close()
+            except OSError:
+                pass
 
-    output = stdout.get("text", "")
-    errors = stderr.get("text", "")
-    return {
+    read_errors = ["%s: %s" % (name, holder["error"])
+                   for name, holder in (("stdout", stdout), ("stderr", stderr))
+                   if "error" in holder]
+    result = {
         "argv": list(argv),
         "exit_code": None if timed_out else process.returncode,
-        "stdout": output,
-        "stderr": errors,
+        "stdout": _stream_text(stdout),
+        "stderr": _stream_text(stderr),
         "duration_ms": int((time.monotonic() - started) * 1000),
         "timed_out": timed_out,
         "truncated": bool(stdout.get("truncated") or stderr.get("truncated")),
-        "stdout_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+        "read_errors": read_errors,
     }
+    _hash_outputs(result)
+    return result
 
 
 def run_steps(steps, total_timeout):
@@ -1195,14 +1350,24 @@ def run_steps(steps, total_timeout):
     results = []
     total_output = 0
     for step in steps:
-        remaining = int(min(step["timeout"],
-                            max(1, deadline - time.monotonic())))
-        result = run_step(step["argv"], remaining)
-        allowed = max(0, MAX_TOTAL_BYTES - total_output)
-        if len(result["stdout"]) + len(result["stderr"]) > allowed:
-            result["stdout"] = result["stdout"][:allowed]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break                # I7: no extra grant once the budget is spent
+        result = run_step(step["argv"], min(step["timeout"], remaining))
+        # I6: one shared byte budget across BOTH streams and across steps.
+        budget = max(0, MAX_TOTAL_BYTES - total_output)
+        cut = False
+        for key in ("stdout", "stderr"):
+            data = result[key].encode("utf-8")
+            if len(data) > budget:
+                data = _cut_utf8(data, budget)
+                result[key] = data.decode("utf-8")
+                cut = True
+            budget -= len(data)
+            total_output += len(data)
+        if cut:
             result["truncated"] = True
-        total_output += len(result["stdout"]) + len(result["stderr"])
+        _hash_outputs(result)    # I6: hash what the client actually receives
         results.append(result)
         if result["timed_out"] or result["exit_code"] not in (0, None):
             break
@@ -1210,6 +1375,7 @@ def run_steps(steps, total_timeout):
 
 
 def append_audit(path, record):
+    """Append one JSONL record; OSError is the caller's signal to refuse (I7)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -1221,7 +1387,9 @@ def parse_request(raw):
         request = json.loads(raw)
     except ValueError as exc:
         raise ProtocolError("request must be valid JSON") from exc
-    if not isinstance(request, dict) or request.get("version") != 1:
+    # I7: `type(v) is int` refuses JSON true and 1.0, which `== 1` accepted.
+    version = request.get("version") if isinstance(request, dict) else None
+    if type(version) is not int or version != 1:
         raise ProtocolError("request must use protocol version 1")
     return request
 
@@ -1239,7 +1407,32 @@ def _denied(reason, status=2):
     return _respond(status, {"ok": False, "denied": True, "reason": reason})
 
 
+def _audit_or_refuse(audit_path, record):
+    """I7: an audit write failure is a refusal, never an escaped OSError."""
+    try:
+        append_audit(audit_path, record)
+    except OSError as exc:
+        return _denied("could not write the audit log: %s" % exc, 3)
+    return None
+
+
 def main(scope_path=None, audit_path=None):
+    """I7: no exception escapes as a traceback; every failure is JSON.
+
+    Exit codes: 0 completed, 2 policy denial, 3 protocol/configuration error,
+    1 an unexpected internal failure (the response still carries the error).
+    """
+    try:
+        return _main(scope_path, audit_path)
+    except Exception as exc:
+        try:
+            return _respond(1, {"ok": False, "error": "%s: %s"
+                                % (type(exc).__name__, exc)})
+        except Exception:
+            return 1             # stdout itself is gone (e.g. a closed pipe)
+
+
+def _main(scope_path, audit_path):
     scope_path = scope_path or DEFAULT_SCOPE
     audit_path = audit_path or DEFAULT_AUDIT
     try:
@@ -1250,12 +1443,15 @@ def main(scope_path=None, audit_path=None):
     except PolicyError as exc:
         return _denied(str(exc))
 
-    mode = request.get("mode", "execute")
+    # I7: a request that does not say "execute" must never run anything.
+    mode = request.get("mode", "check")
     if mode not in ("scope", "check", "execute"):
         return _denied("unknown mode %r" % mode, 3)
     if mode == "scope":
-        append_audit(audit_path, {"event": "scope",
-                                  "scope": scope.as_dict()})
+        refused = _audit_or_refuse(audit_path, {"event": "scope",
+                                               "scope": scope.as_dict()})
+        if refused is not None:
+            return refused
         return _ok(scope=scope.as_dict())
 
     steps = request.get("steps")
@@ -1291,7 +1487,7 @@ def main(scope_path=None, audit_path=None):
         return _denied(str(exc))
 
     if mode == "check":
-        append_audit(audit_path, {
+        refused = _audit_or_refuse(audit_path, {
             "event": "check",
             "ts": datetime.now(timezone.utc).isoformat(),
             "objective_sha256": hashlib.sha256(
@@ -1300,12 +1496,12 @@ def main(scope_path=None, audit_path=None):
             "targets": targets,
             "argv": [step["argv"] for step in normalized],
         })
+        if refused is not None:
+            return refused
         return _ok(risk=risk, targets=targets,
                    steps=[step["argv"] for step in normalized])
 
-    results = run_steps(normalized, total_timeout)
-    append_audit(audit_path, {
-        "event": "execute",
+    plan = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "objective_sha256": hashlib.sha256(
             objective.encode("utf-8")).hexdigest(),
@@ -1313,14 +1509,39 @@ def main(scope_path=None, audit_path=None):
         "risk": risk,
         "targets": targets,
         "steps": normalized,
+    }
+    # I7: the intent record must be on disk BEFORE anything runs. If that
+    # write fails, refuse to execute: no audit, no run.
+    refused = _audit_or_refuse(audit_path, {"event": "execute_intent", **plan})
+    if refused is not None:
+        return refused
+    try:
+        results = run_steps(normalized, total_timeout)
+    except PolicyError as exc:
+        return _denied(str(exc))
+    record = {
+        "event": "execute",
+        **plan,
+        "ts": datetime.now(timezone.utc).isoformat(),
         "results": [{
             "exit_code": result["exit_code"],
             "duration_ms": result["duration_ms"],
             "timed_out": result["timed_out"],
             "truncated": result["truncated"],
             "stdout_sha256": result["stdout_sha256"],
+            "stderr_sha256": result["stderr_sha256"],
         } for result in results],
-    })
+    }
+    try:
+        append_audit(audit_path, record)
+    except OSError as exc:
+        # The steps already ran, so return their results with an honest error
+        # rather than pretending nothing happened.
+        return _respond(3, {
+            "ok": False,
+            "error": "audit write failed after execution: %s" % exc,
+            "results": results, "risk": risk, "targets": targets,
+        })
     return _ok(results=results, risk=risk, targets=targets)
 
 
