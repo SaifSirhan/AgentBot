@@ -47,13 +47,18 @@ DESTRUCTIVE_FLAGS = {
 DENIED_FLAGS = {
     # curl proxies and remote-name writes are exfiltration or write paths.
     # R3: following a redirect leaves the destination we validated.
+    # R9: protocol control (--proto*), FTP quote/port and telnet options are
+    # relay primitives, and a redirect budget re-enables what R3 refuses.
     "curl": ("-O", "--remote-name", "--remote-name-all", "--output-dir",
              "-x", "--proxy",
              "--socks4", "--socks4a", "--socks5", "--socks5-hostname",
              "--preproxy", "--resolve", "--connect-to", "--unix-socket",
              "--abstract-unix-socket", "--dns-servers", "--dns-interface",
              "--dns-ipv4-addr", "--dns-ipv6-addr",
-             "-L", "--location", "--location-trusted"),
+             "-L", "--location", "--location-trusted",
+             "--proto", "--proto-default", "--proto-redir", "--max-redirs",
+             "-Q", "--quote", "-P", "--ftp-port", "-t", "--telnet-option",
+             "-U", "--proxy-user"),
     "ffuf": ("-x", "--proxy", "-r", "-input-cmd"),
     "gobuster": ("--proxy", "-r", "--followredirect"),
     "feroxbuster": ("--proxy", "-r", "--redirects"),
@@ -62,10 +67,14 @@ DENIED_FLAGS = {
                "-workflow", "--workflow", "-code", "-headless",
                "-follow-redirects", "-fr"),
     "whatweb": ("--proxy", "--custom-plugin", "--follow-redirect",
-                "-i", "--input-file"),
+                "-i", "--input-file", "--max-redirects"),
+    # R9: -b is an FTP bounce relay, --dns-servers picks out-of-scope
+    # resolvers, -S spoofs the source address and --ip-options asks for
+    # loose source routing. None has a lab need.
     "nmap": ("--proxies", "--datadir", "--script-args-file",
-             "--script-updatedb", "-iR", "--excludefile", "-D", "--resume"),
-    "dig": ("-f",),
+             "--script-updatedb", "-iR", "--excludefile", "-D", "--resume",
+             "-b", "--dns-servers", "-S", "--ip-options"),
+    "dig": ("-f", "-b"),
     "masscan": ("-iL", "--excludefile", "--resume"),
     # Dynamic engines/providers load native code; s_client can use a proxy.
     "openssl": ("-engine", "-provider", "-provider-path", "-proxy"),
@@ -103,25 +112,29 @@ READ_ONLY_DIRS = ("/usr/share/wordlists", "/usr/share/seclists",
                   "/etc/ssl/certs")
 # R1: flags that consume the next token (or an attached value) as a value
 # instead of a target. This is not an allowlist of permitted flags: unknown
-# flags stay allowed, but every value they carry must still pass R2/R3, and
+# flags stay allowed, but every value they carry must still pass R2/R3/R8, and
 # every bare token must still parse as a target (R1).
+# R8: a value flag is only half a licence. Its value must still end as a
+# validated target, a confined path (PATH_FLAGS) or a class-licensed
+# non-destination (NON_DESTINATION_VALUES); R9 removed the destination-bearing
+# flags that used to be licensed here.
 VALUE_FLAGS = {
-    "nmap": ("-p", "-e", "-S", "-s", "-T", "-b", "-g", "--source-port",
+    "nmap": ("-p", "-e", "-s", "-T", "-g", "--source-port",
              "-PS", "-PA", "-PU", "-PY", "--script", "--script-args",
              "--exclude", "--max-rtt-timeout", "--initial-rtt-timeout",
              "--host-timeout", "--scan-delay", "--max-scan-delay",
              "--version-intensity", "--min-rate", "--max-rate",
              "--max-retries", "--min-parallelism", "--max-parallelism",
              "--min-hostgroup", "--max-hostgroup", "--script-timeout",
-             "--ttl", "--data-length", "--ip-options", "--spoof-mac",
-             "--dns-servers", "--servicedb", "--versiondb", "--stylesheet",
+             "--ttl", "--data-length", "--spoof-mac",
+             "--servicedb", "--versiondb", "--stylesheet",
              "-oN", "-oX", "-oG", "-oA", "-oS"),
     "whatweb": ("--log-brief", "--log-verbose", "--log-errors", "--log-json",
                 "--log-xml", "-a", "--agent", "--aggression", "-U",
                 "--user-agent", "-u", "--url", "-H", "--header", "-c",
                 "--cookies", "--max-threads", "--wait", "--open-timeout",
-                "--read-timeout", "--max-redirects"),
-    "dig": ("-p", "-t", "-q", "-y", "-b", "-c", "-k"),
+                "--read-timeout"),
+    "dig": ("-p", "-t", "-q", "-y", "-c", "-k"),
     "host": ("-t", "-W", "-a", "-c", "-R"),
     "whois": ("-h", "-p"),
     "curl": ("-H", "--header", "-A", "--user-agent", "-e", "--referer",
@@ -133,12 +146,10 @@ VALUE_FLAGS = {
              "-w", "--write-out", "--cacert", "--cert", "--key", "-E",
              "-u", "--user", "--retry", "--retry-delay", "--retry-max-time",
              "-C", "--continue-at", "-r", "--range", "-y", "--speed-time",
-             "-Y", "--speed-limit", "-z", "--time-cond", "-Q", "--quote",
-             "-P", "--ftp-port", "-t", "--telnet-option", "-U",
-             "--proxy-user", "--url", "--max-filesize", "--limit-rate",
+             "-Y", "--speed-limit", "-z", "--time-cond",
+             "--url", "--max-filesize", "--limit-rate",
              "--ciphers", "--cert-type", "--key-type", "--pass", "--libcurl",
-             "--netrc-file", "--proto", "--proto-default", "--proto-redir",
-             "--max-redirs", "--keepalive-time"),
+             "--netrc-file", "--keepalive-time"),
     "openssl": ("-connect", "-in", "-out", "-CAfile", "-cert", "-key",
                 "-untrusted", "-sess_out", "-keylogfile", "-writerand",
                 "-servername", "-starttls", "-sess_in", "-CApath",
@@ -150,8 +161,8 @@ VALUE_FLAGS = {
                 "-write_buf", "-signkey", "-CA", "-CAkey", "-CAserial",
                 "-extfile", "-extensions", "-days", "-checkend", "-subj",
                 "-addtrust", "-addreject", "-alias", "-setalias"),
-    "searchsploit": ("-m", "--mirror", "-p", "--path", "--id", "--exclude",
-                     "--nmap"),
+    "searchsploit": ("-t", "-m", "--mirror", "-p", "--path", "--id",
+                     "--exclude", "--nmap"),
     "ffuf": ("-w", "--wordlist", "-u", "--url", "-t", "--threads", "-mc",
              "-fc", "-fs", "-fl", "-fw", "-fr", "-o", "--output", "-H",
              "--header", "-X", "--method", "-d", "--data", "-b", "--cookie",
@@ -170,9 +181,11 @@ VALUE_FLAGS = {
                     "--output", "-H", "--header", "-b", "--cookies", "-a",
                     "--useragent", "-T", "--timeout", "--rate-limit",
                     "-d", "--depth", "-L", "--scan-limit", "--debug-log"),
-    "nuclei": ("-u", "--url", "-o", "--output", "-severity", "-tags", "-rl",
-               "--rate-limit", "-H", "--header", "-etags", "-retries",
-               "-timeout", "-stats-interval", "-si", "-mhe",
+    # R11: -output is a whole single-dash flag, not -o with an attached
+    # "utput"; it must be known here so the atomic match wins over -o.
+    "nuclei": ("-u", "--url", "-o", "-output", "--output", "-severity",
+               "-tags", "-rl", "--rate-limit", "-H", "--header", "-etags",
+               "-retries", "-timeout", "-stats-interval", "-si", "-mhe",
                "-max-host-error", "-eh", "-exclude-hosts", "-debug-log",
                "-output-format", "-of"),
     "nikto": ("-h", "-host", "-p", "-port", "-o", "-output", "--output",
@@ -213,14 +226,169 @@ PATH_FLAGS = {
              "-debug-log"),
     "gobuster": ("-w", "--wordlist", "-o", "--output", "-p", "--patternfile"),
     "feroxbuster": ("-w", "--wordlist", "-o", "--output", "--debug-log"),
-    "nuclei": ("-o", "--output", "-debug-log"),
+    "nuclei": ("-o", "-output", "--output", "-debug-log"),
     "nikto": ("-o", "-output", "--output"),
     "masscan": ("-oX", "-oJ", "-oG", "-oL"),
+}
+# R10: these flags carry the destination itself. Their values must always
+# parse as a target and be scope-checked; they can never be licensed as a
+# non-destination and never fall through to the path rules.
+DESTINATION_FLAGS = {
+    "curl": ("--url",),
+    "whatweb": ("-u", "--url"),
+    "nuclei": ("-u",),
+    "ffuf": ("-u",),
+    "dig": ("-q",),
+    "masscan": ("--range",),
 }
 # R4: these values are script names / script arguments, so they are not
 # parsed as targets; classify checks the names and target_tokens checks the
 # argument pieces (which may still be paths or destinations).
 NAME_FLAGS = {"nmap": ("--script", "--script-args")}
+# R8: the only licence a non-destination value gets. Every entry names a value
+# class from VALUE_CLASSES, so a flag cannot license "anything". A flag that is
+# neither here, nor in PATH_FLAGS/READ_FLAGS, nor in DESTINATION_FLAGS has no
+# licence at all: its value must parse as a target or be a confined path.
+NON_DESTINATION_VALUES = {
+    "nmap": {
+        "-p": "ports", "-g": "ports", "--source-port": "ports",
+        "-PS": "ports", "-PA": "ports", "-PU": "ports", "-PY": "ports",
+        "-s": "word", "-e": "word", "-T": "number",
+        "--max-rtt-timeout": "number", "--initial-rtt-timeout": "number",
+        "--host-timeout": "number", "--scan-delay": "number",
+        "--max-scan-delay": "number", "--script-timeout": "number",
+        "--version-intensity": "number", "--min-rate": "number",
+        "--max-rate": "number", "--max-retries": "number",
+        "--min-parallelism": "number", "--max-parallelism": "number",
+        "--min-hostgroup": "number", "--max-hostgroup": "number",
+        "--ttl": "number", "--data-length": "number",
+    },
+    "whatweb": {
+        "-a": "number", "--aggression": "number", "--max-threads": "number",
+        "--wait": "number", "--open-timeout": "number",
+        "--read-timeout": "number", "-U": "text", "--user-agent": "text",
+        "--agent": "text", "-H": "text", "--header": "text",
+        "-c": "text", "--cookies": "text",
+    },
+    "dig": {"-p": "ports", "-t": "record", "-c": "word", "-y": "text"},
+    "host": {"-t": "record", "-c": "word", "-W": "number", "-R": "number",
+             "-a": "word"},
+    "whois": {"-p": "ports"},
+    "curl": {
+        "-H": "text", "--header": "text", "-A": "text", "--user-agent": "text",
+        "-d": "text", "--data": "text", "--data-raw": "text",
+        "--data-binary": "text", "--data-ascii": "text",
+        "--data-urlencode": "text", "-F": "text", "--form": "text",
+        "--form-string": "text", "-X": "method", "--request": "method",
+        "-m": "number", "--max-time": "number",
+        "--connect-timeout": "number", "-w": "text", "--write-out": "text",
+        "-u": "text", "--user": "text", "--retry": "number",
+        "--retry-delay": "number", "--retry-max-time": "number",
+        "-C": "number", "--continue-at": "number", "-r": "range",
+        "--range": "range", "-y": "number", "--speed-time": "number",
+        "-Y": "number", "--speed-limit": "number",
+        "--max-filesize": "number", "--limit-rate": "number",
+        "--ciphers": "text", "--cert-type": "word", "--key-type": "word",
+        "--pass": "text", "--keepalive-time": "number",
+    },
+    "openssl": {
+        "-starttls": "word", "-verify": "number", "-certform": "word",
+        "-keyform": "word", "-inform": "word", "-outform": "word",
+        "-alpn": "text", "-cipher": "text", "-ciphersuites": "text",
+        "-sigalgs": "text", "-groups": "text", "-curves": "text",
+        "-named_curve": "text", "-keymatexport": "text",
+        "-keymatexportlen": "number", "-max_send_frag": "number",
+        "-split_send_frag": "number", "-read_buf": "number",
+        "-write_buf": "number", "-days": "number", "-checkend": "number",
+        "-subj": "text", "-addtrust": "word", "-addreject": "word",
+        "-alias": "text", "-setalias": "text", "-extensions": "word",
+    },
+    "searchsploit": {"-t": "text", "--exclude": "text", "--id": "number",
+                     "-m": "number", "--mirror": "number"},
+    "ffuf": {
+        "-t": "number", "--threads": "number", "-mc": "number",
+        "-fc": "number", "-fs": "number", "-fl": "number", "-fw": "number",
+        "-fr": "text", "-H": "text", "--header": "text", "-X": "method",
+        "--method": "method", "-d": "text", "--data": "text",
+        "-b": "text", "--cookie": "text", "-p": "number", "--delay": "number",
+        "-rate": "number", "-timeout": "number", "-maxtime": "number",
+        "-maxtime-job": "number", "-recursion-depth": "number",
+        "-of": "word", "--output-format": "word",
+        "-request-proto": "word", "-mode": "word", "-match": "word",
+        "-filter": "word",
+    },
+    "gobuster": {
+        "-t": "number", "--threads": "number", "-x": "text",
+        "--extensions": "text", "-s": "text", "--statuscodes": "text",
+        "-b": "text", "--statuscodesblacklist": "text", "-a": "text",
+        "--useragent": "text", "-c": "text", "--cookies": "text",
+        "-H": "text", "--headers": "text", "-P": "text", "--password": "text",
+        "-U": "text", "--username": "text", "--timeout": "number",
+        "--delay": "number", "-m": "word", "--mode": "word",
+        "--method": "method",
+    },
+    "feroxbuster": {
+        "-t": "number", "--threads": "number", "-x": "text",
+        "--extensions": "text", "-s": "text", "--statuscodes": "text",
+        "-H": "text", "--header": "text", "-b": "text", "--cookies": "text",
+        "-a": "text", "--useragent": "text", "-T": "number",
+        "--timeout": "number", "--rate-limit": "number", "-d": "number",
+        "--depth": "number", "-L": "number", "--scan-limit": "number",
+    },
+    "nuclei": {
+        "-severity": "text", "-tags": "text", "-etags": "text",
+        "-rl": "number", "--rate-limit": "number", "-H": "text",
+        "--header": "text", "-retries": "number", "-timeout": "number",
+        "-stats-interval": "number", "-si": "number", "-mhe": "number",
+        "-max-host-error": "number", "-output-format": "word", "-of": "word",
+    },
+    "nikto": {
+        "-p": "ports", "-port": "ports", "-id": "text", "-Tuning": "text",
+        "-Format": "word", "-Cgidirs": "text", "-mutate": "number",
+        "-evasion": "number", "-timeout": "number", "-Pause": "number",
+        "-Display": "word",
+    },
+    "masscan": {
+        "-p": "ports", "--ports": "ports", "--rate": "number",
+        "--adapter": "word", "--adapter-port": "ports",
+        "--source-port": "ports", "--retries": "number",
+        "--timeout": "number", "--wait": "number", "-e": "word",
+        "--interface": "word",
+    },
+    "nc": {"-p": "ports", "-w": "number", "-q": "number", "-i": "number",
+           "-G": "number", "-T": "word", "-X": "word", "-P": "text"},
+}
+# R11: the record types dig/host accept as a positional argument. AXFR/IXFR
+# are zone transfers, not lookups, so they are deliberately absent.
+RECORD_TYPES = frozenset({"A", "AAAA", "MX", "TXT", "NS", "SOA", "CNAME",
+                          "PTR", "SRV", "ANY", "CAA"})
+RECORD_POSITIONALS = frozenset({"dig", "host"})
+HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH",
+                          "OPTIONS", "TRACE"})
+# R8: value classes. Every class except "text" has a pattern that cannot match
+# a host, an IP, a URL or a userinfo form (no dot, no "@", and ":" only as a
+# port-spec protocol prefix), so a structured match may be accepted before the
+# host-shaped rule -- that is what keeps `nmap -p T:80` usable. "text" can
+# contain anything, so a text-licensed value is still host-shaped-checked.
+VALUE_CLASSES = {
+    "number": re.compile(r"[0-9]+(?:ms|s|m|h|d|[kKmMgG])?"),
+    # A port spec: a number, a range, `-` (all ports), a service name, or any
+    # of those behind a T:/U:/S:/P: protocol prefix. No dot and no "@", so it
+    # can never describe a host, an IP or a URL.
+    "ports": re.compile(
+        r"(?:[TUSP]:)?(?:[0-9]+(?:-[0-9]+)?|[A-Za-z][A-Za-z0-9_-]*|-)"),
+    "range": re.compile(r"(?:[0-9]+-[0-9]*|-[0-9]+)"),
+    "word": re.compile(r"[A-Za-z0-9_-]+"),
+    "record": RECORD_TYPES,
+    "method": HTTP_METHODS,
+    "text": re.compile(r".+", re.DOTALL),
+}
+STRUCTURED_CLASSES = frozenset(VALUE_CLASSES) - {"text"}
+# R8: a value that fullmatches this and carries ".", ":" or "@" is host-shaped:
+# it must parse as a target and be scope-checked, or be refused.
+HOST_SHAPED_RE = re.compile(r"[A-Za-z0-9._:*@+-]+")
+# R8: an NSE script-argument name is an identifier, never a destination.
+SCRIPT_ARG_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 # Binaries that really do bundle short flags (getopt style). The Go/Perl/Ruby
 # scanners take single-dash flags atomically, so `-mc` is one flag, not `-m -c`.
 BUNDLE_FLAGS = frozenset({"curl", "nmap", "nc"})
@@ -243,6 +411,19 @@ HOST_RE = re.compile(
     r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}"
     r"(?:\.[A-Za-z0-9-]{1,63})+$"
 )
+# R8: `scheme:rest` without `//`. The rest being all digits means this is a
+# host:port pair, not a URL, so the caller checks that before using it.
+SCHEME_ONLY_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):(.*)$", re.DOTALL)
+# R8: the schemes that make `prefix:rest@host` a URL. With any other prefix
+# the text before "@" is userinfo, so `user:pass@host:port` still resolves to
+# its host. Every scheme curl/nmap can actually dial is listed, so a denied
+# scheme cannot be smuggled in behind a username.
+URL_SCHEMES = frozenset({
+    "http", "https", "ftp", "ftps", "file", "gopher", "dict", "ldap", "ldaps",
+    "imap", "imaps", "pop3", "pop3s", "smtp", "smtps", "telnet", "tftp",
+    "scp", "sftp", "ssh", "rtsp", "smb", "smbs", "ws", "wss", "data",
+    "mailto", "news", "nntp", "rsync", "git", "mqtt",
+})
 
 
 class PolicyError(RuntimeError):
@@ -337,6 +518,10 @@ def _target_from_token(token):
     R1/R3: only http/https URLs are destinations, and a single trailing dot
     on a hostname is normalized before matching so `example.com.` is refused
     as public instead of being dropped.
+    R8: a scheme-only URL (`ftp:evil.com`, `http:host`) is a URL and gets the
+    same http/https rule, and a userinfo form (`user@host`,
+    `user:pass@host:port`) is stripped to the host so the host is what gets
+    scope-checked. `host:port` is still a host with a port, not a scheme.
     """
     raw = token.strip()
     if not raw:
@@ -353,16 +538,28 @@ def _target_from_token(token):
             return ("ip", ipaddress.ip_address(raw[1:end]))
         except ValueError:
             return None
-    if "://" in raw:
+    scheme_only = SCHEME_ONLY_RE.match(raw)
+    if (scheme_only and "@" in raw
+            and scheme_only.group(1).lower() not in URL_SCHEMES):
+        # R8: `user:pass@host:port` is a userinfo form, not a URL: the text
+        # before the colon is a username. A real scheme (ftp:user@host) is
+        # still parsed as a URL below, so it cannot dodge the http rule.
+        raw = raw.rsplit("@", 1)[1]
+        scheme_only = None
+    if "://" in raw or (scheme_only and not scheme_only.group(2).isdigit()):
         try:
             parts = urllib.parse.urlsplit(raw)
         except ValueError:
             return None
         if parts.scheme.lower() not in ("http", "https"):
             return None
-        raw = parts.hostname or ""
+        raw = parts.hostname or parts.path.split("/")[0]
         if not raw:
             return None
+    if "@" in raw:
+        raw = raw.rsplit("@", 1)[1]
+    if not raw:
+        return None
     if raw.endswith("."):
         raw = raw[:-1]
     if raw.count(":") == 1:
@@ -378,6 +575,16 @@ def _target_from_token(token):
     if HOST_RE.match(raw):
         return ("domain", raw.lower())
     return None
+
+
+def _is_host_shaped(value):
+    """R8: a value that could be a host, IP, URL or userinfo form.
+
+    Such a value must parse as a target and be scope-checked, or be refused;
+    it may never be waved through as a licensed non-destination.
+    """
+    return (HOST_SHAPED_RE.fullmatch(value) is not None
+            and any(character in value for character in ".:@"))
 
 
 def _flag_names(binary):
@@ -424,7 +631,9 @@ def _iter_items(argv):
     short clusters are expanded for the getopt-style binaries, `--flag=value`
     is split on the first `=`, and a value-taking flag inside a cluster takes
     the rest of the cluster (curl `-so FILE` == `-s -o FILE`). An unknown flag
-    still consumes the token after it, so its value cannot hide from R2/R3.
+    still consumes the token after it, so its value cannot hide from R2/R3/R8.
+    R11: the single-dash binaries match a whole known flag name first, so
+    nuclei `-output` is one flag and never `-o` with an attached "utput".
     """
     binary = argv[0]
     tokens = argv[1:]
@@ -497,8 +706,13 @@ def _iter_items(argv):
         if name is not None:
             if name in values:
                 yield ("value", name, token[len(name):])
-            else:
+            elif len(token) == len(name):
                 yield ("flag", name, None)
+            else:
+                # R8: a no-value flag with an attached remainder would drop
+                # that remainder uninspected, so refuse the form instead.
+                raise PolicyError(
+                    "flag %s does not take an attached value" % name)
             continue
         item, index = _unknown_item(tokens, index, token)
         yield item
@@ -566,15 +780,120 @@ def _check_nse_scripts(value):
                 "NSE script %r is not on the policy allowlist" % part)
 
 
+def _class_matches(licensed, part):
+    """Does part fit the value class this flag is licensed for?"""
+    pattern = VALUE_CLASSES[licensed]
+    if isinstance(pattern, frozenset):
+        return part.upper() in pattern
+    return pattern.fullmatch(part) is not None
+
+
+def _inspect_part(part, licensed, scope, targets, label):
+    """R8: one value part ends as a target, a confined path or a licence.
+
+    There is no fourth outcome. A structured class (ports, numbers, record
+    types, methods, identifiers) may license a part only when that part does
+    not parse as a target, so a destination can never hide in a licence.
+    Anything that parses as a target is scope-checked. A host-shaped part that
+    does not parse is refused, a path-like part is confined, and only then may
+    a free-text licence apply. An unlicensed part is a refusal.
+    """
+    target = _target_from_token(part)
+    if target is not None:
+        targets.append(_validate_target(target[0], target[1], scope))
+        return
+    if licensed in STRUCTURED_CLASSES and _class_matches(licensed, part):
+        return
+    if _is_host_shaped(part):
+        raise PolicyError(
+            "%s value %r looks like a host but is not a target the "
+            "policy can validate" % (label, part))
+    if _is_path_like(part):
+        _confine_path(part, (OUTPUT_ROOT,))
+        return
+    if licensed is not None and _class_matches(licensed, part):
+        return
+    raise PolicyError(
+        "%s value %r is not a target, a confined path or a licensed "
+        "non-destination" % (label, part))
+
+
+def _destination_value(binary, flag, value, scope, targets):
+    """R10: a destination flag's value must parse as a target, always."""
+    if binary == "masscan" and flag == "--range":
+        ends = value.split("-")
+        if len(ends) != 2:
+            raise PolicyError("--range must be two IP addresses, A-B")
+        parsed = []
+        for end in ends:
+            target = _target_from_token(end)
+            if target is None or target[0] != "ip":
+                raise PolicyError(
+                    "--range end %r is not an IP address" % end)
+            parsed.append(target[1])
+        start, finish = parsed
+        if start.version != finish.version or int(start) > int(finish):
+            raise PolicyError("--range must run from a lower IP to a higher one")
+        # Both ends in one scope network: a range that crosses out of scope
+        # is refused even when each end happens to be in a different network.
+        if not any(start in network and finish in network
+                   for network in scope.networks):
+            raise PolicyError("--range %r crosses out of scope" % value)
+        targets.append(_validate_target("ip", start, scope))
+        targets.append(_validate_target("ip", finish, scope))
+        return
+    target = _target_from_token(value)
+    if target is None:
+        raise PolicyError(
+            "flag %s needs a target, got %r" % (flag, value))
+    targets.append(_validate_target(target[0], target[1], scope))
+
+
+def _inspect_value(binary, flag, value, scope, targets):
+    """R8: account for a flag value, comma-separated parts included."""
+    if flag in DESTINATION_FLAGS.get(binary, ()):
+        _destination_value(binary, flag, value, scope, targets)
+        return
+    if (flag in PATH_FLAGS.get(binary, ())
+            or flag in READ_FLAGS.get(binary, ())):
+        _confine_path(value, _path_roots(binary, flag))
+        return
+    licensed = NON_DESTINATION_VALUES.get(binary, {}).get(flag)
+    for part in value.split(","):
+        if not part:
+            raise PolicyError("flag %s has an empty value part" % flag)
+        _inspect_part(part, licensed, scope, targets, "flag %s" % flag)
+
+
+def _check_dig_option(token, scope, targets):
+    """R11: a dig `+option` is never a destination.
+
+    R8 still applies to an attached value, so `+subnet=8.8.8.8` cannot ride
+    in as an option: it is scope-checked like any other destination.
+    """
+    name, separator, value = token[1:].partition("=")
+    if not VALUE_CLASSES["word"].fullmatch(name):
+        raise PolicyError("dig option %r is not a plain option name" % token)
+    if not separator:
+        return
+    if not value:
+        raise PolicyError("dig option %r needs a value" % token)
+    _inspect_part(value, "word", scope, targets, "dig option %s" % name)
+
+
 def _check_script_args(value, scope):
-    """R4: split on `,` then `=`, and account for every piece.
+    """R4/R8: split on `,` then `=`, and account for every piece.
 
     A piece that names a destination is scope-checked and a path-like piece
     is confined to OUTPUT_ROOT; the read-only wordlist directories are not
-    granted here. Argument names are identifiers, never destinations.
+    granted here. Argument names are licensed identifiers, never destinations,
+    and an argument value goes through the same R8 inspection as a flag value.
     """
     if not value:
         raise PolicyError("--script-args requires a value")
+    # Script-argument destinations are scope-checked but are not scan targets,
+    # so they are validated into a list of their own (round-1 behavior).
+    checked = []
     for piece in value.split(","):
         name, separator, argument = piece.partition("=")
         name = name.strip()
@@ -585,27 +904,27 @@ def _check_script_args(value, scope):
                 or lowered.endswith(".newtargets")):
             raise PolicyError(
                 "script argument %r would add unvalidated targets" % name)
-        if _is_path_like(name):
-            _confine_path(name, (OUTPUT_ROOT,))
+        if not SCRIPT_ARG_NAME_RE.fullmatch(name):
+            raise PolicyError(
+                "script argument name %r is not an identifier" % name)
         if not separator:
-            continue
-        target = _target_from_token(argument)
-        if target is not None:
-            _validate_target(target[0], target[1], scope)
-        elif _is_path_like(argument):
-            _confine_path(argument, (OUTPUT_ROOT,))
+            continue           # a boolean script argument: name only
+        if not argument:
+            raise PolicyError("script argument %r needs a value" % name)
+        _inspect_part(argument, "text", scope, checked,
+                      "script argument %s" % name)
 
 
 def target_tokens(argv, scope):
-    """R1: account for every token, and return the validated targets.
+    """R1/R8: account for every token, and return the validated targets.
 
-    Nothing is dropped silently any more. A bare token must parse as a
-    target; a flag value must either be a confined path or a target that is
-    itself in scope. Anything else is a refusal.
+    Nothing is dropped silently. A bare token must parse as a target or be an
+    explicitly licensed positional (search terms, a gobuster mode word, an nc
+    port, a dig/host record type, a dig +option). A flag value must end as a
+    validated in-scope target, a confined path, or a class-licensed
+    non-destination. Anything else is a refusal.
     """
     binary = argv[0]
-    path_flags = (set(PATH_FLAGS.get(binary, ()))
-                  | set(READ_FLAGS.get(binary, ())))
     name_flags = set(NAME_FLAGS.get(binary, ()))
     targets = []
     for kind, token, value in _iter_items(argv):
@@ -618,6 +937,11 @@ def target_tokens(argv, scope):
                 continue           # gobuster dir/dns/fuzz/vhost/s3/tftp
             if binary == "nc" and token.isdigit():
                 continue           # the port after the host
+            if binary in RECORD_POSITIONALS and token.upper() in RECORD_TYPES:
+                continue           # R11: dig/host positional record type
+            if binary == "dig" and token.startswith("+"):
+                _check_dig_option(token, scope, targets)
+                continue           # R11: dig +option, never a destination
             target = _target_from_token(token)
             if target is None:
                 raise PolicyError(
@@ -630,14 +954,7 @@ def target_tokens(argv, scope):
             continue               # classify enforces R4 on --script names
         if not value:
             raise PolicyError("flag %s requires a value" % token)
-        if token in path_flags:
-            _confine_path(value, _path_roots(binary, token))
-            continue
-        target = _target_from_token(value)
-        if target is not None:
-            targets.append(_validate_target(target[0], target[1], scope))
-        elif _is_path_like(value):
-            _confine_path(value, (OUTPUT_ROOT,))
+        _inspect_value(binary, token, value, scope, targets)
     return targets
 
 

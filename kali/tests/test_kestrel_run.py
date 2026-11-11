@@ -384,9 +384,12 @@ class WalkerRegressionTests(TempOutputRoot):
                 self.denied(argv)
 
     def test_r1_flag_values_are_still_scope_checked(self):
-        self.validate(["nmap", "-S", "192.168.56.10", "192.168.56.11"])
+        # R9 moved nmap -S to an outright denial, so the host-valued positive
+        # is --exclude; the -S denial below is kept and strengthened.
+        self.validate(["nmap", "--exclude", "192.168.56.11", "192.168.56.10"])
         for argv in (
             ["nmap", "-S", "8.8.8.8", "192.168.56.10"],
+            ["nmap", "-S", "192.168.56.10", "192.168.56.11"],
             ["nmap", "--exclude", "8.8.8.8", "192.168.56.10"],
             ["dig", "-b", "8.8.8.8", "lab.local"],
             ["curl", "-e", "http://example.com/", "http://app.lab.local/"],
@@ -485,6 +488,236 @@ class WalkerRegressionTests(TempOutputRoot):
         self.validate(["curl", "http://app.lab.local./"])
         self.denied(["curl", "http://example.com./"])
         self.denied(["curl", "http://app.lab.local/", "http://example.com./"])
+
+
+class FlagValuePolicyTests(TempOutputRoot):
+    """R8-R11: no flag value is ignored, relay flags are denied outright, and
+    the legitimate lab forms (record types, +options, ranges, -output) work."""
+
+    def setUp(self):
+        super().setUp()
+        self.scope = kr.load_scope(write_scope(self.temp.name))
+
+    def validate(self, argv):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], self.scope)
+
+    def denied(self, argv):
+        with self.assertRaises(kr.PolicyError):
+            self.validate(argv)
+
+    def test_r9_relay_and_protocol_control_flags_are_denied(self):
+        for argv in (
+            ["nmap", "-b", "user@8.8.8.8", "192.168.56.10"],
+            ["nmap", "-b", "user:pass@8.8.8.8:21", "192.168.56.10"],
+            ["nmap", "--dns-servers", "8.8.8.8,1.1.1.1", "192.168.56.10"],
+            ["nmap", "-S", "8.8.8.8", "192.168.56.10"],
+            # An in-scope value does not license the flag either.
+            ["nmap", "-S", "192.168.56.10", "192.168.56.11"],
+            ["nmap", "--ip-options", "L 8.8.8.8", "192.168.56.10"],
+            ["nmap", "--ip-options=L 8.8.8.8", "192.168.56.10"],
+            ["dig", "-b", "8.8.8.8", "lab.local"],
+            ["dig", "-b", "192.168.56.10", "lab.local"],
+            ["curl", "--proto-default", "ftp", "http://app.lab.local/"],
+            ["curl", "--proto", "=http", "http://app.lab.local/"],
+            ["curl", "--proto-redir", "=ftp", "http://app.lab.local/"],
+            ["curl", "--max-redirs", "5", "http://app.lab.local/"],
+            ["curl", "-Q", "SITE EXEC", "http://app.lab.local/"],
+            ["curl", "--quote", "SITE EXEC", "http://app.lab.local/"],
+            ["curl", "-P", "-", "http://app.lab.local/"],
+            ["curl", "--ftp-port", "-", "http://app.lab.local/"],
+            ["curl", "-t", "TTYPE=vt100", "http://app.lab.local/"],
+            ["curl", "--telnet-option", "TTYPE=vt100", "http://app.lab.local/"],
+            ["curl", "-U", "user:pass", "http://app.lab.local/"],
+            ["curl", "--proxy-user", "user:pass", "http://app.lab.local/"],
+            ["whatweb", "--max-redirects", "5", "http://app.lab.local/"],
+            # The same denials behind '=' and inside a short cluster.
+            ["whatweb", "--max-redirects=5", "http://app.lab.local/"],
+            ["curl", "-sQ", "SITE EXEC", "http://app.lab.local/"],
+            ["nmap", "-vb", "user@8.8.8.8", "192.168.56.10"],
+            ["curl", "--proto-default=ftp", "http://app.lab.local/"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+    def test_r8_host_shaped_values_must_parse_or_be_refused(self):
+        for argv in (
+            ["curl", "--url", "ftp:evil.com", "http://app.lab.local/"],
+            ["curl", "--url", "ftp:app.lab.local", "http://app.lab.local/"],
+            ["nmap", "--exclude", "user@8.8.8.8", "192.168.56.10"],
+            ["nmap", "--exclude", "user:pass@8.8.8.8:21", "192.168.56.10"],
+            ["nmap", "--exclude", "a.b:c:d", "192.168.56.10"],
+            ["curl", "--unknown", "user@8.8.8.8", "http://app.lab.local/"],
+            ["nmap", "-p", "8.8.8.8", "192.168.56.10"],
+            # A port spec licence cannot hide a destination either.
+            ["nmap", "-p", "T:8.8.8.8", "192.168.56.10"],
+            ["nmap", "-p", "http:8.8.8.8", "192.168.56.10"],
+            ["nmap", "-p", "80,8.8.8.8", "192.168.56.10"],
+            ["curl", "-m", "8.8.8.8", "http://app.lab.local/"],
+            ["curl", "-A", "8.8.8.8", "http://app.lab.local/"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+    def test_r8_comma_lists_are_validated_part_by_part(self):
+        risk, targets = self.validate(
+            ["nmap", "--exclude", "192.168.56.11,192.168.56.12",
+             "192.168.56.10"])
+        self.assertEqual(
+            targets, ["192.168.56.10", "192.168.56.11", "192.168.56.12"])
+        for argv in (
+            ["nmap", "--dns-servers", "8.8.8.8,1.1.1.1", "192.168.56.10"],
+            ["nmap", "--exclude", "192.168.56.11,8.8.8.8", "192.168.56.10"],
+            ["nmap", "--exclude", "8.8.8.8,192.168.56.11", "192.168.56.10"],
+            ["nmap", "--exclude", "192.168.56.11,", "192.168.56.10"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+    def test_r8_userinfo_is_stripped_to_the_host(self):
+        for value in ("user@192.168.56.11", "user:pass@192.168.56.11:21"):
+            with self.subTest(value=value):
+                _, targets = self.validate(
+                    ["nmap", "--exclude", value, "192.168.56.10"])
+                self.assertIn("192.168.56.11", targets)
+
+    def test_r8_scheme_only_urls_get_the_http_rule(self):
+        self.validate(["curl", "--url", "http:app.lab.local"])
+        for scheme in ("ftp", "gopher", "file", "dict", "ldap"):
+            with self.subTest(scheme=scheme):
+                self.denied(["curl", "--url", scheme + ":app.lab.local",
+                             "http://app.lab.local/"])
+
+    def test_r8_licensed_non_destinations_still_work(self):
+        words = "/usr/share/wordlists/dirb/common.txt"
+        for argv in (
+            ["nmap", "-sV", "-T4", "-p", "80,443", "192.168.56.10"],
+            ["nmap", "-p", "T:80,U:53", "192.168.56.10"],
+            ["nmap", "-p-", "192.168.56.10"],
+            ["nmap", "-p", "1-65535", "192.168.56.10"],
+            ["nmap", "-p", "80,http,https-alt", "192.168.56.10"],
+            ["nmap", "--max-rtt-timeout", "100ms", "192.168.56.10"],
+            ["nmap", "--host-timeout", "30s", "192.168.56.10"],
+            ["nmap", "-e", "eth0", "192.168.56.10"],
+            ["curl", "--limit-rate", "100K", "http://app.lab.local/"],
+            ["openssl", "s_client", "-connect", "192.168.56.10:443",
+             "-alpn", "h2,http/1.1"],
+            ["curl", "-s", "-A", "Mozilla/5.0", "-H", "X-Test: 1",
+             "http://app.lab.local/"],
+            ["curl", "-X", "POST", "-d", "a=1", "http://app.lab.local/"],
+            ["curl", "-m", "10", "--retry", "2", "http://app.lab.local/"],
+            ["whatweb", "-a", "3", "http://app.lab.local/"],
+            ["dig", "-t", "MX", "-p", "53", "@192.168.56.10", "lab.local"],
+            ["nuclei", "-u", "http://app.lab.local/", "-severity",
+             "critical,high", "-rl", "50"],
+            ["searchsploit", "-t", "openssh"],
+            ["ffuf", "-w", words, "-u", "http://app.lab.local/FUZZ",
+             "-mc", "200,301"],
+            ["masscan", "-p80", "--rate", "100", "192.168.56.10"],
+            ["nc", "-zv", "-w", "3", "192.168.56.10", "80"],
+        ):
+            with self.subTest(argv=argv):
+                self.validate(argv)
+
+    def test_r8_unlicensed_values_are_refused_not_ignored(self):
+        for argv in (
+            ["curl", "--unknown", "plainword", "http://app.lab.local/"],
+            ["nmap", "--exclude", "10.0.0.*", "192.168.56.10"],
+            ["curl", "-m", "soon", "http://app.lab.local/"],
+            ["nmap", "--exclude", "", "192.168.56.10"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+    def test_r8_script_arg_values_are_never_ignored(self):
+        self.validate(["nmap", "--script", "http-title", "--script-args",
+                       "http.useragent=kestrel", "192.168.56.10"])
+        for argv in (
+            ["nmap", "--script", "http-title", "--script-args",
+             "http-title.url=ftp:evil.com", "192.168.56.10"],
+            ["nmap", "--script", "http-title", "--script-args",
+             "userdb=user@8.8.8.8", "192.168.56.10"],
+            ["nmap", "--script", "http-title", "--script-args",
+             "http-title.url=http://8.8.8.8/", "192.168.56.10"],
+            ["nmap", "--script", "http-title", "--script-args",
+             "user db=x", "192.168.56.10"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+    def test_r10_destination_flags_always_parse_as_targets(self):
+        words = "/usr/share/wordlists/dirb/common.txt"
+        for argv in (
+            ["curl", "--url", "http://app.lab.local/"],
+            ["whatweb", "-u", "http://app.lab.local/"],
+            ["whatweb", "--url", "http://app.lab.local/"],
+            ["nuclei", "-u", "http://app.lab.local/"],
+            ["ffuf", "-w", words, "-u", "http://app.lab.local/FUZZ"],
+            ["dig", "-q", "lab.local", "@192.168.56.10"],
+        ):
+            with self.subTest(argv=argv):
+                self.validate(argv)
+        for argv in (
+            ["curl", "--url", "ftp:evil.com", "http://app.lab.local/"],
+            ["curl", "--url", "http://8.8.8.8/", "http://app.lab.local/"],
+            ["curl", "--url", "out.json", "http://app.lab.local/"],
+            ["dig", "-q", "MX", "lab.local", "@192.168.56.10"],
+            ["whatweb", "-u", "MX", "http://app.lab.local/"],
+            ["nuclei", "-u", "critical", "http://app.lab.local/"],
+            ["ffuf", "-w", words, "-u", "http://app.lab.local/FUZZ",
+             "-u", "ftp:evil.com"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+    def test_r10_masscan_range_requires_both_ends_in_scope(self):
+        _, targets = self.validate(
+            ["masscan", "--range", "192.168.56.10-192.168.56.20", "-p80"])
+        self.assertEqual(targets, ["192.168.56.10", "192.168.56.20"])
+        for value in ("192.168.56.10-8.8.8.8", "8.8.8.8-192.168.56.10",
+                      "192.168.56.10-192.168.57.20",
+                      "192.168.56.20-192.168.56.10", "192.168.56.10",
+                      "192.168.56.10-", "lab.local-192.168.56.10",
+                      "192.168.56.10-192.168.56.20-192.168.56.30"):
+            with self.subTest(value=value):
+                self.denied(["masscan", "--range", value, "-p80"])
+
+    def test_r11_dig_and_host_positional_record_types(self):
+        for kind in ("A", "AAAA", "MX", "TXT", "NS", "SOA", "CNAME", "PTR",
+                     "SRV", "ANY", "CAA", "mx"):
+            with self.subTest(kind=kind):
+                self.validate(["dig", "@192.168.56.10", "lab.local", kind])
+                self.validate(["host", "lab.local", kind])
+        for kind in ("AXFR", "IXFR", "axfr"):
+            with self.subTest(kind=kind):
+                self.denied(["dig", "@192.168.56.10", "lab.local", kind])
+                self.denied(["host", "lab.local", kind])
+
+    def test_r11_dig_plus_options_are_not_destinations(self):
+        for argv in (
+            ["dig", "+short", "lab.local", "@192.168.56.10"],
+            ["dig", "+tcp", "+bufsize=4096", "lab.local", "@192.168.56.10"],
+            ["dig", "+subnet=192.168.56.0/24", "lab.local", "@192.168.56.10"],
+        ):
+            with self.subTest(argv=argv):
+                self.validate(argv)
+        for argv in (
+            ["dig", "+subnet=8.8.8.8", "lab.local", "@192.168.56.10"],
+            ["dig", "+short=8.8.8.8", "lab.local", "@192.168.56.10"],
+            ["dig", "+../evil", "lab.local", "@192.168.56.10"],
+        ):
+            with self.subTest(argv=argv):
+                self.denied(argv)
+
+    def test_r11_nuclei_single_dash_long_flags_are_whole_flags(self):
+        _, targets = self.validate(
+            ["nuclei", "-output", "out.json", "-u", "http://app.lab.local/"])
+        self.assertEqual(targets, ["app.lab.local"])
+        self.validate(["nuclei", "-output", self.out("n.json"),
+                       "-u", "http://app.lab.local/"])
+        self.validate(["nuclei", "-severity", "critical",
+                       "-u", "http://app.lab.local/"])
+        self.denied(["nuclei", "-output", "/home/kestrel/.bashrc",
+                     "-u", "http://app.lab.local/"])
 
 
 class NsePolicyTests(TempOutputRoot):
@@ -769,9 +1002,28 @@ class CliTests(TempOutputRoot):
             stdout=captured.getvalue(), stderr="")
 
     def test_environment_cannot_redirect_policy_audit_or_output(self):
+        # R12: the child runs the real CLI entry point (main with no arguments,
+        # so the DEFAULT_SCOPE/DEFAULT_AUDIT code path is exercised) but with
+        # those defaults pointed at this test's temp dir. On an installed Kali
+        # host it must never append to /var/log/kestrel/audit.jsonl.
         marker_dir = self.root / "env"
         marker_dir.mkdir()
         marker = write_scope(marker_dir, networks=["192.0.2.0/24"])
+        default_dir = self.root / "default"
+        default_dir.mkdir()
+        default_scope = write_scope(default_dir)
+        default_audit = default_dir / "audit.jsonl"
+        driver = self.root / "cli_driver.py"
+        driver.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, %r)\n"
+            "import kestrel_run as kr\n"
+            "kr.DEFAULT_SCOPE = Path(%r)\n"
+            "kr.DEFAULT_AUDIT = Path(%r)\n"
+            "raise SystemExit(kr.main())\n"
+            % (str(ROOT), str(default_scope), str(default_audit)),
+            encoding="utf-8")
         env = dict(
             os.environ,
             KESTREL_SCOPE=str(marker),
@@ -779,7 +1031,7 @@ class CliTests(TempOutputRoot):
             KESTREL_OUTPUT=str(self.root / "envroot"),
         )
         completed = subprocess.run(
-            [sys.executable, str(ROOT / "kestrel_run.py")],
+            [sys.executable, str(driver)],
             input=json.dumps({"version": 1, "mode": "scope"}),
             capture_output=True,
             text=True,
@@ -789,14 +1041,15 @@ class CliTests(TempOutputRoot):
         # The client-supplied audit destination must never be written.
         self.assertFalse(self.audit.exists())
         self.assertFalse((self.root / "envroot").exists())
-        if completed.returncode == 0:
-            # A real default scope exists on this host: it must not be the
-            # client-supplied one.
-            payload = json.loads(completed.stdout)
-            self.assertNotIn("192.0.2.0/24", payload["scope"]["networks"])
-        else:
-            self.assertEqual(completed.returncode, 2)
-            self.assertTrue(json.loads(completed.stdout)["denied"])
+        self.assertEqual(completed.returncode, 0)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        # The env-supplied scope must not be the one the policy loaded.
+        self.assertNotIn("192.0.2.0/24", payload["scope"]["networks"])
+        self.assertIn("192.168.56.0/24", payload["scope"]["networks"])
+        # The audit went to the temp default, not to the env-supplied path.
+        record = json.loads(default_audit.read_text().splitlines()[0])
+        self.assertEqual(record["event"], "scope")
 
     def test_scope_mode_returns_the_scope(self):
         completed = self.run_cli({"version": 1, "mode": "scope"})
