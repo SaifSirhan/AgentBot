@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "expires": "2027-12-31T23:59:59Z",
+  "allow_public": false,
+  "networks": ["192.168.56.0/24"],
+  "domains": ["lab.local", "*.lab.local"]
+}
