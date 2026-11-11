@@ -1080,6 +1080,46 @@ Test count: 63 (33 original + 30 hardening tests), green on Windows including
 `-W error::ResourceWarning`; the controller probe's 19 bypass cases are all
 DENIED and its three controls are unchanged.
 
+#### Hardening amendment (fix round 2)
+
+A scoped re-review found that round 1's rewritten walk still let a flag value
+fall through uninspected when it parsed as neither a target nor a path, so
+`VALUE_FLAGS` membership alone licensed destination-bearing flags. The
+round-1 R1 clause "or be the value of a known value-taking flag" is superseded
+by R8 below. Commit `fix(kali): refuse unvalidated flag values and restore
+legitimate forms`:
+
+- **R8 — No silently ignored flag value.** Every value ends in exactly one of:
+  a validated in-scope target, a confined path, or a non-destination licensed
+  by an explicit value class (ports, record types, headers, methods, timeouts,
+  script names, aggression levels). A host-shaped value (fullmatch
+  `[A-Za-z0-9._:*@+-]+` plus `.`, `:` or `@`) must parse or be refused;
+  comma-separated values are checked part by part; userinfo is stripped to the
+  host; scheme-only URLs get the http/https rule. `--script-args` values go
+  through the same inspection and argument names must be identifiers.
+- **R9 — Relay and protocol-control flags denied outright**, and removed from
+  `VALUE_FLAGS`: nmap `-b`, `--dns-servers`, `-S`, `--ip-options`; dig `-b`;
+  curl `--proto`, `--proto-default`, `--proto-redir`, `--max-redirs`,
+  `-Q`/`--quote`, `-P`/`--ftp-port`, `-t`/`--telnet-option`, `-U`/`--proxy-user`;
+  whatweb `--max-redirects`. Every earlier denial is kept.
+- **R10 — Destination flags always parse as targets** and can never be
+  licensed as non-destinations: curl `--url`, whatweb `-u`/`--url`, nuclei
+  `-u`, ffuf `-u`, dig `-q`, masscan `--range`. `--range` validates both ends
+  as in-scope IPs in one network.
+- **R11 — Legitimate forms restored**: dig/host positional record types
+  (A, AAAA, MX, TXT, NS, SOA, CNAME, PTR, SRV, ANY, CAA — not AXFR/IXFR), dig
+  `+options` (never destinations, attached values still checked), masscan
+  `--range`, and nuclei's single-dash long flags (`-output`) matched whole
+  before any short-flag expansion.
+- **R12 — Hermetic CLI test**: the environment test runs the real entry point
+  with temp scope/audit paths, so no test can write to `/etc/kestrel` or
+  `/var/log/kestrel` on an installed Kali host.
+
+Test count: 76 (63 + 13 round-2 tests), green on Windows including
+`-W error::ResourceWarning`. Round-1 probe: 19/19 bypass cases DENIED, three
+controls unchanged. Round-2 probe: 8/8 must-DENY cases DENIED, 11/11 must-ALLOW
+cases ALLOWED.
+
 ---
 
 ### Task 2: Kali install assets and operator setup

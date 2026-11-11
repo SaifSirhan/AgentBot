@@ -294,20 +294,40 @@ Kestrel cannot write it. The user edits it on Kali for phase 1.
 - Target extraction is a fail-closed, flag-aware, binary-aware walk: every
   token must be accounted for. A bare token must parse as a target — IP,
   CIDR, URL host, `host:port` value, `@resolver` token, bracketed IPv6
-  address, or hostname — or the request is refused; nothing is silently
-  dropped, even when a file with the same name exists. Known value-taking
-  flags consume their value, which is still checked: path-like values are
-  confined per §7.3 and target-like values are scope-checked. Unknown flags
-  stay permitted, but their values must pass the same rules. `--flag=value`
-  forms and bundled short flags (`-so`, `-sO`, `-vL`) are expanded and
-  checked the same way; `-T` is timing for nmap and upload for curl. Tokens
-  containing `,`, `*`, or `_` are not valid single targets and are refused.
-  One trailing dot is stripped from an FQDN before matching, so
-  `example.com.` is refused as public rather than dropped. Only `http` and
-  `https` URLs with a hostname are accepted as destinations. A command with
-  no target is allowed only for a binary in the local-safe list
-  (`searchsploit`, `openssl`; openssl `s_client` still needs a validated
-  `-connect` target).
+  address, or hostname — or be an explicitly licensed positional
+  (`searchsploit` search terms, a `gobuster` mode word, an `nc` port, a
+  `dig`/`host` record type, a `dig +option`); otherwise the request is refused.
+  Nothing is silently dropped, even when a file with the same name exists.
+  Every flag value ends in exactly one of three outcomes: a validated in-scope
+  target, a path confined per §7.3, or a non-destination licensed by an
+  explicit value class (ports, record types, headers, methods, timeouts,
+  script names, aggression levels). A host-shaped value — one that matches
+  `[A-Za-z0-9._:*@+-]+` and carries `.`, `:` or `@` — must parse as a target or
+  be refused; it can never be licensed away, and a value that parses as a
+  target is always scope-checked. Comma-separated values are split and each
+  part gets the same treatment, so `8.8.8.8,1.1.1.1` is refused part by part.
+  Userinfo forms (`user@host`, `user:pass@host:port`) are stripped to the host,
+  which is then scope-checked. Unknown flags stay permitted, but their values
+  must pass the same rules and carry no non-destination licence.
+  `--flag=value` forms and bundled short flags (`-so`, `-sO`, `-vL`) are
+  expanded and checked the same way, and a single-dash long flag
+  (`nuclei -output`) is matched whole before any short-flag expansion; `-T` is
+  timing for nmap and upload for curl. A bare token containing `,`, `*`, or
+  `_` is not a valid single target and is refused. One trailing dot is
+  stripped from an FQDN before matching, so `example.com.` is refused as
+  public rather than dropped. Only `http` and `https` URLs with a hostname are
+  accepted as destinations, scheme-only forms included (`http:host` is a URL,
+  `ftp:host` is refused). A command with no target is allowed only for a
+  binary in the local-safe list (`searchsploit`, `openssl`; openssl `s_client`
+  still needs a validated `-connect` target).
+- Destination flags always parse as targets and can never be licensed as
+  non-destinations: `curl --url`, `whatweb -u`/`--url`, `nuclei -u`, `ffuf -u`,
+  `dig -q`, `masscan --range`. `--range` takes `A-B` and both ends must be
+  in-scope IPs in the same network, so a range that crosses out of scope is
+  refused. The licensed positionals are narrow: `dig`/`host` accept the record
+  types A, AAAA, MX, TXT, NS, SOA, CNAME, PTR, SRV, ANY and CAA (never the
+  zone transfers AXFR/IXFR), and a `dig +option` is never a destination — an
+  attached value such as `+subnet=8.8.8.8` is still scope-checked.
 - Target-list, request-file, and random-target flags are denied in phase 1
   because they can hide out-of-scope targets: `nmap -iL`, `-iR`,
   `--excludefile`, and `-D` (decoys); `nuclei -l`; `ffuf -request`;
@@ -374,6 +394,14 @@ Denied outright in phase 1:
   destination: `curl -L`/`--location`/`--location-trusted`, `ffuf -r`,
   `gobuster -r`/`--followredirect`, `feroxbuster -r`/`--redirects`,
   `nuclei -follow-redirects`, and `whatweb --follow-redirect`.
+- Relay, source-routing and protocol-control flags are denied outright: they
+  are attack primitives with no lab need, and licensing their values is what
+  let an out-of-scope destination hide in a flag value. `nmap -b` (FTP bounce
+  relay), `--dns-servers` (out-of-scope resolvers), `-S` (source spoofing) and
+  `--ip-options` (loose source routing); `dig -b`; `curl --proto`,
+  `--proto-default`, `--proto-redir`, `--max-redirs`, `-Q`/`--quote`,
+  `-P`/`--ftp-port`, `-t`/`--telnet-option` and `-U`/`--proxy-user`;
+  `whatweb --max-redirects`.
 - `nmap --script` accepts only a comma-separated list of built-in names: the
   categories `default`, `safe`, `version`, `discovery`, or a fixed allowlist
   of named safe scripts (`banner`, `http-title`, `http-headers`,
