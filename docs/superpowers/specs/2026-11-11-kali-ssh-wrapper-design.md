@@ -71,7 +71,7 @@ writable by `kestrel`.
 Responsibilities:
 
 1. Read one JSON request from stdin.
-2. Dispatch on `mode`: `execute` (default) or `scope`.
+2. Dispatch on `mode`: `execute` (default), `scope`, or `check`.
 3. Load and validate `/etc/kestrel/scope.json`.
 4. Validate every command argument against the binary allowlist and scope.
 5. Classify risk and refuse destructive flags.
@@ -81,9 +81,10 @@ Responsibilities:
 8. Return one JSON response on stdout.
 
 `mode: "scope"` is read-only: it returns the current scope so Kestrel can plan
-without editing it. It never executes a command. The SSH forced command passes
-no client arguments, so scope requests use the stdin JSON rather than a CLI
-flag.
+without editing it. `mode: "check"` runs the same policy validation as
+execution and returns the risk tier and targets without running anything.
+Neither mode executes a command. The SSH forced command passes no client
+arguments, so both use the stdin JSON rather than a CLI flag.
 
 Wrapper language is Python because Kali ships it and the policy logic needs
 `ipaddress`, `json`, `subprocess`, and `signal`. There are no pip dependencies.
@@ -135,12 +136,14 @@ without adding protection.
    }
    ```
 
-4. The GUI dialog lists the command and target. User presses Yes.
-5. The wrapper re-checks scope, risk, allowlist, and destructive flags.
-6. The wrapper runs the command and returns per-step results.
-7. Kestrel summarizes open ports and versions; raw output stays in the tool
+4. Before the dialog, Kestrel sends `mode: "check"`; the wrapper returns the
+   validated risk tier and targets without executing.
+5. The GUI dialog lists the commands, targets, and risk. User presses Yes.
+6. The wrapper re-checks scope, risk, allowlist, and destructive flags.
+7. The wrapper runs the command and returns per-step results.
+8. Kestrel summarizes open ports and versions; raw output stays in the tool
    result or becomes an artifact when it is large.
-8. The audit log records the approved plan, argv, target checks, risk, exit
+9. The audit log records the approved plan, argv, target checks, risk, exit
    code, duration, and stdout hash.
 
 ## 6. Protocol (version 1)
@@ -159,6 +162,31 @@ Execute request, sent on stdin:
     }
   ],
   "total_timeout": 300
+}
+```
+
+Check request:
+
+```json
+{
+  "version": 1,
+  "mode": "check",
+  "objective": "string",
+  "steps": [
+    {"argv": ["nmap", "-sV", "192.168.56.10"], "timeout": 120}
+  ],
+  "total_timeout": 300
+}
+```
+
+Check response:
+
+```json
+{
+  "ok": true,
+  "risk": "recon",
+  "targets": ["192.168.56.10"],
+  "steps": [["nmap", "-sV", "192.168.56.10"]]
 }
 ```
 
@@ -307,7 +335,9 @@ manager does not rely on the model's risk claim for enforcement.
 
 ### 8.1 Tool
 
-`kali_task` — `system_control`, timeout 1800 seconds.
+`kali_task` — `system_control`, timeout 1800 seconds. It first sends
+`mode: "check"`, then requests approval with the returned risk/targets, then
+sends `mode: "execute"` only after Yes.
 
 Input schema (kept compact for the prompt budget):
 
@@ -435,6 +465,7 @@ turn. A remote kill channel is phase 3.
 - Truncates output at the cap and marks `truncated`.
 - Writes an audit record with hashes, not raw stdout.
 - Scope mode returns the scope without executing anything.
+- Check mode returns risk and targets without executing anything.
 
 ### Kestrel tests (Windows)
 
@@ -443,7 +474,8 @@ turn. A remote kill channel is phase 3.
   each produce distinct honest errors.
 - Approval relay: worker thread emits, GUI thread shows, default No.
 - Headless run is denied.
-- `kali_task` blocks execution until approval returns true.
+- `kali_task` sends check, blocks on approval, then sends execute only after
+  Yes; a No never sends execute.
 - `kali_scope` is read-only and never sends a command.
 - Prompt budget still passes with the new tool schemas. Shrink the schemas or
   move detail into the manual; do not raise the budget.
