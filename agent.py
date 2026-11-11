@@ -29,6 +29,7 @@ import gmail_tool
 import scheduler
 import memory
 import artifact_store
+import musicapp_bridge
 import sprite_bus
 from tool_registry import (
     InputValidationError,
@@ -4966,6 +4967,7 @@ VALID_TOOLS = {
     "edit_document", "post_to_social", "read_word_doc", "set_word_language",
     "inspect_docx", "edit_docx_safe",
     "skill_manage", "load_skill", "browse_web", "sprite_control",
+    "musicapp_control",
 }
 
 
@@ -5562,6 +5564,25 @@ def sprite_control(inp):
     return _SPRITE_REPLIES.get(action, "the pet did %s" % action)
 
 
+def musicapp_control(inp):
+    """Control MusicAppDesktop through its token-protected loopback bridge."""
+    data = inp if isinstance(inp, dict) else {}
+    action = str(data.get("action", "")).strip().lower()
+    if action not in musicapp_bridge.ACTIONS:
+        return ("ERROR: unknown MusicApp action %r. Use one of: %s."
+                % (action, ", ".join(sorted(musicapp_bridge.ACTIONS))))
+    raw_params = data.get("params")
+    params = dict(raw_params) if isinstance(raw_params, dict) else {}
+    try:
+        result = musicapp_bridge.call(action, params)
+    except musicapp_bridge.MusicAppUnavailable:
+        return ("ERROR: MusicAppDesktop bridge is not running. Start "
+                "MusicAppDesktop, then try again.")
+    except musicapp_bridge.MusicAppError as exc:
+        return "ERROR: MusicAppDesktop rejected %s: %s" % (action, exc)
+    return musicapp_bridge.describe(action, result)
+
+
 def _build_tool_registry():
     """Register the migrated core tools. Everything else stays legacy."""
     registry = ToolRegistry()
@@ -5803,6 +5824,23 @@ def _build_tool_registry():
             timeout=10,
             func=sprite_control,
         ),
+        ToolSpec(
+            name="musicapp_control",
+            description="Control MusicAppDesktop playback, queue, search and pages.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "params": {"type": "object",
+                               "additionalProperties": True},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+            effect_class="write",
+            timeout=15,
+            func=musicapp_control,
+        ),
     )
     for spec in specs:
         registry.register(spec)
@@ -5819,7 +5857,9 @@ def _live_tool_func(func):
 
 
 # Tools whose input is a structured envelope rather than a "a|b" string.
-OBJECT_INPUT_TOOLS = frozenset({"edit_docx_safe", "sprite_control"})
+OBJECT_INPUT_TOOLS = frozenset({
+    "edit_docx_safe", "sprite_control", "musicapp_control",
+})
 
 
 def _execute_tool_impl(action):

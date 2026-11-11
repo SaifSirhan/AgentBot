@@ -34,7 +34,8 @@ RULES = {
     ),
     "music": (
         "Music: to find or play an artist, album, track, or song, use "
-        "youtube_search and play_on_youtube. For pause, skip, or stop use "
+        "youtube_search and play_on_youtube. For the user's MusicAppDesktop "
+        "app, use musicapp_control. For pause, skip, or stop use "
         "media_control. Never claim a song was found, queued, or played "
         "without a successful tool result."
     ),

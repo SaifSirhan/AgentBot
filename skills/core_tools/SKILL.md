@@ -387,6 +387,33 @@ autoplay. Input: song and/or artist, e.g. "50/50 the strokes".
   close_music_tab() — close the music.youtube.com tab in Opera over CDP.
     Use for "close the YouTube Music tab" or "close the previous music tab";
     never guess a browser tab's window title and never use close_window.
+  musicapp_control(object) — control the user's MusicAppDesktop app through
+    its local, token-protected bridge. Input is a JSON object with an action
+    and an optional params object:
+      {"action": "state"}                     song, volume, queue, page
+      {"action": "play"} / "pause" / "toggle" / "next" / "previous"
+      {"action": "seek", "params": {"seconds": 42}}
+      {"action": "volume", "params": {"volume": 60}}
+      {"action": "mute"} / "shuffle" / "like" / "dislike"
+      {"action": "repeat", "params": {"iteration": 1}}   cycle 1-3 times
+      {"action": "fullscreen", "params": {"state": true}}
+      {"action": "queue_list"}
+      {"action": "queue_add", "params": {"videoId": "dQw4w9WgXcQ",
+       "insertPosition": "INSERT_AT_END"}}   or INSERT_AFTER_CURRENT_VIDEO
+      {"action": "queue_move", "params": {"index": 2, "toIndex": 0}}
+      {"action": "queue_remove", "params": {"index": 2}}
+      {"action": "queue_play_index", "params": {"index": 3}}
+      {"action": "queue_clear"}
+      {"action": "search", "params": {"query": "song name"}}
+      {"action": "load", "params": {"videoId": "dQw4w9WgXcQ"}}
+      {"action": "navigate", "params": {"page": "home"}}   explore,
+        new_releases, charts, moods_genres, library, playlists, songs, albums,
+        artists, subscribed_artists, uploads, uploaded_songs,
+        uploaded_albums, uploaded_artists, mixed_for_you
+    The app must be open; if the tool says the bridge is not running, tell the
+    user to start MusicAppDesktop instead of silently switching to Opera.
+    To play a requested song: search first, then load the best matching
+    videoId. Never claim playback unless both calls succeeded.
   QUEUE: YouTube Music has no queue API; queue_on_ytm drives the browser UI.
     Use queue_on_ytm whenever the user asks to queue or add a song. Do not
     use media_control("next") as a substitute and call it queued.

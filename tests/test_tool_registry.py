@@ -141,6 +141,7 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
         "set_volume",
         "read_artifact",
         "sprite_control",
+        "musicapp_control",
     }
 
     def setUp(self):

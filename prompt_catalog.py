@@ -35,7 +35,9 @@ STREMIO_TOOLS = frozenset({
 
 WEATHER_TOOLS = frozenset({"weather"})
 AIR_QUALITY_TOOLS = frozenset({"air_quality"})
-MUSIC_TOOLS = frozenset({"youtube_search", "play_on_youtube"})
+MUSIC_TOOLS = frozenset({
+    "youtube_search", "play_on_youtube", "musicapp_control",
+})
 
 DESCRIPTIONS = {
     "search_web": "Search the live web and return titles, URLs, and summaries.",
@@ -46,6 +48,9 @@ DESCRIPTIONS = {
     "get_video_links": "Return YouTube result links without opening them.",
     "play_on_youtube": "Play a song on YouTube Music.",
     "queue_on_ytm": "Queue a song on YouTube Music through the browser UI.",
+    "musicapp_control": (
+        "Control MusicAppDesktop playback, volume, queue, search, video "
+        "loading, and page navigation."),
     "close_music_tab": "Close the YouTube Music tab in Opera via CDP.",
     "stream_media": "Play YouTube/music/direct video URLs in mpv or VLC.",
     "weather": "Current weather for a place.",
@@ -171,6 +176,9 @@ EXTRA_KEYWORDS = {
     "youtube_search": ("youtube", "search", "song", "songs", "music",
                        "artist", "album", "track"),
     "queue_on_ytm": ("queue", "add", "music", "youtube", "song"),
+    "musicapp_control": ("musicapp", "music", "app", "desktop", "player",
+                         "queue", "volume", "seek", "shuffle", "repeat",
+                         "library", "playlist", "navigate"),
     "close_music_tab": ("close", "music", "youtube", "tab", "opera"),
     "media_control": ("play", "pause", "skip", "next", "previous", "prev",
                       "stop", "music", "media", "track", "song"),
