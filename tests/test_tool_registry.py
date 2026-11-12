@@ -142,6 +142,8 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
         "read_artifact",
         "sprite_control",
         "musicapp_control",
+        "kali_task",
+        "kali_scope",
     }
 
     def setUp(self):
@@ -157,7 +159,7 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_the_twenty_core_tools_are_registered(self):
+    def test_the_core_tools_are_registered(self):
         self.assertEqual(set(self.agent.TOOL_REGISTRY.names), self.CORE_TOOLS)
 
     def test_set_volume_requires_an_integer_from_0_to_100(self):
