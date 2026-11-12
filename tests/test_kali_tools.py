@@ -6,6 +6,7 @@ Nothing here touches the network: every kali_bridge entry point is patched, and
 the Kali-side wrapper is only ever loaded to compare constants.
 """
 import importlib.util
+import json
 import sys
 import time
 import unittest
@@ -158,6 +159,38 @@ class KaliSchemaTests(unittest.TestCase):
         self.assertEqual(parameters["type"], "object")
         self.assertIn("steps", parameters["properties"])
         self.assertEqual(parameters["required"], ["objective", "steps"])
+
+    def test_the_native_envelope_survives_strict(self):
+        # T5-3: prove the object schema passes through _strict unchanged in
+        # shape, rather than being wrapped as a bare `input` string.
+        specs = native_tools.build_specs(["kali_task"], agent.TOOL_REGISTRY)
+        parameters = specs[0]["function"]["parameters"]
+        self.assertEqual(parameters["type"], "object")
+        self.assertNotIn("input", parameters["properties"])
+        self.assertIn("objective", parameters["properties"])
+        self.assertIn("steps", parameters["properties"])
+        self.assertEqual(parameters["required"], ["objective", "steps"])
+        self.assertIs(parameters["additionalProperties"], False)
+        step = parameters["properties"]["steps"]["items"]
+        argv = step["properties"]["argv"]
+        self.assertEqual(argv["type"], "array")
+        self.assertEqual(argv["items"]["type"], "string")
+        self.assertEqual(step["required"], ["argv"])
+
+    def test_a_native_call_delivers_the_object_envelope(self):
+        # OBJECT_INPUT_TOOLS membership proved by behavior: a native tool call
+        # must arrive at the dispatcher as the dict envelope, not a string.
+        envelope = {"objective": "scan",
+                    "steps": [{"argv": ["nmap", "192.168.56.10"]}]}
+        message = {"tool_calls": [{
+            "id": "call_0", "type": "function",
+            "function": {"name": "kali_task",
+                         "arguments": json.dumps(envelope)}}]}
+        actions, errors = native_tools.actions_from_tool_calls(
+            message, valid_names=agent.VALID_TOOLS, allowed=["kali_task"],
+            object_input_tools=agent.OBJECT_INPUT_TOOLS)
+        self.assertEqual(errors, [])
+        self.assertEqual(actions, [{"tool": "kali_task", "input": envelope}])
 
 
 class KaliFixture(unittest.TestCase):
@@ -405,6 +438,14 @@ class KaliValidationTests(KaliFixture):
                 self.assert_rejected_before_ssh(
                     {"objective": objective, "steps": self.steps})
 
+    def test_a_non_string_objective_is_rejected(self):
+        # T5-3: str() used to turn None/0/{...} into "None"/"0"/"{'a': 1}"
+        # and send that to Kali as if the model had written it.
+        for objective in (None, 0, 7, True, 5.5, {"a": 1}, ["scan"], b"scan"):
+            with self.subTest(objective=objective):
+                self.assert_rejected_before_ssh(
+                    {"objective": objective, "steps": self.steps})
+
     def test_a_huge_step_list_is_rejected_before_ssh(self):
         # R5-C: this client-side cap is a round-trip guard, not the security
         # boundary. The wrapper enforces its own MAX_STEPS independently.
@@ -534,6 +575,36 @@ class KaliResultFormatTests(unittest.TestCase):
         self.assertIn("y" * 1500, text)
         self.assertNotIn("y" * 1501, text)
 
+    def test_the_display_cut_is_marked(self):
+        # T5-3: a 1500-char cut must not read as ordinary complete output.
+        text = agent._format_kali_result(self.result(stdout="y" * 9000))
+        self.assertIn("7500 more characters omitted", text)
+
+    def test_output_at_the_display_cap_carries_no_cut_marker(self):
+        text = agent._format_kali_result(self.result(stdout="y" * 1500))
+        self.assertIn("y" * 1500, text)
+        self.assertNotIn("more characters omitted", text)
+
+    def test_a_wrapper_truncated_step_is_marked(self):
+        # T5-3: the wrapper's byte-cap cut travels as `truncated`; ignoring it
+        # renders a partial stream as if it were the whole output.
+        text = agent._format_kali_result(self.result(
+            stdout="80/tcp open", truncated=True))
+        self.assertIn("80/tcp open", text)
+        self.assertIn("output truncated by Kali", text)
+
+    def test_an_untruncated_step_carries_no_truncation_marker(self):
+        text = agent._format_kali_result(self.result(stdout="80/tcp open"))
+        self.assertNotIn("truncated", text)
+
+    def test_truncation_and_read_errors_are_both_marked(self):
+        text = agent._format_kali_result(self.result(
+            stdout="partial", truncated=True,
+            read_errors=["stderr: OSError: err failed"]))
+        self.assertIn("output truncated by Kali", text)
+        self.assertIn("could not be read", text)
+        self.assertIn("err failed", text)
+
 
 class KaliScopeFailureTests(unittest.TestCase):
     def test_every_scope_failure_is_a_string(self):
@@ -547,6 +618,15 @@ class KaliScopeFailureTests(unittest.TestCase):
                     text = agent.kali_scope("")
                 self.assertIsInstance(text, str)
                 self.assertTrue(text.startswith("ERROR"), text)
+
+    def test_a_policy_refusal_uses_the_task_wording(self):
+        # T5-3: a policy refusal is not a generic "scope failed".
+        with mock.patch.object(
+                agent.kali_bridge, "scope",
+                side_effect=kali_bridge.KaliPolicyError("outside scope")):
+            text = agent.kali_scope("")
+        self.assertEqual(
+            text, "ERROR: Kali policy refused the task: outside scope")
 
     def test_an_empty_scope_says_none_and_unknown(self):
         with mock.patch.object(agent.kali_bridge, "scope", return_value={}):
@@ -700,6 +780,194 @@ class KaliDispatchTests(KaliFixture):
                                              "expires": "2027-12-31"}):
             text = agent.execute_tool({"tool": "kali_scope", "input": ""})
         self.assertIn("192.168.56.0/24", text)
+
+    def test_group_mode_refuses_kali_task(self):
+        # SAFE_GROUP_TOOLS already excludes kali_task; pin the refusal so a
+        # future edit to that set cannot silently open Kali to group chats.
+        with mock.patch.object(agent, "GROUP_MODE", True), \
+             mock.patch.object(agent.kali_bridge, "check") as check, \
+             mock.patch.object(agent.kali_bus, "request_approval") as approve, \
+             mock.patch.object(agent.kali_bridge, "task") as task:
+            text = agent.execute_tool({"tool": "kali_task",
+                                       "input": self.input})
+        check.assert_not_called()
+        approve.assert_not_called()
+        task.assert_not_called()
+        self.assertIn("disabled in group chats", text)
+
+
+class KaliMalformedResultTests(unittest.TestCase):
+    """T5-1: the bridge validates only `ok is True` and dict-ness, so the
+    shapes inside `results` are VM-influenceable. None of them may raise out
+    of the formatter into the tool loop."""
+
+    def setUp(self):
+        self.steps = [{"argv": ["nmap", "192.168.56.10"], "timeout": 10}]
+
+    def result(self, **overrides):
+        item = {"argv": ["nmap", "192.168.56.10"], "exit_code": 0,
+                "stdout": "", "stderr": "", "timed_out": False,
+                "truncated": False, "read_errors": []}
+        item.update(overrides)
+        return {"ok": True, "risk": "recon", "targets": ["192.168.56.10"],
+                "results": [item]}
+
+    def assert_malformed(self, payload):
+        text = agent._format_kali_result(payload)
+        self.assertIsInstance(text, str)
+        self.assertTrue(text.startswith("ERROR"), text)
+        self.assertIn("malformed", text)
+        return text
+
+    def test_a_null_step_is_an_error_string(self):
+        self.assert_malformed({"ok": True, "results": [None]})
+
+    def test_a_non_dict_step_is_an_error_string(self):
+        for item in ("nmap", 7, True, [], ["nmap"]):
+            with self.subTest(item=item):
+                self.assert_malformed({"ok": True, "results": [item]})
+
+    def test_a_non_list_results_is_an_error_string(self):
+        for results in ("x", 5, True, {"argv": ["nmap"]}):
+            with self.subTest(results=results):
+                self.assert_malformed({"ok": True, "results": results})
+
+    def test_a_non_string_argv_token_is_an_error_string(self):
+        for argv in ([1], ["nmap", 1], [None], [["-sV"]], "nmap", 5):
+            with self.subTest(argv=argv):
+                self.assert_malformed(self.result(argv=argv))
+
+    def test_a_non_string_read_error_is_an_error_string(self):
+        for errors in ([1], ["ok", 2], "x", 5):
+            with self.subTest(errors=errors):
+                self.assert_malformed(self.result(read_errors=errors))
+
+    def test_a_non_string_stream_is_an_error_string(self):
+        for stream in (5, True, [], {}):
+            with self.subTest(stream=stream):
+                self.assert_malformed(self.result(stdout=stream))
+                self.assert_malformed(self.result(stderr=stream))
+
+    def test_a_non_dict_payload_is_an_error_string(self):
+        for payload in (None, "x", [], 5):
+            with self.subTest(payload=payload):
+                self.assert_malformed(payload)
+
+    def test_missing_optional_fields_still_render(self):
+        # Hardening must not over-reject: the brief's .get() defaults for
+        # absent fields keep rendering exactly as before.
+        text = agent._format_kali_result(
+            {"results": [{"argv": ["nmap"], "exit_code": 0}]})
+        self.assertEqual(text, "Kali task finished (risk unknown).\n"
+                               "Step 1 [ok] nmap")
+
+    def test_null_streams_and_read_errors_still_render(self):
+        text = agent._format_kali_result(self.result(
+            stdout=None, stderr=None, read_errors=None))
+        self.assertEqual(text, "Kali task finished (risk recon).\n"
+                               "Step 1 [ok] nmap 192.168.56.10")
+
+    def test_a_malformed_payload_never_raises_out_of_kali_task(self):
+        # End to end: the tool loop must receive a string, not an exception.
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value={"ok": True, "risk": "recon",
+                                             "targets": [], "steps": []}), \
+             mock.patch.object(agent.kali_bus, "request_approval",
+                               return_value=True), \
+             mock.patch.object(agent.kali_bridge, "task",
+                               return_value={"ok": True, "results": [None]}):
+            text = agent.kali_task({"objective": "scan", "steps": self.steps})
+        self.assertIsInstance(text, str)
+        self.assertTrue(text.startswith("ERROR"), text)
+
+
+class KaliInputBoundTests(KaliFixture):
+    """T5-2: generous bounds on BOTH the schema and the client validation.
+    Beyond a bound the input is refused before SSH, never truncated."""
+
+    def assert_accepted(self, value):
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=self.check) as check, \
+             mock.patch.object(agent.kali_bus, "request_approval",
+                               return_value=True), \
+             mock.patch.object(agent.kali_bridge, "task",
+                               return_value=self.result) as task:
+            text = agent.kali_task(value)
+        check.assert_called_once()
+        task.assert_called_once()
+        self.assertIn("80/tcp open", text)
+        return check
+
+    def test_an_objective_at_the_bound_is_accepted(self):
+        check = self.assert_accepted(
+            {"objective": "x" * 4000, "steps": self.steps})
+        self.assertEqual(check.call_args[0][0], "x" * 4000)
+
+    def test_an_objective_over_the_bound_is_rejected_before_ssh(self):
+        text = self.assert_rejected_before_ssh(
+            {"objective": "x" * 4001, "steps": self.steps})
+        self.assertIn("4000", text)
+
+    def test_objective_padding_does_not_bypass_the_bound(self):
+        # The bound applies to the input string, exactly like the schema's
+        # maxLength; trailing whitespace is not a loophole.
+        text = self.assert_rejected_before_ssh(
+            {"objective": "x" * 4000 + " ", "steps": self.steps})
+        self.assertIn("4000", text)
+
+    def test_an_argv_token_at_the_bound_is_accepted(self):
+        self.assert_accepted(
+            {"objective": "scan",
+             "steps": [{"argv": ["nmap", "x" * 4000]}]})
+
+    def test_an_argv_token_over_the_bound_is_rejected_before_ssh(self):
+        text = self.assert_rejected_before_ssh(
+            {"objective": "scan",
+             "steps": [{"argv": ["nmap", "x" * 4001]}]})
+        self.assertIn("4000", text)
+
+    def test_argv_at_the_item_bound_is_accepted(self):
+        self.assert_accepted(
+            {"objective": "scan",
+             "steps": [{"argv": ["nmap"] + ["x"] * 127}]})
+
+    def test_argv_over_the_item_bound_is_rejected_before_ssh(self):
+        text = self.assert_rejected_before_ssh(
+            {"objective": "scan",
+             "steps": [{"argv": ["nmap"] + ["x"] * 128}]})
+        self.assertIn("128", text)
+
+    def test_the_schema_bounds_match_the_client_constants(self):
+        schema = agent.TOOL_REGISTRY.get("kali_task").input_schema
+        self.assertEqual(agent.KALI_MAX_OBJECTIVE_CHARS, 4000)
+        self.assertEqual(agent.KALI_MAX_ARGV_TOKEN_CHARS, 4000)
+        self.assertEqual(agent.KALI_MAX_ARGV_ITEMS, 128)
+        self.assertEqual(schema["properties"]["objective"]["maxLength"],
+                         agent.KALI_MAX_OBJECTIVE_CHARS)
+        argv = schema["properties"]["steps"]["items"]["properties"]["argv"]
+        self.assertEqual(argv["maxItems"], agent.KALI_MAX_ARGV_ITEMS)
+        self.assertEqual(argv["items"]["maxLength"],
+                         agent.KALI_MAX_ARGV_TOKEN_CHARS)
+
+    def test_the_schema_rejects_over_bound_inputs(self):
+        spec = agent.TOOL_REGISTRY.get("kali_task")
+        cases = (
+            ("objective", {"objective": "x" * 4001,
+                           "steps": [{"argv": ["nmap"]}]}),
+            ("argv token", {"objective": "scan",
+                            "steps": [{"argv": ["nmap", "x" * 4001]}]}),
+            ("argv items", {"objective": "scan",
+                            "steps": [{"argv": ["nmap"] + ["x"] * 128}]}),
+        )
+        for label, value in cases:
+            with self.subTest(bound=label):
+                with self.assertRaises(InputValidationError):
+                    spec.validate(value)
+
+    def test_the_schema_accepts_inputs_at_the_bounds(self):
+        spec = agent.TOOL_REGISTRY.get("kali_task")
+        spec.validate({"objective": "x" * 4000,
+                       "steps": [{"argv": ["nmap"] + ["x" * 4000] * 127}]})
 
 
 if __name__ == "__main__":

@@ -5588,6 +5588,11 @@ def musicapp_control(inp):
 
 # Mirrors the Kali wrapper's MAX_STEPS cap; the wrapper enforces it too.
 KALI_MAX_STEPS = 8
+# T5-2: generous client-side input bounds so nothing unbounded crosses SSH.
+# The wrapper does not enforce these; the schema and kali_task share them.
+KALI_MAX_OBJECTIVE_CHARS = 4000
+KALI_MAX_ARGV_TOKEN_CHARS = 4000
+KALI_MAX_ARGV_ITEMS = 128
 
 
 def kali_scope(inp=""):
@@ -5596,6 +5601,8 @@ def kali_scope(inp=""):
         data = kali_bridge.scope()
     except kali_bridge.KaliUnavailable as exc:
         return "ERROR: %s" % exc
+    except kali_bridge.KaliPolicyError as exc:
+        return "ERROR: Kali policy refused the task: %s" % exc
     except kali_bridge.KaliError as exc:
         return "ERROR: Kali scope failed: %s" % exc
     networks = ", ".join(data.get("networks", [])) or "none"
@@ -5605,10 +5612,49 @@ def kali_scope(inp=""):
             % (networks, domains, public, data.get("expires", "unknown")))
 
 
+# T5-1: kali_bridge validates only `ok is True` and dict-ness, so the shapes
+# inside `results` are VM-influenceable. A malformed payload is reported as an
+# error string, never raised into the tool loop (the same posture as
+# kali_bus.format_approval, which consumes the same data).
+_KALI_MALFORMED_RESULT = "ERROR: Kali returned a malformed result payload."
+
+
+def _kali_step_is_well_formed(item):
+    """True when every field the formatter touches has a renderable type.
+
+    Absent optional fields keep the brief's .get() defaults; a present field
+    of the wrong type is malformed, not silently coerced.
+    """
+    if not isinstance(item, dict):
+        return False
+    argv = item.get("argv", [])
+    if not isinstance(argv, list) or not all(
+            isinstance(arg, str) for arg in argv):
+        return False
+    for key in ("stdout", "stderr"):
+        value = item.get(key)
+        if value is not None and not isinstance(value, str):
+            return False
+    errors = item.get("read_errors")
+    if errors is not None and (
+            not isinstance(errors, list)
+            or not all(isinstance(err, str) for err in errors)):
+        return False
+    return True
+
+
 def _format_kali_result(result):
-    results = result.get("results") or []
+    if not isinstance(result, dict):
+        return _KALI_MALFORMED_RESULT
+    results = result.get("results")
+    if results is None:
+        results = []
+    if not isinstance(results, list):
+        return _KALI_MALFORMED_RESULT
     if not results:
         return "Kali returned no results."
+    if not all(_kali_step_is_well_formed(item) for item in results):
+        return _KALI_MALFORMED_RESULT
     failed = any(
         item.get("timed_out") or item.get("exit_code") not in (0, None)
         for item in results)
@@ -5623,12 +5669,17 @@ def _format_kali_result(result):
         output = (item.get("stdout") or "").strip()
         if not output:
             output = (item.get("stderr") or "").strip()
-        if output:
-            output = output[:1500]
+        if len(output) > 1500:
+            # T5-3: a cut must not read as ordinary complete output.
+            output = output[:1500] + " ... (%d more characters omitted)" % (
+                len(output) - 1500)
         line = "Step %d [%s] %s" % (
             index, status, " ".join(item.get("argv", [])))
         if output:
             line += ": " + output
+        # T5-3: the wrapper cut this stream at its byte cap; say so.
+        if item.get("truncated"):
+            line += " (output truncated by Kali)"
         # A stream that could not be read is not the same as a silent command.
         read_errors = item.get("read_errors") or []
         if read_errors:
@@ -5641,7 +5692,13 @@ def _format_kali_result(result):
 def kali_task(inp):
     """Validate, approve, and run one Kali task."""
     data = inp if isinstance(inp, dict) else {}
-    objective = str(data.get("objective", "")).strip()
+    objective = data.get("objective")
+    if not isinstance(objective, str):
+        return "ERROR: kali_task objective must be a string."
+    if len(objective) > KALI_MAX_OBJECTIVE_CHARS:
+        return ("ERROR: kali_task objective must be at most %d characters."
+                % KALI_MAX_OBJECTIVE_CHARS)
+    objective = objective.strip()
     raw_steps = data.get("steps")
     if not objective:
         return "ERROR: kali_task needs an objective."
@@ -5659,6 +5716,12 @@ def kali_task(inp):
         if (not isinstance(argv, list) or not argv
                 or not all(isinstance(arg, str) and arg for arg in argv)):
             return "ERROR: each Kali step needs a non-empty argv list."
+        if len(argv) > KALI_MAX_ARGV_ITEMS:
+            return ("ERROR: each Kali step argv supports at most %d items."
+                    % KALI_MAX_ARGV_ITEMS)
+        if any(len(arg) > KALI_MAX_ARGV_TOKEN_CHARS for arg in argv):
+            return ("ERROR: each Kali argv token must be at most %d "
+                    "characters." % KALI_MAX_ARGV_TOKEN_CHARS)
         timeout = raw.get("timeout", 120)
         if (not isinstance(timeout, int) or isinstance(timeout, bool)
                 or not 1 <= timeout <= 600):
@@ -5975,7 +6038,8 @@ def _build_tool_registry():
             input_schema={
                 "type": "object",
                 "properties": {
-                    "objective": {"type": "string", "minLength": 1},
+                    "objective": {"type": "string", "minLength": 1,
+                                  "maxLength": KALI_MAX_OBJECTIVE_CHARS},
                     "steps": {
                         "type": "array",
                         "minItems": 1,
@@ -5986,8 +6050,11 @@ def _build_tool_registry():
                                 "argv": {
                                     "type": "array",
                                     "minItems": 1,
+                                    "maxItems": KALI_MAX_ARGV_ITEMS,
                                     "items": {"type": "string",
-                                              "minLength": 1},
+                                              "minLength": 1,
+                                              "maxLength":
+                                                  KALI_MAX_ARGV_TOKEN_CHARS},
                                 },
                                 "timeout": {"type": "integer",
                                             "minimum": 1,
