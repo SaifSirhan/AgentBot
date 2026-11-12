@@ -147,6 +147,10 @@ class KaliScopeTests(unittest.TestCase):
                 {"networks": None, "domains": []},
                 {"networks": [None], "domains": [None]},
                 {"networks": 5, "domains": 6},
+                {"networks": ["192.168.56.0/24"], "domains": [],
+                 "allow_public": [1]},
+                {"networks": ["192.168.56.0/24"], "domains": [],
+                 "expires": {"a": 1}},
         ):
             with self.subTest(payload=payload):
                 with mock.patch.object(agent.kali_bridge, "scope",

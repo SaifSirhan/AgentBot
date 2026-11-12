@@ -5614,11 +5614,17 @@ def kali_scope(inp=""):
                and all(isinstance(entry, str) for entry in item)
                for item in (networks, domains)):
         return "ERROR: Kali returned a malformed scope payload."
+    allow_public = data.get("allow_public", False)
+    expires = data.get("expires", "unknown")
+    if not isinstance(allow_public, bool) or not isinstance(expires, str):
+        # `[1]` is truthy and `{"a": 1}` renders as a dict repr: both would
+        # show a scope the wrapper never published.
+        return "ERROR: Kali returned a malformed scope payload."
     networks = ", ".join(networks) or "none"
     domains = ", ".join(domains) or "none"
-    public = "allowed" if data.get("allow_public") else "denied"
+    public = "allowed" if allow_public else "denied"
     return ("Kali scope: networks %s; domains %s; public %s; expires %s."
-            % (networks, domains, public, data.get("expires", "unknown")))
+            % (networks, domains, public, expires))
 
 
 # T5-1: kali_bridge validates only `ok is True` and dict-ness, so the shapes
