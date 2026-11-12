@@ -952,6 +952,20 @@ def _inspect_value(binary, flag, value, scope, targets):
         return
     if (flag in PATH_FLAGS.get(binary, ())
             or flag in READ_FLAGS.get(binary, ())):
+        # `-oN 8.8.8.8` is refused: the argv would carry a public host while the
+        # Targets line the human approves names only in-scope hosts. Only a
+        # literal address is refused — not a domain-shaped filename —
+        # because `a.b` is how every legitimate output name looks ("scan.txt",
+        # "report.lab.local.xml") and the output is confined to /tmp/kestrel
+        # either way. A value with a separator is a path, always.
+        if "/" not in value and "\\" not in value and "://" not in value:
+            try:
+                ipaddress.ip_address(value.strip("@[]"))
+                raise PolicyError(
+                    "flag %s value %r is an address, not an output name"
+                    % (flag, value))
+            except ValueError:
+                pass
         _confine_path(value, _path_roots(binary, flag))
         return
     label = "flag %s" % flag

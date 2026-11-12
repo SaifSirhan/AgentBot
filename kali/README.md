@@ -51,7 +51,21 @@ not `cap_net_admin`. Nmap runs unprivileged, so phase 1 uses `-sT`/`-sV`;
 
 ## 2. Install the wrapper
 
-Copy `kali/` to the VM, then from inside that directory:
+Copy the whole `kali/` directory from the Kestrel checkout to the VM — the
+three files the installer uses (`kestrel_run.py`, `scope.example.json`,
+`logrotate.kestrel`) sit beside it, so copying only the script fails. A host
+folder shared into the VM works; so does `scp -r kali kestrel@<vm-ip>:~`, but
+Kestrel's key carries a forced command, so use an ordinary login key or the
+VM console for that copy. If the copy came through a Windows editor or a
+`shared folder` that rewrites line endings, the script arrives with CRLF and
+`bash` fails with `$'\r': command not found`; fix it with
+`sed -i 's/\r$//' kali/*.sh`. Check the script parses before running it:
+
+```bash
+bash -n kali/install_kestrel_run.sh
+```
+
+Then from inside that directory:
 
 ```bash
 sudo bash install_kestrel_run.sh

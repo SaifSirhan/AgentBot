@@ -30,7 +30,13 @@ if [ -L /tmp/kestrel ]; then
   echo "refusing: /tmp/kestrel is a symlink" >&2
   exit 1
 fi
-install -d -o kestrel -g kestrel -m 0700 /tmp/kestrel
+# `mkdir` refuses an existing entry, so the create and the refusal are one step,
+# not a check-then-use pair a local user could win by swapping a link in between.
+if [ ! -e /tmp/kestrel ]; then
+  mkdir -m 0700 /tmp/kestrel
+fi
+chown kestrel:kestrel /tmp/kestrel
+chmod 0700 /tmp/kestrel
 
 # The kestrel account must not rewrite its own SSH state or home; tool
 # output is confined to /tmp/kestrel. No user-writable shell startup files,

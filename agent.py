@@ -5592,8 +5592,10 @@ def musicapp_control(inp):
     return musicapp_bridge.describe(action, result)
 
 
-# Mirrors the Kali wrapper's MAX_STEPS cap; the wrapper enforces it too.
+# Mirrors the Kali wrapper's caps; the wrapper enforces all three too.
 KALI_MAX_STEPS = 8
+KALI_MAX_STEP_TIMEOUT = 600
+KALI_MAX_TOTAL_TIMEOUT = 1800
 # T5-2: generous client-side input bounds so nothing unbounded crosses SSH.
 # The wrapper does not enforce these; the schema and kali_task share them.
 KALI_MAX_OBJECTIVE_CHARS = 4000
@@ -5745,14 +5747,16 @@ def kali_task(inp):
                     "characters." % KALI_MAX_ARGV_TOKEN_CHARS)
         timeout = raw.get("timeout", 120)
         if (not isinstance(timeout, int) or isinstance(timeout, bool)
-                or not 1 <= timeout <= 600):
-            return "ERROR: each Kali step timeout must be 1-600 seconds."
+                or not 1 <= timeout <= KALI_MAX_STEP_TIMEOUT):
+            return ("ERROR: each Kali step timeout must be 1-%d seconds."
+                    % KALI_MAX_STEP_TIMEOUT)
         steps.append({"argv": argv, "timeout": timeout})
 
     total_timeout = data.get("total_timeout", 300)
     if (not isinstance(total_timeout, int) or isinstance(total_timeout, bool)
-            or not 1 <= total_timeout <= 1800):
-        return "ERROR: total_timeout must be 1-1800 seconds."
+            or not 1 <= total_timeout <= KALI_MAX_TOTAL_TIMEOUT):
+        return ("ERROR: total_timeout must be 1-%d seconds."
+                % KALI_MAX_TOTAL_TIMEOUT)
 
     try:
         check = kali_bridge.check(objective, steps,
@@ -6055,7 +6059,9 @@ def _build_tool_registry():
             name="kali_task",
             description=(
                 "Run an approved security task in the Kali lab. Input is an "
-                "object with objective and steps[].steps[].argv."),
+                "object with objective and steps[] (up to %d steps, each "
+                "argv[], optional timeout %ds)." % (KALI_MAX_STEPS,
+                                                    KALI_MAX_STEP_TIMEOUT)),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -6064,7 +6070,7 @@ def _build_tool_registry():
                     "steps": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": 8,
+                        "maxItems": KALI_MAX_STEPS,
                         "items": {
                             "type": "object",
                             "properties": {
@@ -6079,7 +6085,7 @@ def _build_tool_registry():
                                 },
                                 "timeout": {"type": "integer",
                                             "minimum": 1,
-                                            "maximum": 600},
+                                            "maximum": KALI_MAX_STEP_TIMEOUT},
                             },
                             "required": ["argv"],
                             "additionalProperties": False,
@@ -6087,7 +6093,7 @@ def _build_tool_registry():
                     },
                     "total_timeout": {"type": "integer",
                                       "minimum": 1,
-                                      "maximum": 1800},
+                                      "maximum": KALI_MAX_TOTAL_TIMEOUT},
                 },
                 "required": ["objective", "steps"],
                 "additionalProperties": False,

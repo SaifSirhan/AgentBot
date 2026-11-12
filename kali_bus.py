@@ -93,8 +93,18 @@ def request_approval(plan, timeout=120) -> bool:
 # drop: the cut is wide enough that the rendered token is unchanged.
 MAX_SCRUB_CHARS = 4 * MAX_TOKEN_CHARS
 
+# C0 and DEL stop line forgery; C1 and the bidi/format characters stop REORDERING,
+# which is the same attack with the text drawn backwards (U+202E turns a benign
+# name into an out-of-scope one on screen). Zero-width marks are invisible, so a
+# reader cannot tell a hidden character is there.
+_FORMAT_CHARS = (
+    list(range(0x20)) + [0x7F] + list(range(0x80, 0xA0))
+    + [0x061C, 0x200B, 0x200C, 0x200D, 0x200E, 0x200F,
+       0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+       0x2066, 0x2067, 0x2068, 0x2069, 0xFEFF]
+)
 _CONTROLS = re.compile("[%s]" % "".join(
-    re.escape(chr(code)) for code in list(range(0x20)) + [0x7F]))
+    re.escape(chr(code)) for code in _FORMAT_CHARS))
 
 
 def _cap(text: str, limit: int) -> str:

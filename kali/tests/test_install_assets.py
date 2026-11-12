@@ -27,7 +27,12 @@ WRAPPER_PATHS = ("/etc/kestrel/scope.json", "/var/log/kestrel/audit.jsonl",
 
 INSTALLED_WRAPPER = ('install -o root -g root -m 0755 "$HERE/kestrel_run.py" '
                      "/usr/local/bin/kestrel-run")
-OUTPUT_ROOT_DIR = "install -d -o kestrel -g kestrel -m 0700 /tmp/kestrel"
+# /tmp is world-writable, so the output root is created with `mkdir` (which
+# refuses an existing entry) and attributed in separate steps, never with
+# `install -d`, whose check-then-apply pair a local user can win with a link.
+OUTPUT_ROOT_MK = "mkdir -m 0700 /tmp/kestrel"
+OUTPUT_ROOT_STEPS = (OUTPUT_ROOT_MK, "chown kestrel:kestrel /tmp/kestrel",
+                     "chmod 0700 /tmp/kestrel")
 AUDIT_DIR = "install -d -o kestrel -g kestrel -m 0700 /var/log/kestrel"
 AUDIT_TOUCH = "touch /var/log/kestrel/audit.jsonl"
 AUDIT_CHOWN = "chown kestrel:kestrel /var/log/kestrel/audit.jsonl"
@@ -116,11 +121,14 @@ class InstallAssetTests(unittest.TestCase):
 
     def test_installer_creates_the_output_root_0700_kestrel_owned(self):
         # A 0755 or root-owned /tmp/kestrel makes every execute fail the
-        # wrapper's output-root check, so the whole line is asserted.
+        # wrapper's output-root check, so the whole sequence is asserted.
         lines = commands("install_kestrel_run.sh")
-        created = [line for line in lines
-                   if line.startswith("install -d") and "/tmp/kestrel" in line]
-        self.assertEqual(created, [OUTPUT_ROOT_DIR])
+        self.assertEqual([line for line in lines
+                          if line.startswith("install -d")
+                          and "/tmp/kestrel" in line], [])
+        self.assertIn("if [ ! -e /tmp/kestrel ]; then", lines)
+        order = [position(lines, line) for line in OUTPUT_ROOT_STEPS]
+        self.assertEqual(order, sorted(order))
 
     def test_installer_creates_the_audit_dir_and_file_kestrel_owned(self):
         lines = commands("install_kestrel_run.sh")
@@ -182,7 +190,7 @@ class InstallAssetTests(unittest.TestCase):
         self.assertIn("fi", body)
 
     def test_installer_refuses_a_symlinked_output_root(self):
-        self.assert_guard_before("/tmp/kestrel", OUTPUT_ROOT_DIR)
+        self.assert_guard_before("/tmp/kestrel", OUTPUT_ROOT_MK)
 
     def test_installer_refuses_a_symlinked_audit_file(self):
         self.assert_guard_before("/var/log/kestrel/audit.jsonl", AUDIT_TOUCH)
@@ -326,6 +334,17 @@ class InstallAssetTests(unittest.TestCase):
         text = prose(body)
         self.assertIn("`sudo rm /tmp/kestrel`", text)
         self.assertIn("`sudo rm /var/log/kestrel/audit.jsonl`", text)
+
+    def test_readme_documents_how_kali_reaches_the_vm(self):
+        # The installer reads three files beside itself, so "copy kali/" is the
+        # only correct instruction; and a copy made through Windows can arrive
+        # with CRLF, which bash rejects only at run time.
+        body = prose(section(2))
+        self.assertIn("copy the whole `kali/` directory", body.lower())
+        self.assertIn("kestrel_run.py", body)
+        self.assertIn("bash -n kali/install_kestrel_run.sh", body)
+        self.assertIn("CRLF", body)
+        self.assertIn("sed -i 's/\\r$//' kali/*.sh", body)
 
     # -- Shipped Task 1 facts the assets must not contradict -----------------
 

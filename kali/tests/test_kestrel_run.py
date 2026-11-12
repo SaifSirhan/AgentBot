@@ -184,6 +184,19 @@ class PolicyTests(TempOutputRoot):
             self.validate(["nmap", "-sV", "-oN", "../../etc/passwd",
                            "192.168.56.10"])
 
+    def test_output_names_may_not_be_an_address(self):
+        # `-oN 8.8.8.8` would put an out-of-scope host into the argv while the
+        # approved Targets line names only in-scope hosts, so a literal address
+        # is refused. A domain-SHAPED name is still a filename: every
+        # legitimate report name looks like `a.b`.
+        for name in ("8.8.8.8", "fd00::1"):
+            with self.subTest(name=name):
+                with self.assertRaises(kr.PolicyError):
+                    self.validate(["nmap", "-sV", "-oN", name,
+                                   "192.168.56.10"])
+        self.validate(["nmap", "-sV", "-oN", "report.lab.local.xml",
+                       "192.168.56.10"])
+
     def test_denies_curl_remote_name_and_proxies(self):
         for argv in (
             ["curl", "-O", "http://app.lab.local/x"],

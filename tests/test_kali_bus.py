@@ -394,6 +394,24 @@ class FormatApprovalTests(unittest.TestCase):
         self.assertIn("1. nmap ", many)
         self.assertIn("more commands omitted", many)
 
+    def test_bidi_and_format_characters_are_scrubbed(self):
+        """The dialog is the only place a human sees what will run.
+
+        C0 stripping already stopped line forgery, but U+202E (right-to-left
+        override) and its relatives reorder the text on screen: an out-of-scope
+        target can be drawn as a benign one. They are not C0, so they need their
+        own scrub — C1, the bidi isolates/overrides and the zero-width marks.
+        """
+        nasty = "\u202e8.8.8.8\u202c \u200b\u2066x\u2069\u0085\u200e"
+        plan = self._plan(objective="scan " + nasty,
+                          targets=["192.168.56.10" + nasty],
+                          steps=[{"argv": ["nmap", nasty, "192.168.56.10"]}])
+        text = kali_bus.format_approval(plan)
+        for char in ("\u202e", "\u202c", "\u200b", "\u2066", "\u2069",
+                     "\u0085", "\u200e"):
+            self.assertNotIn(char, text, "unscrubbed %r" % char)
+        self.assertIn("?", text)
+
     def test_a_short_plan_gets_no_omission_notice(self):
         text = kali_bus.format_approval(self._plan(steps=[
             {"argv": ["nmap", "10.0.0.1"]},

@@ -90,6 +90,31 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("kali_task", prompt)
         self.assertIn("kali_scope", prompt)
 
+    def test_security_turn_renders_the_step_cap_it_enforces(self):
+        # The schema's nested maxItems is a wire detail the model is not told
+        # to read; the prose is where it learns how long a plan may be. Without
+        # it the budget could only be met by hiding a limit that is enforced.
+        schema = agent.TOOL_REGISTRY.get("kali_task").input_schema
+        with mock.patch.object(
+                agent.memory, "get_user_model_block", return_value=""):
+            prompt = agent._build_plan_prompt(
+                "run nmap on 192.168.56.10", "")
+        self.assertIn("up to %d steps" % schema["properties"]["steps"]["maxItems"],
+                      prompt)
+
+    def test_security_turn_cost_fits_the_static_prompt_budget(self):
+        """The 4,100 promise is about the static prompt; a security turn may add
+        only what the tools cost, so the delta is what is bound here."""
+        with mock.patch.object(
+                agent.memory, "get_user_model_block", return_value=""):
+            normal = agent._build_plan_prompt("hello", "")
+            security = agent._build_plan_prompt(
+                "run nmap on 192.168.56.10", "")
+        delta = (len(security) - len(normal)) / 4
+        self.assertLessEqual(delta, 512,
+                             "security turn adds ~%.0f tokens" % delta)
+        self.assertIn("kali_task", security)
+
 
 if __name__ == "__main__":
     unittest.main()

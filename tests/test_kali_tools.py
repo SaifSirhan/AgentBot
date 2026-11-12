@@ -694,6 +694,12 @@ class KaliStepCapDriftTests(unittest.TestCase):
         self.assertEqual(step["maximum"], wrapper.MAX_STEP_TIMEOUT)
         self.assertEqual(schema["properties"]["total_timeout"]["maximum"],
                          wrapper.MAX_TOTAL_TIMEOUT)
+        # The client-side checks use their own constants; a schema that agrees
+        # with the wrapper is no help if kali_task refuses at a different bound.
+        self.assertEqual(agent.KALI_MAX_STEP_TIMEOUT,
+                         wrapper.MAX_STEP_TIMEOUT)
+        self.assertEqual(agent.KALI_MAX_TOTAL_TIMEOUT,
+                         wrapper.MAX_TOTAL_TIMEOUT)
 
     def test_the_schema_step_cap_matches_the_constant(self):
         schema = agent.TOOL_REGISTRY.get("kali_task").input_schema
