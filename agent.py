@@ -5605,8 +5605,17 @@ def kali_scope(inp=""):
         return "ERROR: Kali policy refused the task: %s" % exc
     except kali_bridge.KaliError as exc:
         return "ERROR: Kali scope failed: %s" % exc
-    networks = ", ".join(data.get("networks", [])) or "none"
-    domains = ", ".join(data.get("domains", [])) or "none"
+    networks = data.get("networks", [])
+    domains = data.get("domains", [])
+    # The bridge checks only that the scope is a dict, so its members are
+    # VM-influenceable too. A non-string member would raise out of the tool
+    # loop; a bare string would join character-wise and read as a real scope.
+    if not all(isinstance(item, list)
+               and all(isinstance(entry, str) for entry in item)
+               for item in (networks, domains)):
+        return "ERROR: Kali returned a malformed scope payload."
+    networks = ", ".join(networks) or "none"
+    domains = ", ".join(domains) or "none"
     public = "allowed" if data.get("allow_public") else "denied"
     return ("Kali scope: networks %s; domains %s; public %s; expires %s."
             % (networks, domains, public, data.get("expires", "unknown")))

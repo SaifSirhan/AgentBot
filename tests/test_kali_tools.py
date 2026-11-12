@@ -134,6 +134,26 @@ class KaliScopeTests(unittest.TestCase):
         self.assertTrue(text.startswith("ERROR"))
         self.assertIn("not reachable", text)
 
+    def test_a_malformed_scope_is_an_error_not_a_raise(self):
+        """The bridge checks only that the scope is a dict, never its members.
+
+        Same defect class as the result formatter: a compromised or skewed host
+        can put non-strings in `networks`, and `", ".join` would raise out of the
+        tool loop and cost the whole turn.
+        """
+        for payload in (
+                {"networks": [1, 2], "domains": ["*.lab.local"]},
+                {"networks": ["192.168.56.0/24"], "domains": "x"},
+                {"networks": None, "domains": []},
+                {"networks": [None], "domains": [None]},
+                {"networks": 5, "domains": 6},
+        ):
+            with self.subTest(payload=payload):
+                with mock.patch.object(agent.kali_bridge, "scope",
+                                       return_value=payload):
+                    text = agent.kali_scope("")
+                self.assertTrue(text.startswith("ERROR"), text)
+
 
 class KaliSchemaTests(unittest.TestCase):
     def test_tools_are_registered(self):
