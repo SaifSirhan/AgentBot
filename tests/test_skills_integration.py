@@ -101,7 +101,8 @@ class SkillIntegrationTests(unittest.TestCase):
             'To call a tool, output ONLY a JSON object: {"tool": "tool_name", '
             '"input": "tool_input"}. Never write tool("arg") or XML.', prompt)
         self.assertLess(len(agent.TOOL_DESCRIPTIONS), 2000)
-        for name in agent.VALID_TOOLS - {"chat", "done"}:
+        for name in (agent.VALID_TOOLS - {"chat", "done"}
+                     - agent.prompt_catalog.SECURITY_TOOLS):
             self.assertIn(name, agent.TOOL_DESCRIPTIONS)
 
     def test_prompt_carries_anti_hallucination_and_path_lock_rules(self):

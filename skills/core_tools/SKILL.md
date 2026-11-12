@@ -435,6 +435,20 @@ autoplay. Input: song and/or artist, e.g. "50/50 the strokes".
     Python script. Just run the stream_media tool. If it fails, report the
     exact error from the tool.
 
+SECURITY LAB
+  kali_scope() — show the Kali lab's allowed networks, domains, public
+    setting, and expiry. Read this before planning a task.
+  kali_task(object) — run one approved sequence in Kali. Input:
+    {"objective": "Service scan",
+     "steps": [{"argv": ["nmap", "-sV", "192.168.56.10"], "timeout": 120}],
+     "total_timeout": 300}
+    Each step is an argv list; never pass a shell string. The desktop dialog
+    is the approval; headless runs are refused. Allowed phase 1:
+    nmap, whatweb, dig, host, whois, curl, openssl, searchsploit,
+    ffuf, gobuster, feroxbuster, nuclei, nikto, masscan, nc.
+    Never target anything outside kali_scope. If the tool says the bridge or
+    VM is unavailable, tell the user to start it; do not retry blindly.
+
 LOCAL FILES & DOCUMENTS
   rag_search(input) — search indexed user documents; 2–5 keywords.
     Returns snippets tagged [From: path].

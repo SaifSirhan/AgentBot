@@ -57,7 +57,9 @@ class FullToolsetTurnTests(unittest.TestCase):
             history,
             first_allowed,
         )
-        self.assertEqual(first_allowed[0], set(agent.VALID_TOOLS))
+        self.assertEqual(
+            first_allowed[0],
+            set(agent.VALID_TOOLS) - agent.prompt_catalog.SECURITY_TOOLS)
 
         second_allowed = []
         self.run_turn(
@@ -66,7 +68,9 @@ class FullToolsetTurnTests(unittest.TestCase):
             history,
             second_allowed,
         )
-        self.assertEqual(second_allowed[0], set(agent.VALID_TOOLS))
+        self.assertEqual(
+            second_allowed[0],
+            set(agent.VALID_TOOLS) - agent.prompt_catalog.SECURITY_TOOLS)
 
     def test_a_tool_used_before_an_aborted_turn_is_still_available(self):
         history = []

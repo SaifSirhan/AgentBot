@@ -984,6 +984,11 @@ def _classify_unmatched_intents(user_request):
 
 def _route_prompt(user_request):
     tools = prompt_catalog.build_tools(frozenset(VALID_TOOLS))
+    if "security" not in prompt_router.matching_intents(user_request):
+        tools = [
+            tool for tool in tools
+            if tool.name not in prompt_catalog.SECURITY_TOOLS
+        ]
     routed = prompt_router.build_dynamic_prompt(
         user_request,
         tools,
@@ -4977,7 +4982,8 @@ VALID_TOOLS = {
 # Progressive disclosure: the full tool manual lives in
 # skills/core_tools/SKILL.md. The prompt only lists names; the model must load
 # the skill for exact input formats before calling a tool.
-_PROMPT_TOOL_NAMES = ", ".join(sorted(VALID_TOOLS - {"chat", "done"}))
+_PROMPT_TOOL_NAMES = ", ".join(sorted(
+    VALID_TOOLS - {"chat", "done"} - prompt_catalog.SECURITY_TOOLS))
 TOOL_DESCRIPTIONS = (
     "AVAILABLE TOOLS: " + _PROMPT_TOOL_NAMES + ".\n"
     "IMPORTANT: This is just a list of names. You MUST call "
