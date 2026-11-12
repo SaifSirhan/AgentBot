@@ -93,6 +93,46 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(kali_bridge.config_path(),
                              Path("C:/custom/kali.json"))
 
+    def test_config_path_prefers_an_explicit_path(self):
+        path = Path(self.temp.name) / "explicit.json"
+        with mock.patch.dict(os.environ,
+                             {kali_bridge.CONFIG_ENV: "C:/custom/kali.json"}):
+            self.assertEqual(kali_bridge.config_path(path), path)
+
+    def test_config_path_uses_appdata_when_set(self):
+        environ = {k: v for k, v in os.environ.items()
+                   if k not in (kali_bridge.CONFIG_ENV, "APPDATA")}
+        environ["APPDATA"] = "C:/Users/operator/AppData/Roaming"
+        with mock.patch.dict(os.environ, environ, clear=True):
+            self.assertEqual(
+                kali_bridge.config_path(),
+                Path("C:/Users/operator/AppData/Roaming/Kestrel/kali.json"))
+
+    def test_config_path_without_appdata_is_unavailable(self):
+        environ = {k: v for k, v in os.environ.items()
+                   if k not in (kali_bridge.CONFIG_ENV, "APPDATA")}
+        with mock.patch.dict(os.environ, environ, clear=True):
+            with self.assertRaises(kali_bridge.KaliUnavailable) as caught:
+                kali_bridge.config_path()
+        self.assertIn("APPDATA", str(caught.exception))
+        with mock.patch.dict(os.environ, environ, clear=True):
+            with self.assertRaises(kali_bridge.KaliUnavailable):
+                kali_bridge.load_config()
+        # An explicit path never depends on APPDATA.
+        path = write_config(self.temp.name)
+        with mock.patch.dict(os.environ, environ, clear=True):
+            self.assertEqual(kali_bridge.load_config(path).host,
+                             "192.168.56.20")
+
+    def test_config_path_with_empty_appdata_is_unavailable(self):
+        environ = {k: v for k, v in os.environ.items()
+                   if k not in (kali_bridge.CONFIG_ENV, "APPDATA")}
+        environ["APPDATA"] = ""
+        with mock.patch.dict(os.environ, environ, clear=True):
+            with self.assertRaises(kali_bridge.KaliUnavailable) as caught:
+                kali_bridge.config_path()
+        self.assertIn("APPDATA", str(caught.exception))
+
     def test_builds_a_strict_ssh_command(self):
         config = kali_bridge.load_config(write_config(self.temp.name))
         argv = kali_bridge.ssh_argv(config)
@@ -120,6 +160,14 @@ class CallTests(unittest.TestCase):
         self.assertIsInstance(sent, bytes)
         return json.loads(sent.decode("utf-8"))
 
+    def assert_encoding_contract(self, runner):
+        # The sole proof of the mandated UTF-8 stdin correction: pin the exact
+        # keyword set so text=/encoding=/errors= can never creep back in.
+        self.assertEqual(set(runner.calls[0][1]),
+                         {"input", "capture_output", "timeout"})
+        self.assertIsInstance(runner.calls[0][1]["input"], bytes)
+        self.assertIs(runner.calls[0][1]["capture_output"], True)
+
     def test_scope_sends_scope_mode(self):
         runner = FakeRunner({"ok": True, "scope": {"version": 1}})
         result = kali_bridge.scope(config=self.config, runner=runner)
@@ -129,6 +177,7 @@ class CallTests(unittest.TestCase):
         self.assertEqual(runner.calls[0][0],
                          kali_bridge.ssh_argv(self.config))
         self.assertEqual(runner.calls[0][1]["timeout"], 15)
+        self.assert_encoding_contract(runner)
 
     def test_check_sends_steps_without_execution(self):
         runner = FakeRunner({"ok": True, "risk": "recon",
@@ -143,7 +192,8 @@ class CallTests(unittest.TestCase):
         self.assertEqual(request["steps"], steps)
         self.assertEqual(request["objective"], "scan")
         self.assertEqual(request["total_timeout"], 300)
-        self.assertEqual(runner.calls[0][1]["timeout"], 40)
+        self.assertEqual(runner.calls[0][1]["timeout"], 60)
+        self.assert_encoding_contract(runner)
 
     def test_task_marks_desktop_approval(self):
         runner = FakeRunner({"ok": True, "results": [], "risk": "recon"})
@@ -153,6 +203,7 @@ class CallTests(unittest.TestCase):
         self.assertEqual(request["mode"], "execute")
         self.assertEqual(request["approval"], "desktop")
         self.assertEqual(runner.calls[0][1]["timeout"], 340)
+        self.assert_encoding_contract(runner)
 
     def test_task_returns_additive_result_fields_unchanged(self):
         payload = {
@@ -259,11 +310,84 @@ class CallTests(unittest.TestCase):
         runner = FakeRunner({"ok": True, "risk": "recon", "targets": []})
         kali_bridge.check(objective, [{"argv": ["nmap", "192.168.56.10"]}],
                           config=self.config, runner=runner)
+        self.assert_encoding_contract(runner)
         sent = runner.calls[0][1]["input"]
         self.assertIsInstance(sent, bytes)
         request = json.loads(sent.decode("utf-8"))
         self.assertEqual(request["objective"], objective)
         self.assertIsNone(runner.calls[0][1].get("text"))
+
+    def test_check_timeout_scales_with_connect_timeout(self):
+        config = kali_bridge.load_config(
+            write_config(self.temp.name, connect_timeout=45))
+        runner = FakeRunner({"ok": True, "risk": "recon", "targets": []})
+        kali_bridge.check("scan", [{"argv": ["nmap", "192.168.56.10"]}],
+                          config=config, runner=runner)
+        self.assertEqual(runner.calls[0][1]["timeout"], 75)
+
+
+class ResponseShapeTests(unittest.TestCase):
+    """Every response shape maps to exactly one documented exception type."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.config = kali_bridge.load_config(write_config(self.temp.name))
+
+    def run_scope(self, runner):
+        return kali_bridge.scope(config=self.config, runner=runner)
+
+    def test_list_refusal_is_the_generic_protocol_error(self):
+        # A non-dict payload is "not ok"; it carries no refusal text, so the
+        # refusal falls back to the generic message rather than the shape
+        # error, and never becomes a policy denial or a success.
+        runner = FakeRunner(stdout='["denied", "target is outside scope"]')
+        with self.assertRaises(kali_bridge.KaliProtocolError) as caught:
+            self.run_scope(runner)
+        self.assertEqual(str(caught.exception), "Kali refused the request")
+        self.assertNotIsInstance(caught.exception,
+                                 kali_bridge.KaliPolicyError)
+
+    def test_list_wrapped_refusal_is_the_generic_protocol_error(self):
+        # Same shape as the wrapper's error object, but in list form: the text
+        # inside a list is not surfaced (the payload has no refusal surface).
+        runner = FakeRunner(stdout='[{"ok": false, "denied": true, '
+                                    '"reason": "steps contain a denied flag"}]')
+        with self.assertRaises(kali_bridge.KaliProtocolError) as caught:
+            self.run_scope(runner)
+        self.assertEqual(str(caught.exception), "Kali refused the request")
+        self.assertNotIsInstance(caught.exception,
+                                 kali_bridge.KaliPolicyError)
+
+    def test_ok_gate_precedes_the_shape_check(self):
+        # dict discriminator, refusing payload: the refusal text wins, so the
+        # next non-dict payload renders as a refusal rather than a shape error.
+        refusing = FakeRunner({"ok": False, "reason": "not yet denied marker"})
+        with self.assertRaises(kali_bridge.KaliProtocolError) as caught:
+            self.run_scope(refusing)
+        self.assertEqual(str(caught.exception), "not yet denied marker")
+        listed = FakeRunner(stdout="[]")
+        with self.assertRaises(kali_bridge.KaliProtocolError) as caught:
+            self.run_scope(listed)
+        self.assertEqual(str(caught.exception), "Kali refused the request")
+        self.assertNotIn("non-object", str(caught.exception))
+
+    def test_list_success_is_a_protocol_error(self):
+        runner = FakeRunner(stdout='[{"ok": true, "scope": {"version": 1}}]')
+        with self.assertRaises(kali_bridge.KaliProtocolError) as caught:
+            self.run_scope(runner)
+        self.assertIn("Kali refused the request", str(caught.exception))
+
+    def test_ok_string_is_not_a_success(self):
+        runner = FakeRunner({"ok": "true", "error": "bad status marker"})
+        with self.assertRaises(kali_bridge.KaliProtocolError) as caught:
+            self.run_scope(runner)
+        self.assertIn("bad status marker", str(caught.exception))
+
+    def test_refusal_on_a_scope_call_never_returns(self):
+        runner = FakeRunner({"ok": False, "scope": {"version": 1}})
+        with self.assertRaises(kali_bridge.KaliProtocolError):
+            self.run_scope(runner)
 
 
 class ExceptionContractTests(unittest.TestCase):
@@ -279,6 +403,11 @@ class ExceptionContractTests(unittest.TestCase):
                                     kali_bridge.KaliUnavailable))
         self.assertFalse(issubclass(kali_bridge.KaliProtocolError,
                                     kali_bridge.KaliPolicyError))
+
+    def test_max_steps_is_not_exported(self):
+        # The wrapper owns the 1-8 limit; a re-exported constant nothing
+        # enforces would invite a caller to trust it.
+        self.assertFalse(hasattr(kali_bridge, "MAX_STEPS"))
 
 
 if __name__ == "__main__":

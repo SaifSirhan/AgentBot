@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CONFIG_ENV = "KESTREL_KALI_CONFIG"
-MAX_STEPS = 8
 
 
 class KaliError(RuntimeError):
@@ -43,7 +42,11 @@ def config_path(path=None):
     override = os.environ.get(CONFIG_ENV)
     if override:
         return Path(override)
-    return Path(os.environ.get("APPDATA", "")) / "Kestrel" / "kali.json"
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        # An empty base would make the path relative to the launch directory.
+        raise KaliUnavailable("APPDATA is not set; no Kali config path")
+    return Path(appdata) / "Kestrel" / "kali.json"
 
 
 def load_config(path=None):
@@ -140,14 +143,24 @@ def _run(request, config, timeout, runner=None):
         payload = json.loads(stdout)
     except (TypeError, ValueError) as exc:
         raise KaliProtocolError("Kali returned invalid JSON") from exc
-    if not isinstance(payload, dict):
-        raise KaliProtocolError("Kali returned a non-object response")
-    if payload.get("ok") is not True:
+    try:
+        # The ok gate runs first, exactly as the brief orders it. A payload
+        # with no mapping surface (list, string, number, null) is "not ok".
+        ok = payload.get("ok")
+    except AttributeError:
+        ok = None
+    if ok is not True:
+        # Non-dict payloads carry no refusal text; fall back to the generic
+        # message. Same exception type as any other refusal.
+        if not isinstance(payload, dict):
+            raise KaliProtocolError("Kali refused the request")
         reason = str(payload.get("reason") or payload.get("error")
                      or "Kali refused the request")
-        if payload.get("denied"):
+        if payload.get("denied") is True:
             raise KaliPolicyError(reason)
         raise KaliProtocolError(reason)
+    # Success shape: ok is True and the payload is a mapping.
+    assert isinstance(payload, dict)
     return payload
 
 
@@ -170,7 +183,10 @@ def check(objective, steps, total_timeout=300, config=None, path=None,
         "steps": steps,
         "total_timeout": total_timeout,
     }
-    return _run(request, config, config.connect_timeout + 30, runner)
+    # Check mode only evaluates policy on Kali and runs no scanners, so the
+    # budget stays small; total_timeout is not honoured here.
+    timeout = max(60, config.connect_timeout + 30)
+    return _run(request, config, timeout, runner)
 
 
 def task(objective, steps, total_timeout=300, config=None, path=None,
