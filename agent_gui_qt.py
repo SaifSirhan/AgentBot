@@ -107,6 +107,7 @@ except Exception:
     scheduler = None
 
 import memory
+import kali_bus
 import sprite_bus
 from hud_core import PetWidget, ReactorHud
 from window_chrome import FramelessChrome
@@ -2320,6 +2321,46 @@ class _SpriteRelay(QObject):
         self.command.emit(action, params)
 
 
+class _KaliRelay(QObject):
+    """Marshals a tool-thread approval request onto the GUI thread.
+
+        The tool loop blocks while it asks (`kali_bridge` runs on the worker), so
+        `request` hands the plan and a `finish` callback to the GUI thread and
+        blocks on an Event for at most `timeout` seconds. `event.wait` returns
+        False when it times out, so a plan whose dialog was never shown, was
+        torn down, or was answered only after the wait expired is a deny: the
+        answer can never arrive after the question.
+
+        `finish` is single-use and per-call, so a second click, a late
+        callback, or one request's answer cannot flip this one or land on a
+        later request.
+    """
+
+    approval_requested = Signal(object, object)
+
+    def request(self, plan, timeout):
+        event = threading.Event()
+        result = {"approved": False}
+        answered = threading.Lock()
+
+        def finish(approved):
+            with answered:
+                if event.is_set():
+                    return
+                result["approved"] = bool(approved)
+                event.set()
+
+        try:
+            self.approval_requested.emit(dict(plan), finish)
+        except Exception:
+            # A plan that cannot be copied never reaches the user, so it is a
+            # deny now rather than a timeout later. (A slot that raises on the
+            # GUI thread cannot be seen from here; Qt prints it and the wait
+            # below still expires, which is also a deny.)
+            event.set()
+        return event.wait(timeout) and result["approved"]
+
+
 class ChatView(QScrollArea):
     """
     Scrollable chat column.
@@ -2384,6 +2425,13 @@ class ChatView(QScrollArea):
         forward = self._sprite_relay.forward
         sprite_bus.register(forward)
         self.destroyed.connect(lambda *_: sprite_bus.unregister(forward))
+        # Kali execution asks for consent through kali_bus; this relay is the
+        # only path to the dialog, so tearing it down means "deny".
+        self._kali_relay = _KaliRelay(self)
+        self._kali_relay.approval_requested.connect(self._show_kali_approval)
+        kali_request = self._kali_relay.request
+        kali_bus.register(kali_request)
+        self.destroyed.connect(lambda *_: kali_bus.unregister(kali_request))
         self.background_hud.set_pet_widget(self.pet)
         self._body.raise_()
         self._center_background_hud()
@@ -2541,6 +2589,29 @@ class ChatView(QScrollArea):
                 w.deleteLater()
         self._gap_items.clear()
         self.chat_log.clear()
+
+    def _show_kali_approval(self, plan, finish):
+        """The one dialog for Kali execution. Default No; every failure is No.
+
+        Only the dialog itself is guarded: `finish` just records an answer for
+        the waiting worker (single lock, single assignment), and letting its
+        failure surface beats catching it and calling `finish(False)` on top
+        of a decision that may already have been delivered.
+        """
+        if plan is None:
+            plan = {}
+        try:
+            reply = QMessageBox.question(
+                self,
+                "Kali lab approval",
+                kali_bus.format_approval(plan),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        except Exception:
+            finish(False)
+            return
+        finish(reply == QMessageBox.StandardButton.Yes)
 
 
 # ----------------------------------------------------------------------
