@@ -43,6 +43,32 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("kali_task", {tool.name for tool in selected})
         self.assertIn("kali_task", prompt)
 
+    def test_natural_security_phrasings_reach_the_kali_tools(self):
+        """A user asks for the work, not for the binary.
+
+        "Run nmap" routed but "scan my lab for open ports" did not, so the
+        tools were unreachable for the most natural way to ask.
+        """
+        for text in ("scan my lab for open ports",
+                     "port scan the lab host",
+                     "scan 192.168.56.10",
+                     "run a vulnerability assessment",
+                     "enumerate services on the VM"):
+            with self.subTest(text=text):
+                _, selected = agent._route_prompt(text)
+                self.assertIn("kali_task",
+                              {tool.name for tool in selected})
+
+    def test_ordinary_scans_do_not_reach_the_kali_tools(self):
+        """The wider security pattern must not attach to everyday scanning."""
+        for text in ("scan this document for typos",
+                     "scan the QR code",
+                     "scan my receipts",
+                     "scan the network for my printer"):
+            with self.subTest(text=text):
+                _, selected = agent._route_prompt(text)
+                self.assertNotIn("kali_task",
+                                 {tool.name for tool in selected})
     def test_normal_turns_hide_kali_tools(self):
         prompt, selected = agent._route_prompt("hello there")
         self.assertNotIn("kali_task", {tool.name for tool in selected})

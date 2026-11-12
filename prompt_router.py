@@ -87,10 +87,24 @@ INTENT_PATTERNS = {
         r"stopping|resume|resuming)\b.*\b(?:songs?|music|artists?|albums?|"
         r"tracks?)\b).*\b(?:songs?|music|artists?|albums?|tracks?)\b",
     ),
+    # People ask for the work, not the binary. A bare `scan` counts unless the
+    # request names something Kestrel already has a local tool for: a virus
+    # scan, a PDF, a barcode or a printer must not light up the lab tools. The
+    # guard is one whole-utterance lookahead because "virus scan" puts the
+    # object before the verb, and each everyday word carries its own left
+    # boundary: without it "keywords" matches "words" and the guard fires on
+    # every request.
     "security": (
         r"\b(?:kali|nmap|masscan|nuclei|ffuf|gobuster|feroxbuster|nikto|"
         r"sqlmap|metasploit|msfconsole|hydra|recon|pentest|"
-        r"penetration\s+test|vulnerability\s+scan|security\s+test)\b",
+        r"penetration\s+test|vulnerability\s+scan|security\s+test)\b"
+        r"|\b(?:vulnerabilit(?:y|ies)\s+assessment|"
+        r"enumerate\s+(?:services|ports|hosts|shares))\b"
+        r"|^(?!.*\b(?:documents?|docs?|pdfs?|files?|folders?|drive|"
+        r"downloads|disk|receipts?|qr|codes?|barcodes?|photos?|images?|"
+        r"papers?|inbox|emails?|invoices?|printers?|routers?|tvs?|scanners?|"
+        r"keywords?|text|words?|virus|viruses|malware|spyware|adware|"
+        r"trojans?|full\s+system)\b).*\b(?:port\s+)?scan\b",
     ),
 }
 
