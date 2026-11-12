@@ -15,12 +15,14 @@ is attacker-influenceable. Two bounds keep that text honest:
   * control characters — C0 (including \\n, \\x1b, \\x00, \\r) and DEL — are
     replaced with "?". A raw ESC/CR can erase or overwrite a line so an
     out-of-scope command is shown as something benign; a NUL can split a string
-    for whatever consumes it downstream.
-  * length — each argv token is cut at MAX_TOKEN_CHARS, each text field at
-    MAX_FIELD_CHARS, the target list at MAX_FIELD_CHARS and the commands at
-    MAX_STEPS, and the whole body is capped at MAX_TEXT_CHARS, each cut marked
-    with an explicit "N more ... omitted" line so a megabyte-wide wildcard or
-    a 5000-step plan cannot hang the dialog's layout.
+    for whatever consumes it downstream; a bare newline could forge an extra
+    numbered step whose command was never in the plan.
+  * length — one argv token at MAX_TOKEN_CHARS, a text field (objective, risk,
+    target line) at MAX_FIELD_CHARS, the target line at MAX_TARGETS entries,
+    the command list at MAX_STEPS, and the command body at MAX_TEXT_CHARS. Each
+    cut carries an explicit "N more ... omitted" marker so a megabyte-wide
+    wildcard or a 5000-step plan cannot make the dialog unreadable or stall its
+    layout.
 """
 from __future__ import annotations
 
