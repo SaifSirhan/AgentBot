@@ -62,8 +62,9 @@ The installer is idempotent: it re-applies owners and modes, keeps an existing
 if `/tmp/kestrel` or `/var/log/kestrel/audit.jsonl` is a symlink, because it
 runs as root and must not chown/chmod through a link planted in world-writable
 `/tmp`. If it refuses, remove the link (`sudo rm /tmp/kestrel`, no trailing
-slash) and re-run. The wrapper also refuses a symlinked `/tmp/kestrel`, and on
-Linux one that is not owned by `kestrel` or not mode `0700`, at run time.
+slash; for the audit file, `sudo rm /var/log/kestrel/audit.jsonl`) and re-run.
+The wrapper also refuses a symlinked `/tmp/kestrel`, and on Linux one that is
+not owned by `kestrel` or not mode `0700`, at run time.
 
 ## 3. Add the forced command
 

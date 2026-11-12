@@ -90,6 +90,16 @@ def bash_commands(body):
     return found
 
 
+def prose(body):
+    """One README section as a single line, so a wrapped sentence still matches.
+
+    The security instructions are prose, not commands: matching them across
+    line wraps is what makes deleting the sentence a failure instead of a
+    reflow that hides inside a substring check.
+    """
+    return " ".join(body.split())
+
+
 def position(items, needle):
     if needle not in items:
         raise AssertionError("missing line: %s" % needle)
@@ -194,6 +204,17 @@ class InstallAssetTests(unittest.TestCase):
         self.assertLess(position(lines, "rm -f %s" % SSH_RC),
                         position(lines, "chown -R root:root /home/kestrel"))
 
+    def test_readme_removes_the_user_rc_before_root_owns_the_home(self):
+        # The operator follows README 1, not the installer's source. A planted
+        # rc survives there and sshd runs it as kestrel BEFORE the forced
+        # command; chown -R would only make it root-owned, so the removal must
+        # come first, exactly as the installer does it.
+        lines = bash_commands(section(1))
+        rc = "sudo rm -f %s" % SSH_RC
+        self.assertIn(rc, lines)
+        self.assertLess(position(lines, rc),
+                        position(lines, "sudo chown -R root:root /home/kestrel"))
+
     # -- T2-R2/R3: the forced-command line is the whole SSH boundary ---------
 
     def test_readme_forced_command_carries_every_restriction(self):
@@ -261,6 +282,18 @@ class InstallAssetTests(unittest.TestCase):
         # Windows PowerShell 5.1 redirects as UTF-16, which OpenSSH rejects
         # with "is not a public key file"; the step must write ASCII.
         self.assertIn("| Out-File -Encoding ascii", body)
+        # Printing two fingerprints is not the step; comparing them is. Without
+        # this instruction ssh-keyscan stays bare TOFU and a substituted host
+        # key is accepted silently.
+        step = prose(body).lower()
+        self.assertIn("`sha256:` fingerprint", step)
+        self.assertIn("must match the console's character for character", step)
+        self.assertIn("if it does not, stop", step)
+        self.assertIn("delete `known_hosts`", step)
+        # The comparison guards the connection, so it must precede it.
+        self.assertLess(step.index("character for character"),
+                        step.index("ssh -i "),
+                        "verify the fingerprint before connecting")
         self.assertNotIn("## 5. Pin the host key", read("README.md"))
 
     # -- T2-R7: honest capability wording and a masscan live check -----------
@@ -287,6 +320,12 @@ class InstallAssetTests(unittest.TestCase):
         self.assertIn("symlink", body)
         self.assertIn("/tmp/kestrel", body)
         self.assertIn("/var/log/kestrel/audit.jsonl", body)
+        # The installer refuses on BOTH paths, so both need a recovery command.
+        # Documenting only the output root leaves the operator stuck on the
+        # audit refusal with no way forward.
+        text = prose(body)
+        self.assertIn("`sudo rm /tmp/kestrel`", text)
+        self.assertIn("`sudo rm /var/log/kestrel/audit.jsonl`", text)
 
     # -- Shipped Task 1 facts the assets must not contradict -----------------
 
