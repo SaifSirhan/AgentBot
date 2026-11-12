@@ -2350,6 +2350,13 @@ class _KaliRelay(QObject):
                 result["approved"] = bool(approved)
                 event.set()
 
+        # `event.wait` raises ValueError for a negative timeout, and would
+        # block forever on None; a caller that cannot wait the way it asked
+        # gets the same immediate deny every other malformed path gives.
+        try:
+            timeout = max(0.0, float(timeout))
+        except (TypeError, ValueError):
+            return False
         try:
             self.approval_requested.emit(dict(plan), finish)
         except Exception:

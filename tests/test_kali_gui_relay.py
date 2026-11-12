@@ -8,6 +8,8 @@ slot that raises, a reply given after the wait already gave up.
 
 Run: python -m unittest tests.test_kali_gui_relay -v
 """
+import contextlib
+import io
 import os
 import sys
 import threading
@@ -88,6 +90,17 @@ class KaliRelayTests(unittest.TestCase):
             self.app.processEvents()
             time.sleep(0.005)
 
+    def _pump(self):
+        """Deliver everything pending, DeferredDelete included.
+
+        `deleteLater` only queues the destruction; without this the object is
+        still alive and a "destroyed window" test proves nothing.
+        """
+        from PySide6.QtCore import QCoreApplication, QEvent
+        self.app.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.app.processEvents()
+
     def test_the_request_is_answered_on_the_gui_thread(self):
         receiver, result = self._ask(True)
         self.assertEqual(result, [True])
@@ -113,29 +126,89 @@ class KaliRelayTests(unittest.TestCase):
                 self._pump_until(lambda: not worker.is_alive())
                 self.assertIs(worker.result, bool(answer))
 
-    def test_a_slot_that_raises_on_the_gui_thread_still_denies(self):
-        """A slot raising during delivery is a deny.
+    def test_a_plain_slot_that_raises_during_the_emit_still_denies(self):
+        """A connected plain callable whose raise reaches the emit is a deny.
 
-        Qt prints and swallows an exception raised by a queued slot, so on a
-        worker caller the emit looks successful and the deny arrives by
-        timeout. An *unconnected* relay is that first case (no dialog is
-        attached, nothing answers); a slot connected in the emitting thread
-        is the second (the raise reaches `request`, which denies at once).
+        Measured here (PySide6 6.x): a lambda connected with AutoConnection
+        runs in the emitting thread and its raise surfaces from `emit`, which
+        `request` catches. The deny must be bounded whatever Qt does with the
+        exception; the queued `@Slot` case is
+        `test_a_connected_slot_that_raises_during_queued_delivery_still_denies`.
         """
-        # Case 1: nobody connected - nothing can ever answer.
-        started = time.monotonic()
-        self.assertFalse(_KaliRelay().request({"objective": "x"}, 0.1))
-        self.assertLess(time.monotonic() - started, 1.0)
-        # Case 2: the raise reaches the emitting thread.
         relay = _KaliRelay()
+        called = []
 
         def boom(plan, finish):
+            called.append(plan)
             raise RuntimeError("dialog blew up")
 
         relay.approval_requested.connect(boom)
         started = time.monotonic()
-        self.assertFalse(relay.request({"objective": "x"}, 1))
-        self.assertLess(time.monotonic() - started, 2.0)
+        # Qt prints the swallowed raise; capture it so the suite stays quiet
+        # and assert on it, which proves the slot really ran and really raised.
+        noisy = io.StringIO()
+        with contextlib.redirect_stderr(noisy):
+            approved = relay.request({"objective": "x"}, 0.2)
+        self.assertFalse(approved)
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(len(called), 1)
+        self.assertIn("dialog blew up", noisy.getvalue())
+
+    def test_an_unconnected_relay_denies_after_its_timeout(self):
+        """No dialog is attached, so nothing can answer; the wait still ends in
+        a deny, no later than the timeout."""
+        started = time.monotonic()
+        self.assertFalse(_KaliRelay().request({"objective": "x"}, 0.1))
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_negative_timeout_is_a_deny_not_a_raise(self):
+        """T4-5: the wait must not raise or block forever on a bad timeout.
+
+        `Event.wait` converts a negative timeout on some Python builds and
+        would raise ValueError on others, and it blocks forever on `None`;
+        `max(0.0, float(timeout))` turns the negatives into an immediate
+        deny, and a timeout with no numeric meaning into the same immediate
+        deny (the dialog is never asked, so nothing can answer). A late Yes
+        must not resurrect any of it.
+        """
+        for timeout in (-1, -0.5, float("-inf")):
+            with self.subTest(timeout=timeout):
+                relay = _KaliRelay()
+                finishes = []
+                relay.approval_requested.connect(
+                    lambda plan, finish: finishes.append(finish))
+                started = time.monotonic()
+                self.assertIs(relay.request({"objective": "x"}, timeout), False)
+                self.assertLess(time.monotonic() - started, 1.0)
+                self.assertEqual(len(finishes), 1)  # the dialog was asked
+                finishes[0](True)  # the user finally clicks Yes: too late
+                self.assertFalse(kali_bus.request_approval(
+                    {"objective": "x"}, timeout))
+        for timeout in (None, "not a timeout", object()):
+            with self.subTest(timeout=timeout):
+                relay = _KaliRelay()
+                finishes = []
+                relay.approval_requested.connect(
+                    lambda plan, finish: finishes.append(finish))
+                started = time.monotonic()
+                self.assertIs(relay.request({"objective": "x"}, timeout), False)
+                self.assertLess(time.monotonic() - started, 1.0)
+                self.assertEqual(finishes, [])  # nothing was asked
+                self.assertFalse(kali_bus.request_approval(
+                    {"objective": "x"}, timeout))
+
+    def test_numeric_timeouts_are_honoured(self):
+        """The guard accepts what a timeout legitimately is: a number, or a
+        numeric string, used as given above the `>= 0` floor."""
+        for timeout, floor in ((0, 0.0), (0.05, 0.05), ("0.05", 0.05)):
+            with self.subTest(timeout=timeout):
+                relay = _KaliRelay()
+                relay.approval_requested.connect(lambda plan, finish: None)
+                started = time.monotonic()
+                self.assertIs(relay.request({"objective": "x"}, timeout), False)
+                elapsed = time.monotonic() - started
+                self.assertGreaterEqual(elapsed, floor)
+                self.assertLess(elapsed, floor + 1.0)
 
     def test_a_finish_that_raises_is_not_swallowed(self):
         """The relay's `finish` never raises in practice (it is one lock and
@@ -233,20 +306,77 @@ class KaliRelayTests(unittest.TestCase):
         self.assertEqual(len(seen), 1)
 
     def test_a_destroyed_window_leaves_the_worker_bounded(self):
-        """The ChatView owns the relay; killing it must not strand a waiter."""
+        """The window really is destroyed before the worker asks.
+
+        The relay is `deleteLater`ed AND the DeferredDelete event is processed,
+        so its C++ object is gone (proved by the raise on connect below) by the
+        time the worker calls `request`. That request is still a bounded deny,
+        not a crash or a hang.
+        """
         relay = _KaliRelay()
         kali_request = relay.request
         kali_bus.register(kali_request)
         relay.deleteLater()  # the window went away; queued signal has no target
         kali_bus.unregister(kali_request)  # what ChatView.destroyed runs
-        self._pump_until(lambda: False, limit=0.05)
+        self._pump()  # process DeferredDelete: this is a real destruction
         self.assertFalse(kali_bus.is_attached())
+        # The relay is destroyed now: connecting to it raises, so the bounded
+        # deny below cannot just be "the timeout of a live relay with no
+        # receiver" (which other tests already cover).
+        with self.assertRaises(RuntimeError):
+            relay.approval_requested.connect(lambda plan, finish: finish(True))
+
         # No listener at all now: the next request is an immediate deny.
         self.assertFalse(kali_bus.request_approval({"objective": "x"}, 0.2))
-        # And the relay itself, with its receiver gone, is still bounded.
+        # And the destroyed relay itself is still a bounded deny.
+        worker = _Collecting(relay, {"objective": "x"}, 0.1)
         started = time.monotonic()
-        self.assertFalse(relay.request({"objective": "x"}, 0.1))
+        worker.start()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertIsNone(worker.error)
+        self.assertIs(worker.result, False)
         self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_a_connected_slot_that_raises_during_queued_delivery_still_denies(self):
+        """T4-3: a connected `@Slot` that raises on the GUI thread.
+
+        The plan is emitted from the worker, so Qt queues the call; when the GUI
+        thread runs it the slot raises, Qt prints and swallows it, `finish` is
+        never called, and the worker's own wait expires as a deny.
+        """
+        relay = _KaliRelay()
+        raised = []
+
+        class _Exploding(QObject):
+            @Slot(object, object)
+            def on_request(self, plan, finish):
+                raised.append(threading.current_thread())
+                raise RuntimeError("slot blew up on the GUI thread")
+
+        exploding = _Exploding()  # keep a reference: it must outlive delivery
+        self.addCleanup(exploding.deleteLater)
+        relay.approval_requested.connect(exploding.on_request)
+        worker = _Collecting(relay, {"objective": "x"}, 0.3)
+        started = time.monotonic()
+        worker.start()
+        # The raise is printed by Qt while the GUI thread pumps; capture it so
+        # the suite stays quiet, then assert it to prove the slot ran.
+        noisy = io.StringIO()
+        with contextlib.redirect_stderr(noisy):
+            self._pump_until(lambda: bool(raised) or not worker.is_alive(),
+                             limit=5)
+        worker.join(5)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(raised, [threading.main_thread()])  # it did raise
+        self.assertIn("slot blew up on the GUI thread", noisy.getvalue())
+        self.assertFalse(worker.is_alive())
+        self.assertIsNone(worker.error)  # the raise did not reach the caller
+        self.assertIs(worker.result, False)
+        # Denied by the worker's own timeout, not after some other answer.
+        self.assertGreaterEqual(elapsed, 0.25)
+        self.assertLess(elapsed, 2.0)
 
 
 class KaliDialogTests(unittest.TestCase):

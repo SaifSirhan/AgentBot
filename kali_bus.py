@@ -23,9 +23,17 @@ is attacker-influenceable. Two bounds keep that text honest:
     cut carries an explicit "N more ... omitted" marker so a megabyte-wide
     wildcard or a 5000-step plan cannot make the dialog unreadable or stall its
     layout.
+
+The work is bounded as well as the output, because this runs on the GUI
+thread: only the first MAX_STEPS steps are looked at, each value is cut before
+it is translated or quoted, and formatting stops once the text budget is
+spent. Exactly one "N more commands omitted" notice closes the command list,
+and the first command is always shown even when it alone exceeds the budget —
+an empty command list would ask the reader to approve nothing visible.
 """
 from __future__ import annotations
 
+import re
 import shlex
 import threading
 
@@ -80,21 +88,50 @@ def request_approval(plan, timeout=120) -> bool:
 
 # -- text rendering ---------------------------------------------------------
 
-_CONTROL = {code: "?" for code in list(range(0x20)) + [0x7F]}
+# What a 5 MB token is cut to before it costs anything else. MAX_TOKEN_CHARS
+# plus room for the control characters within it, all of which the cap can
+# drop: the cut is wide enough that the rendered token is unchanged.
+MAX_SCRUB_CHARS = 4 * MAX_TOKEN_CHARS
+
+_CONTROLS = re.compile("[%s]" % "".join(
+    re.escape(chr(code)) for code in list(range(0x20)) + [0x7F]))
 
 
 def _cap(text: str, limit: int) -> str:
     """Cut to `limit` characters and say how many were dropped."""
     if len(text) > limit:
-        dropped = len(text) - limit
-        text = (text[:limit]
-                + " ... (%d more characters omitted)" % dropped)
+        text = text[:limit] + " ... (%d more characters omitted)" % (
+            len(text) - limit)
     return text
+
+
+def _bounded_str(value):
+    """`str(value)`, but never over more text than MAX_SCRUB_CHARS.
+
+    A huge argv token usually arrives as a `str`, and translating a 50 MB
+    token only for the cap to throw it away is exactly the GUI-thread stall
+    this renderer exists to prevent. So a `str` is cut *before* it is
+    translated; any other object still goes through `str()` (no cheap length
+    is available) and is cut right after. Either way, at most a small
+    constant of text is translated, quoted or joined per value.
+    """
+    if isinstance(value, str):
+        text = str.__str__(value)  # the raw text; no __str__ call, no scan
+    else:
+        text = str(value)
+    if len(text) > MAX_SCRUB_CHARS:
+        text = text[:MAX_SCRUB_CHARS]
+    return text
+
+
+def _scrub(text: str) -> str:
+    """Replace C0/DEL with "?" over already-bounded input."""
+    return _CONTROLS.sub("?", text)
 
 
 def _clean(text) -> str:
     """Replace control characters, then bound the field length."""
-    return _cap(str(text).translate(_CONTROL), MAX_FIELD_CHARS)
+    return _cap(_scrub(_bounded_str(text)), MAX_FIELD_CHARS)
 
 
 def _token(arg) -> str:
@@ -103,11 +140,11 @@ def _token(arg) -> str:
     The marker goes inside the word rather than appended after it, so the
     rendered line cannot read as an extra argument that was never asked for.
     """
-    text = str(arg).translate(_CONTROL)
+    text = _bounded_str(arg)
     if len(text) > MAX_TOKEN_CHARS:
-        dropped = len(text) - MAX_TOKEN_CHARS
-        text = text[:MAX_TOKEN_CHARS] + "...(%d more characters omitted)" % dropped
-    return text
+        text = text[:MAX_TOKEN_CHARS] + "...(%d more characters omitted)" % (
+            len(text) - MAX_TOKEN_CHARS)
+    return _scrub(text)
 
 
 def _command(step) -> str:
@@ -141,30 +178,50 @@ def _targets(plan) -> str:
     return _cap(text, MAX_FIELD_CHARS)
 
 
-def _numbered(commands) -> list:
+def _numbered(steps, total: int) -> list:
+    """Number commands until the text budget is spent.
+
+    `steps` is already sliced to MAX_STEPS, and formatting stops at the first
+    command that does not fit: past that point nothing is quoted, joined or
+    even looked at again. Exactly one omission notice is appended, counting
+    every command the reader never sees — cut by the step cap or the budget.
+    """
     lines = []
     used = 0
-    for index, command in enumerate(commands, 1):
-        line = "%d. %s" % (index, command)
+    for index, step in enumerate(steps, 1):
+        line = "%d. %s" % (index, _command(step))
         if used + len(line) + 1 > MAX_TEXT_CHARS:
             break
         lines.append(line)
         used += len(line) + 1
-    if len(lines) < len(commands):
-        lines.append("... (%d more commands omitted)"
-                     % (len(commands) - len(lines)))
+    if not lines and steps:
+        # A command wider than the whole budget would otherwise leave the list
+        # empty, and the reader would be asked to approve nothing visible. Show
+        # the first command cut to fit; the cut is spelled out by `_cap`.
+        room = MAX_TEXT_CHARS - len("1. ") - 64
+        lines.append("1. " + _cap(_command(steps[0]), max(1, room)))
+    if len(lines) < total:
+        lines.append("... (%d more commands omitted)" % (total - len(lines)))
     return lines
 
 
 def format_approval(plan) -> str:
-    """Render a plan for the confirmation dialog. Never raises on odd shapes."""
+    """Render a plan for the confirmation dialog. Never raises on odd shapes.
+
+    The work is bounded, not just the output: the step list is sliced before
+    any command is formatted, each token and field is cut before it is
+    translated, and formatting stops once the text budget is spent.
+    """
     if not isinstance(plan, dict):
         plan = {}
     steps = plan.get("steps", [])
     if isinstance(steps, str) or not isinstance(steps, (list, tuple)):
         steps = []
-    commands = [_command(step) for step in steps]
-    shown = commands[:MAX_STEPS]
+    total = len(steps)
+    # One bounded slice, taken before any command is formatted, so no step
+    # past the cap is ever looked at. `total` is the whole plan: the omission
+    # notice at the end counts from it.
+    steps = steps[:MAX_STEPS]
     lines = [
         "Kali lab task",
         _clean(plan.get("objective", "") or ""),
@@ -173,8 +230,5 @@ def format_approval(plan) -> str:
         "",
         "Commands:",
     ]
-    lines.extend(_numbered(shown))
-    if len(commands) > MAX_STEPS:
-        lines.append("... (%d more commands omitted)"
-                     % (len(commands) - MAX_STEPS))
+    lines.extend(_numbered(steps, total))
     return "\n".join(lines)

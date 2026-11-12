@@ -15,6 +15,7 @@ Run: python -m unittest tests.test_kali_bus -v
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -269,6 +270,8 @@ class FormatApprovalTests(unittest.TestCase):
                  for i in range(5000)]
         text = kali_bus.format_approval(self._plan(steps=steps))
         self.assertIn("more commands omitted", text)
+        # Since T4-1 the text budget, not just MAX_STEPS, bounds the body, so
+        # numbering stops wherever that budget is spent (well before 1001).
         self.assertNotIn("1001. ", text)
         self.assertLessEqual(len(text), kali_bus.MAX_TEXT_CHARS + 4000)
 
@@ -301,6 +304,102 @@ class FormatApprovalTests(unittest.TestCase):
         text = kali_bus.format_approval(
             self._plan(objective="\x1b" * 90000, steps=steps))
         self.assertLess(len(text), kali_bus.MAX_TEXT_CHARS + 4000)
+
+    def test_a_hostile_plan_is_formatted_in_bounded_time(self):
+        """T4-1: the work is bounded, not only the output.
+
+        `format_approval` runs on the GUI thread inside the dialog slot, so a
+        model-supplied plan must not be able to stall the UI before the caps
+        bite. Both shapes are far worse than any real plan; the 1 s bound is
+        ~400x the cost of a real 500-step plan and ~50x what this
+        implementation needs, so it is about complexity, not machine speed.
+        """
+        cases = {
+            # The reviewer's measurement: 2.2 s before the work was bounded.
+            "5000 steps x 200 tokens x 200 chars": {
+                "objective": "x",
+                "steps": [{"argv": ["nmap"] + ["B" * 200] * 199}
+                          for _ in range(5000)],
+                "notice": r"\n\.\.\. \(\d+ more commands omitted\)\Z",
+            },
+            "one 5 MB token": {
+                "objective": "x",
+                "steps": [{"argv": ["curl", "A" * 5_000_000]}],
+                "notice": r"\.\.\.\(\d+ more characters omitted\)'\Z",
+            },
+        }
+        for label, plan in cases.items():
+            with self.subTest(case=label):
+                notice = plan.pop("notice")
+                started = time.monotonic()
+                text = kali_bus.format_approval(plan)
+                elapsed = time.monotonic() - started
+                self.assertLess(elapsed, 1.0, "%s took %.3fs" % (label, elapsed))
+                # The caps are still visible: bounded work, honest text.
+                self.assertEqual(text.count("Commands:"), 1)
+                self.assertRegex(text, notice)
+
+    def test_the_step_cap_is_applied_before_any_step_is_formatted(self):
+        """Only the first MAX_STEPS steps are looked at at all.
+
+        Step 501 holds an argv that cannot be turned into text; if it were
+        formatted before slicing, the renderer would hit it and raise.
+        """
+        self.assertGreater(kali_bus.MAX_STEPS, 2)
+
+        class Unprintable:
+            def __str__(self):
+                raise RuntimeError("formatted a step past the cap")
+
+        steps = ([{"argv": ["nmap", "10.0.0.1"]}] * (kali_bus.MAX_STEPS - 1)
+                 + [{"argv": ["A" * 200]}, {"argv": [Unprintable()]}])
+        text = kali_bus.format_approval(self._plan(steps=steps))
+        self.assertIn("%d. " % kali_bus.MAX_STEPS, text)
+        self.assertIn("(1 more commands omitted)", text)
+
+    def test_the_plan_has_one_omission_notice(self):
+        """T4-4: the step cap and the text cap must not each add a notice
+        (they once carried different counts for the same plan)."""
+        steps = [{"argv": ["nmap", "-sV", "192.168.56.%d" % i]}
+                 for i in range(3 * kali_bus.MAX_STEPS)]
+        text = kali_bus.format_approval(self._plan(steps=steps))
+        notices = [line for line in text.splitlines() if "omitted" in line]
+        self.assertEqual(len(notices), 1, notices)
+        # The count is the one the reader needs: commands never shown at all.
+        shown = 0
+        for line in text.splitlines():
+            head, sep, _ = line.partition(". ")
+            if sep and head.isdigit():
+                shown += 1
+        self.assertEqual(notices[0], "... (%d more commands omitted)"
+                         % (3 * kali_bus.MAX_STEPS - shown))
+
+    def test_a_command_too_big_for_the_budget_is_still_shown(self):
+        """A plan whose first command alone exceeds the text budget must not
+        render an empty command list.
+
+        The dialog is the only place a human sees what will run. If the budget
+        dropped every command, the reader would be asked to approve a blank
+        list — consent to nothing visible. The first command is always shown,
+        cut to fit, with the cut spelled out.
+        """
+        huge = {"argv": ["nmap"] + ["a" * 200] * 200}
+        text = kali_bus.format_approval(self._plan(steps=[huge]))
+        body = text.split("Commands:\n", 1)[1]
+        self.assertTrue(body.startswith("1. nmap "), body[:120])
+        self.assertIn("more characters omitted", body)
+        self.assertLessEqual(len(body), kali_bus.MAX_TEXT_CHARS + 64)
+        # And a hostile plan of them still shows the first, not nothing.
+        many = kali_bus.format_approval(self._plan(steps=[huge] * 5000))
+        self.assertIn("1. nmap ", many)
+        self.assertIn("more commands omitted", many)
+
+    def test_a_short_plan_gets_no_omission_notice(self):
+        text = kali_bus.format_approval(self._plan(steps=[
+            {"argv": ["nmap", "10.0.0.1"]},
+            {"argv": ["curl", "http://10.0.0.1/"]},
+        ]))
+        self.assertNotIn("omitted", text)
 
     def test_malformed_fields_do_not_raise(self):
         """The model shape is not trusted: wrong types render as nothing."""
