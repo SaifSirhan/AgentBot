@@ -224,7 +224,8 @@ class ToolArrayTests(unittest.TestCase):
         agent._clear_turn_route()
         self.assertEqual(
             {spec["function"]["name"] for spec in tools},
-            agent.VALID_TOOLS - {"chat", "done"},
+            agent.VALID_TOOLS - {"chat", "done"}
+            - agent.prompt_catalog.SECURITY_TOOLS,
         )
 
 

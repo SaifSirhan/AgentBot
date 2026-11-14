@@ -1,0 +1,8 @@
+/var/log/kestrel/audit.jsonl {
+    weekly
+    rotate 12
+    compress
+    missingok
+    notifempty
+    create 0600 kestrel kestrel
+}

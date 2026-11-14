@@ -38,6 +38,8 @@
 
 Create `kali/tests/test_kestrel_run.py`:
 
+> **Superseded by the hardening amendment (fix round 1):** this block is the original brief; `kali/kestrel_run.py` and `kali/tests/test_kestrel_run.py` on branch `kali-ssh-wrapper` are authoritative.
+
 ```python
 import json
 import os
@@ -375,6 +377,8 @@ Expected: `ModuleNotFoundError: No module named 'kestrel_run'`.
 - [ ] **Step 3: Write the minimal wrapper**
 
 Create `kali/kestrel_run.py`:
+
+> **Superseded by the hardening amendment (fix round 1):** this block is the original brief; `kali/kestrel_run.py` on branch `kali-ssh-wrapper` is authoritative.
 
 ```python
 #!/usr/bin/env python3
@@ -1024,6 +1028,144 @@ Expected: all wrapper tests pass on Windows or Kali.
 git add kali/kestrel_run.py kali/tests/test_kestrel_run.py
 git commit -m "feat(kali): add policy-enforced SSH wrapper"
 ```
+
+#### Hardening amendment (fix round 1)
+
+Review found the brief's mechanism bypassable; the controller ruled that the
+spec's default-deny guarantee outranks it. The two code blocks above are
+superseded — `kali/kestrel_run.py` on this branch is authoritative. The
+hardened policy (commit `fix(kali): fail closed on unvalidated tokens, paths,
+and scripts`):
+
+- **R1 — Fail-closed token walk.** Every token is accounted for: a bare token
+  must parse as a target or be the value of a known value-taking flag
+  (`VALUE_FLAGS`), else refusal — no silent drops. `--flag=value` and bundled
+  short flags are expanded and checked; unknown flags stay permitted but
+  their values must still pass R2/R3. Tokens with `,`, `*`, or `_` are
+  refused; one trailing dot is stripped from an FQDN before matching.
+- **R2 — Structural path confinement.** Any path-like value (write flags and
+  unknown flags alike) must resolve under `OUTPUT_ROOT` after symlink
+  resolution; the root itself is refused. Known read flags
+  (ffuf/gobuster/feroxbuster `-w`/`--wordlist`, openssl
+  `-in`/`-CAfile`/`-cert`/`-key`/`-untrusted`) may also resolve under
+  `/usr/share/wordlists`, `/usr/share/seclists`, `/usr/share/nmap`,
+  `/usr/share/whatweb`, `/etc/ssl/certs` — nothing else. The write-flag table
+  stays as an extra layer and gains curl `-D`/`--dump-header`,
+  `-c`/`--cookie-jar`, `--trace`, `--trace-ascii`, `--stderr` and openssl
+  `-sess_out`.
+- **R3 — URL rules.** Only `http`/`https` URLs with a hostname are targets.
+  Redirect following is denied (curl `-L`/`--location`/`--location-trusted`,
+  ffuf `-r`, feroxbuster `-r`/`--redirects`, nuclei `-follow-redirects`,
+  whatweb `--follow-redirect`), as are random/list inputs (nmap `-iR`,
+  `--excludefile`, `-D` decoys; dig `-f`; masscan `-iL`/`--excludefile`) on
+  top of the existing `-iL`/`-l`/`-request`/`-K` denials.
+- **R4 — NSE allowlist.** `--script` accepts a comma-separated list where
+  every name is a built-in name (no `*`, no path) and is either a category
+  (`default`, `safe`, `version`, `discovery`) or on the fixed `NSE_ALLOWLIST`
+  (banner, http-title, http-headers, http-server-header, http-robots.txt,
+  http-favicon, ssl-cert, ssl-enum-ciphers, ssh-hostkey, ssh2-enum-algos,
+  ftp-anon, smb-os-discovery, smb-protocols, dns-service-discovery,
+  mysql-info). `DANGEROUS_NSE` stays as a second layer; `--script-args`
+  values are path-confined and scope-checked (`newtargets` refused).
+- **R5 — No environment configuration.** `KESTREL_SCOPE`/`KESTREL_AUDIT`/
+  `KESTREL_OUTPUT` reads are deleted; `DEFAULT_SCOPE`, `DEFAULT_AUDIT`,
+  `OUTPUT_ROOT` are constants. Tests patch module attributes and pass
+  `main(scope_path=..., audit_path=...)`.
+- **R6 — Control characters.** NUL and every C0 control byte are refused in
+  any argv token, alongside the existing shell-metacharacter denial.
+- **R7 — OUTPUT_ROOT sanity.** Refuse to run if `OUTPUT_ROOT` is a symlink
+  or, on POSIX, exists with a different owner or a mode other than `0700`.
+
+Test count: 63 (33 original + 30 hardening tests), green on Windows including
+`-W error::ResourceWarning`; the controller probe's 19 bypass cases are all
+DENIED and its three controls are unchanged.
+
+#### Hardening amendment (fix round 2)
+
+A scoped re-review found that round 1's rewritten walk still let a flag value
+fall through uninspected when it parsed as neither a target nor a path, so
+`VALUE_FLAGS` membership alone licensed destination-bearing flags. The
+round-1 R1 clause "or be the value of a known value-taking flag" is superseded
+by R8 below. Commit `fix(kali): refuse unvalidated flag values and restore
+legitimate forms`:
+
+- **R8 — No silently ignored flag value.** Every value ends in exactly one of:
+  a validated in-scope target, a confined path, or a non-destination licensed
+  by an explicit value class (ports, record types, headers, methods, timeouts,
+  script names, aggression levels). A host-shaped value (fullmatch
+  `[A-Za-z0-9._:*@+-]+` plus `.`, `:` or `@`) must parse or be refused;
+  comma-separated values are checked part by part; userinfo is stripped to the
+  host; scheme-only URLs get the http/https rule. `--script-args` values go
+  through the same inspection and argument names must be identifiers.
+- **R9 — Relay and protocol-control flags denied outright**, and removed from
+  `VALUE_FLAGS`: nmap `-b`, `--dns-servers`, `-S`, `--ip-options`; dig `-b`;
+  curl `--proto`, `--proto-default`, `--proto-redir`, `--max-redirs`,
+  `-Q`/`--quote`, `-P`/`--ftp-port`, `-t`/`--telnet-option`, `-U`/`--proxy-user`;
+  whatweb `--max-redirects`. Every earlier denial is kept.
+- **R10 — Destination flags always parse as targets** and can never be
+  licensed as non-destinations: curl `--url`, whatweb `-u`/`--url`, nuclei
+  `-u`, ffuf `-u`, dig `-q`, masscan `--range`. `--range` validates both ends
+  as in-scope IPs in one network.
+- **R11 — Legitimate forms restored**: dig/host positional record types
+  (A, AAAA, MX, TXT, NS, SOA, CNAME, PTR, SRV, ANY, CAA — not AXFR/IXFR), dig
+  `+options` (never destinations, attached values still checked), masscan
+  `--range`, and nuclei's single-dash long flags (`-output`) matched whole
+  before any short-flag expansion.
+- **R12 — Hermetic CLI test**: the environment test runs the real entry point
+  with temp scope/audit paths, so no test can write to `/etc/kestrel` or
+  `/var/log/kestrel` on an installed Kali host.
+
+Test count: 76 (63 + 13 round-2 tests), green on Windows including
+`-W error::ResourceWarning`. Round-1 probe: 19/19 bypass cases DENIED, three
+controls unchanged. Round-2 probe: 8/8 must-DENY cases DENIED, 11/11 must-ALLOW
+cases ALLOWED.
+
+#### Hardening amendment (fix round 3)
+
+Round 3 closes the two remaining policy defects and the execution/audit
+robustness defects deferred from rounds 1-2. Commit `fix(kali): confine @file
+values, license credentials and numbers, harden execution and audit`:
+
+- **R13 — `@file` references are confined.** A leading `@` is stripped before
+  path confinement for every path-like value, so `@/etc/passwd` can no longer
+  resolve as a relative name under `OUTPUT_ROOT`. For the curl flags that
+  really read files (`-d`, `--data`, `--data-raw`, `--data-binary`,
+  `--data-ascii`, `--data-urlencode`, `-F`, `--form`, `--form-string`) the
+  value is a file reference when it carries `@file`, `name=@file`, `name=<file`
+  or (for `--data-urlencode`, with no `=`) `name@file`; the referenced path is
+  confined and is not target-parsed. A plain `-d name=value` stays allowed, and
+  every other flag keeps R8's target-or-path rule, so no denial is weakened.
+- **R14 — credentials and numbers are licensed.** curl `-u`/`--user` accepts a
+  credential pair unless it contains `@`, `/` or a URL scheme. A flag licensed
+  as a number accepts `^\d+(\.\d+)?$` or a comma list of those, decided before
+  target parsing (a four-octet IP never matches, so `curl -m 8.8.8.8` is still
+  refused). `nmap --spoof-mac` stays unlicensed and denied.
+- **I5 — byte pipes.** `Popen` no longer uses `text=True`; the readers cap and
+  collect BYTES, `run_step` decodes once with `errors="replace"`, and the read
+  loop records any failure in the result (`read_errors`) instead of letting a
+  traceback escape the thread. Non-UTF-8 output is preserved, not dropped.
+- **I6 — one shared byte budget.** Both streams are capped per step, the total
+  budget is enforced across both streams and across steps in real bytes, cuts
+  land on UTF-8 character boundaries, and `stdout_sha256`/`stderr_sha256` are
+  computed after truncation so they hash exactly the delivered text.
+- **I7 — audit before execute, and no traceback.** An `execute_intent` record
+  is written before any step runs; an `OSError` there refuses execution with a
+  JSON error (no audit, no run). The `execute` result record follows, the
+  `check` record is unchanged, `mode` defaults to `check`, the protocol version
+  check uses `type(v) is int` (so `true` and `1.0` are refused), `run_steps`
+  stops once the total deadline passes instead of granting every remaining
+  step 1s, the post-kill wait is bounded, and `main` has a catch-all that emits
+  a JSON error and a non-zero exit. An IPv6 network against an IPv4-only scope
+  is a denial, not a `TypeError`.
+- **Accepted, not fixed:** the `OUTPUT_ROOT` mkdir TOCTOU window (the installer
+  pre-creates `/tmp/kestrel` 0700 owned by `kestrel`; a local attacker on the
+  single-purpose VM is outside the threat model).
+
+Test count: 111 (76 + 35 round-3 tests), green on Windows including
+`-W error::ResourceWarning`, with the two POSIX-only ownership/mode skips.
+Round-1 probe: 19/19 DENIED, controls unchanged. Round-2 probe: 8/8 DENY,
+11/11 ALLOW. Round-3 probe: every case `ok`, non-UTF-8 output preserved as
+U+FFFD, total output within the cap, and the hash matches the delivered stdout.
 
 ---
 

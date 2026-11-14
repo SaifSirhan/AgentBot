@@ -39,6 +39,10 @@ MUSIC_TOOLS = frozenset({
     "youtube_search", "play_on_youtube", "musicapp_control",
 })
 
+# On-demand tools: only a security turn carries them, so the static prompt
+# stays under budget.
+SECURITY_TOOLS = frozenset({"kali_task", "kali_scope"})
+
 DESCRIPTIONS = {
     "search_web": "Search the live web and return titles, URLs, and summaries.",
     "read_artifact": "Read the full text of a saved large tool-output artifact by id.",
@@ -120,6 +124,10 @@ DESCRIPTIONS = {
         "Move the desktop pet: fly to a point, fly around, pop in or out, "
         "resize it, or park it in a corner."),
     "skill_manage": "Create, update, list, read, or delete a reusable skill.",
+    "kali_task": (
+        "Run an approved security task in the Kali lab: one objective and "
+        "one or more argv steps."),
+    "kali_scope": "Show the Kali lab's allowed targets, expiry, and public setting.",
 }
 
 EXTRA_KEYWORDS = {
@@ -189,6 +197,9 @@ EXTRA_KEYWORDS = {
     "watch_system_condition": ("battery", "cpu", "ram", "notify", "notified", "alert", "monitor", "watch"),
     "run_command": ("run", "command", "terminal", "shell", "docker",
                     "server", "code"),
+    "kali_task": ("kali", "security", "scan", "recon", "nmap", "pentest",
+                  "vulnerability", "lab"),
+    "kali_scope": ("kali", "scope", "targets", "lab", "security"),
 }
 
 
@@ -205,6 +216,8 @@ def build_tools(valid_tools: frozenset[str]) -> tuple[prompt_router.Tool, ...]:
             groups = ["air_quality"]
         elif name in MUSIC_TOOLS:
             groups = ["music"]
+        elif name in SECURITY_TOOLS:
+            groups = ["security"]
         elif name in FILE_TOOLS:
             groups = ["python"]
         elif name in OS_TOOLS:

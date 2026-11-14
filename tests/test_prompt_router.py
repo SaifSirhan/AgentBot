@@ -425,13 +425,20 @@ class AgentRoutingTests(unittest.TestCase):
     def test_turn_allowlist_exposes_every_catalog_tool(self):
         self.agent._set_turn_route("watch a movie")
         allowed = self.agent._ROUTED.allowed
-        self.assertEqual(allowed, set(self.agent.VALID_TOOLS))
+        self.assertEqual(allowed,
+                         set(self.agent.VALID_TOOLS) - pc.SECURITY_TOOLS)
         self.assertIn("read_file", allowed)
         self.assertIn("search_web", allowed)
         action, error = self.agent.parse_action(
             '{"tool": "read_file", "input": "notes.txt"}')
         self.assertIsNone(error)
         self.assertEqual(action["tool"], "read_file")
+
+    def test_security_turn_allowlist_includes_kali(self):
+        self.agent._set_turn_route("run nmap on the lab")
+        allowed = self.agent._ROUTED.allowed
+        self.assertIn("kali_task", allowed)
+        self.assertIn("kali_scope", allowed)
 
     def test_core_rules_ban_tool_meta_commentary(self):
         prompt = self.agent._build_plan_prompt("hello", "")

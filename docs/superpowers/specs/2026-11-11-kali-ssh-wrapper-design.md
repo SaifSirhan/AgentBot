@@ -82,13 +82,15 @@ writable by `kestrel`.
 Responsibilities:
 
 1. Read one JSON request from stdin.
-2. Dispatch on `mode`: `execute` (default), `scope`, or `check`.
+2. Dispatch on `mode`: `check` (default), `scope`, or `execute`. A request
+   that does not explicitly ask to execute never runs a command.
 3. Load and validate `/etc/kestrel/scope.json`.
 4. Validate every command argument against the binary allowlist and scope.
 5. Classify risk and refuse destructive flags.
-6. Execute each step with `shell=False`, a timeout, a process-group kill, and
-   an output cap.
-7. Write a JSONL audit record.
+6. Write a JSONL audit *intent* record before executing; if that write fails,
+   refuse to execute.
+7. Execute each step with `shell=False`, a timeout, a bounded process-group
+   kill, and an output cap, then write the JSONL result record.
 8. Return one JSON response on stdout.
 
 `mode: "scope"` is read-only: it returns the current scope so Kestrel can plan
@@ -265,9 +267,13 @@ Limits:
 - Maximum 8 steps per task.
 - Per-step timeout: 1–600 seconds; default 120.
 - Total timeout: 1–1800 seconds; default 300.
-- Output cap: 256 KB per stream per step; 1 MB total. Truncated output is
-  marked.
-- Steps run sequentially and stop after the first failed step.
+- Output cap: 256 KB per stream per step; 1 MB total, shared by both streams
+  and by every step and counted in bytes. Truncated output is marked, and
+  `stdout_sha256`/`stderr_sha256` are computed after truncation so they hash
+  exactly the delivered text. Pipes are read as bytes and decoded once with
+  replacement characters, so non-UTF-8 output is preserved, never dropped.
+- Steps run sequentially and stop after the first failed step or once the
+  total deadline passes; no step is started after it.
 
 ## 7. Policy
 
@@ -291,17 +297,55 @@ Kestrel cannot write it. The user edits it on Kali for phase 1.
 - `allow_public` defaults to false. If false, public IPs and domains are denied
   even if they appear in the lists.
 - Localhost and link-local addresses are denied unless explicitly listed.
-- Target extraction is flag-aware and binary-aware. Known file-argument flags
-  (`-w`, `--wordlist`, `-in`, `-CAfile`, and the output flags in §7.3) are
-  treated as paths; `-T` is timing for nmap and upload for curl. Every other
-  IP, CIDR, URL host, `host:port` value, `@resolver` token, bracketed IPv6
-  address, and hostname-like token is validated as a target even if a file
-  with the same name exists. A command with no target is allowed only for a
+- Target extraction is a fail-closed, flag-aware, binary-aware walk: every
+  token must be accounted for. A bare token must parse as a target — IP,
+  CIDR, URL host, `host:port` value, `@resolver` token, bracketed IPv6
+  address, or hostname — or be an explicitly licensed positional
+  (`searchsploit` search terms, a `gobuster` mode word, an `nc` port, a
+  `dig`/`host` record type, a `dig +option`); otherwise the request is refused.
+  Nothing is silently dropped, even when a file with the same name exists.
+  Every flag value ends in exactly one of three outcomes: a validated in-scope
+  target, a path confined per §7.3, or a non-destination licensed by an
+  explicit value class (ports, record types, headers, methods, timeouts,
+  script names, aggression levels). A host-shaped value — one that matches
+  `[A-Za-z0-9._:*@+-]+` and carries `.`, `:` or `@` — must parse as a target or
+  be refused; it can never be licensed away, and a value that parses as a
+  target is always scope-checked. The only values decided before target
+  parsing are the three narrow §7.3 licences that cannot name a destination:
+  a curl `@file` reference (confined as a path), a credential pair, and a
+  decimal number for a numeric flag. Comma-separated values are split and each
+  part gets the same treatment, so `8.8.8.8,1.1.1.1` is refused part by part.
+  Userinfo forms (`user@host`, `user:pass@host:port`) are stripped to the host,
+  which is then scope-checked. Unknown flags stay permitted, but their values
+  must pass the same rules and carry no non-destination licence.
+  `--flag=value` forms and bundled short flags (`-so`, `-sO`, `-vL`) are
+  expanded and checked the same way, and a single-dash long flag
+  (`nuclei -output`) is matched whole before any short-flag expansion; `-T` is
+  timing for nmap and upload for curl. A bare token containing `,`, `*`, or
+  `_` is not a valid single target and is refused. One trailing dot is
+  stripped from an FQDN before matching, so `example.com.` is refused as
+  public rather than dropped. Only `http` and `https` URLs with a hostname are
+  accepted as destinations, scheme-only forms included (`http:host` is a URL,
+  `ftp:host` is refused). A command with no target is allowed only for a
   binary in the local-safe list (`searchsploit`, `openssl`; openssl `s_client`
   still needs a validated `-connect` target).
-- Target-list and request-file flags are denied in phase 1 because they can
-  hide out-of-scope targets: `nmap -iL`, `nuclei -l`, `ffuf -request`, and
-  `curl -K`. The wrapper only accepts targets written directly in the argv.
+- Destination flags always parse as targets and can never be licensed as
+  non-destinations: `curl --url`, `whatweb -u`/`--url`, `nuclei -u`, `ffuf -u`,
+  `dig -q`, `masscan --range`. `--range` takes `A-B` and both ends must be
+  in-scope IPs in the same network, so a range that crosses out of scope is
+  refused. The licensed positionals are narrow: `dig`/`host` accept the record
+  types A, AAAA, MX, TXT, NS, SOA, CNAME, PTR, SRV, ANY and CAA (never the
+  zone transfers AXFR/IXFR), and a `dig +option` is never a destination — an
+  attached value such as `+subnet=8.8.8.8` is still scope-checked.
+- Target-list, request-file, and random-target flags are denied in phase 1
+  because they can hide out-of-scope targets: `nmap -iL`, `-iR`,
+  `--excludefile`, and `-D` (decoys); `nuclei -l`; `ffuf -request`;
+  `curl -K`/`--config`; `dig -f`; `masscan -iL` and `--excludefile`. The
+  wrapper only accepts targets written directly in the argv.
+- The scope file, audit destination, and output root are policy constants
+  (`/etc/kestrel/scope.json`, `/var/log/kestrel/audit.jsonl`, `/tmp/kestrel`).
+  No `KESTREL_*` environment variable is read, so an SSH client cannot
+  redirect policy through `AcceptEnv`.
 
 ### 7.2 Binary allowlist and risk tiers
 
@@ -329,26 +373,73 @@ Denied outright in phase 1:
 
 - `sqlmap`: `--os-shell`, `--os-pwn`, `--os-cmd`, `--file-write`,
   `--file-dest`, `--sql-shell`
-- `nmap`: `--script` with exploitation or brute categories; `--script-args`
-  carrying shell/file writes
+- `nmap`: `--script` outside the allowlist below; `--script-args` carrying
+  shell/file writes or `newtargets`
 - `curl`: `-o` / `--output` outside `/tmp/kestrel`, `-T` / `--upload-file`
 - `nc`: `-e` / `--exec`, `-c`
 - Any argv containing `;`, `|`, `&`, `$`, backticks, newline, or redirection
-  tokens where they would imply a shell
-- Output-path flags (`nmap -oN/-oX/-oG/-oA/-oS`, the ffuf, gobuster,
-  feroxbuster, nuclei, nikto and masscan output flags, `curl -o`, whatweb
-  `--log-*`, and openssl `-out`/`-keylogfile`/`-writerand`) must resolve under
-  `/tmp/kestrel`; relative paths resolve there. `~` and `..` escapes are
-  denied.
+  tokens where they would imply a shell, and any NUL or other C0 control
+  character in any token (an embedded NUL would make `Popen` raise)
+- Path confinement is structural, not a per-flag denylist: any value that
+  looks like a filesystem path (starts with `/`, `./`, `../`, `~`, or
+  contains `/` or `\`) must resolve under `/tmp/kestrel` after symlink
+  resolution — for the output-path flags (`nmap -oN/-oX/-oG/-oA/-oS`, the
+  ffuf, gobuster, feroxbuster, nuclei, nikto and masscan output flags,
+  `curl -o`, whatweb `--log-*`, openssl `-out`/`-keylogfile`/`-writerand`,
+  plus curl `-D`/`--dump-header`, `-c`/`--cookie-jar`, `--trace`,
+  `--trace-ascii`, `--stderr` and openssl `-sess_out`) and for any unknown
+  flag alike. Relative paths resolve under the root; `~` and `..` escapes
+  and a path equal to the root itself are denied. The known read-only flags
+  (ffuf/gobuster/feroxbuster `-w`/`--wordlist`, openssl
+  `-in`/`-CAfile`/`-cert`/`-key`/`-untrusted`) may additionally resolve under
+  `/usr/share/wordlists`, `/usr/share/seclists`, `/usr/share/nmap`,
+  `/usr/share/whatweb`, `/etc/ssl/certs` — nothing else.
+- A file-reference sigil is not part of a path name: a leading `@` is stripped
+  before confinement for every path-like value, so `@/etc/passwd` can never be
+  resolved as a relative name under the root. For the curl flags that really
+  read files (`-d`, `--data`, `--data-raw`, `--data-binary`, `--data-ascii`,
+  `--data-urlencode`, `-F`, `--form`, `--form-string`) the value is a file
+  reference when it carries `@file`, `name=@file`, `name=<file` or (for
+  `--data-urlencode`, with no `=`) `name@file`; the referenced path is confined
+  to `/tmp/kestrel` and is not target-parsed. A plain `-d name=value` stays
+  allowed. Elsewhere a leading `@` keeps the §7.1 target-or-path rule.
+- Two value classes are licensed before target parsing because the host-shaped
+  rule would otherwise refuse legitimate values, and neither can name a
+  destination: curl `-u`/`--user` accepts a credential pair unless it contains
+  `@`, `/` or a URL scheme; a flag licensed as a number (timeouts, delays,
+  rates, retries, thread counts, aggression levels) accepts `^\d+(\.\d+)?$` or
+  a comma list of those. A four-octet IP never matches that pattern, so
+  `curl -m 8.8.8.8` is still refused, and an unlicensed flag such as
+  `nmap --spoof-mac` gains nothing.
+- The wrapper refuses to run if `/tmp/kestrel` is a symlink or, on POSIX,
+  exists with a different owner or a mode other than `0700`.
 - `curl -O`/`--remote-name` and proxy flags (`-x`, `--proxy`, SOCKS variants,
   `--preproxy`) are denied. Proxy flags are also denied for ffuf, gobuster,
   feroxbuster, nikto, nuclei, whatweb, and openssl's `s_client`.
-- `nmap --script` accepts only comma-separated built-in names or categories;
-  `exploit`, `brute`, `dos`, `malware`, `fuzzer`, `external`, and `broadcast`
-  are denied. `--datadir`, `--script-args-file`, and `--script-updatedb` are
+- Redirect following is denied because a redirect leaves the validated
+  destination: `curl -L`/`--location`/`--location-trusted`, `ffuf -r`,
+  `gobuster -r`/`--followredirect`, `feroxbuster -r`/`--redirects`,
+  `nuclei -follow-redirects`, and `whatweb --follow-redirect`.
+- Relay, source-routing and protocol-control flags are denied outright: they
+  are attack primitives with no lab need, and licensing their values is what
+  let an out-of-scope destination hide in a flag value. `nmap -b` (FTP bounce
+  relay), `--dns-servers` (out-of-scope resolvers), `-S` (source spoofing) and
+  `--ip-options` (loose source routing); `dig -b`; `curl --proto`,
+  `--proto-default`, `--proto-redir`, `--max-redirs`, `-Q`/`--quote`,
+  `-P`/`--ftp-port`, `-t`/`--telnet-option` and `-U`/`--proxy-user`;
+  `whatweb --max-redirects`.
+- `nmap --script` accepts only a comma-separated list of built-in names: the
+  categories `default`, `safe`, `version`, `discovery`, or a fixed allowlist
+  of named safe scripts (`banner`, `http-title`, `http-headers`,
+  `http-server-header`, `http-robots.txt`, `http-favicon`, `ssl-cert`,
+  `ssl-enum-ciphers`, `ssh-hostkey`, `ssh2-enum-algos`, `ftp-anon`,
+  `smb-os-discovery`, `smb-protocols`, `dns-service-discovery`, `mysql-info`).
+  Wildcards (`*`), paths, and expressions are refused; the `exploit`, `brute`,
+  `dos`, `malware`, `fuzzer`, `external`, and `broadcast` denial stays as a
+  second layer. `--datadir`, `--script-args-file`, and `--script-updatedb` are
   denied because they load or write arbitrary NSE code.
 - Nuclei custom templates, workflows, code templates, and headless mode are
-  denied (`-t`, `-templates`, `-w`, `-workflow`, `-code`, `-headless`).
+  denied (`-t`, `-templates`, `-workflow`, `-code`, `-headless`).
   Whatweb custom plugins are denied.
 - `openssl` is limited to `s_client` and `x509`; `-engine` and `-provider`
   flags are denied because they load native code.
@@ -429,7 +520,16 @@ Windows user. The host key is pinned; `StrictHostKeyChecking=yes` and
 - Audit log: `/var/log/kestrel/audit.jsonl`, owned by `kestrel`, mode `0600`,
   rotated by logrotate. The directory is owned by `kestrel`, mode `0700`.
 - Each record includes timestamp, objective hash, argv, target checks, risk,
-  approval result, exit code, duration, and stdout SHA-256.
+  approval result, exit code, duration, and the stdout and stderr SHA-256 of
+  the delivered (post-truncation) text.
+- An `execute` request writes two distinguishable records: `execute_intent`
+  (the approved plan) **before** any step runs, then `execute` (the per-step
+  results) afterwards. `check` writes its single `check` record and `scope`
+  its single `scope` record, unchanged.
+- If the intent write raises `OSError`, the wrapper refuses to execute and
+  returns a JSON error: no audit, no run. If the result write fails after
+  execution, the response carries the results and an explicit error instead of
+  a traceback.
 - Full stdout/stderr are not written to the audit log. Phase 1 returns them in
   the tool response with caps. Phase 3 writes large outputs under
   `/var/log/kestrel/runs/<id>/` with mode `0600` and adds `scp` retrieval.
@@ -448,6 +548,8 @@ Windows user. The host key is pinned; `StrictHostKeyChecking=yes` and
 | Destructive flag | Refuse and name the flag. |
 | Dialog denied/unavailable | Do not execute; return "not approved". |
 | Step timeout | Kill the process group; return partial output with `timed_out: true`. |
+| Audit log unwritable | Refuse to execute; return a JSON error. Nothing runs without an intent record. |
+| Unexpected internal error | Return a JSON error object and a non-zero exit; never a traceback. |
 | Nonzero exit | Return the result; Kestrel reports the failure and does not claim success. |
 | Malformed response | Treat as failure; do not retry blindly. |
 
@@ -490,12 +592,23 @@ turn. A remote kill channel is phase 3.
 - Denies `bash`, `sh`, `python3`, `rm`, and shell metacharacters.
 - Denies destructive flags.
 - Classifies `nmap` as recon, `ffuf` as intrusive, and returns the highest tier.
-- Runs two steps in one request and stops after a failed step.
-- Kills a process group on timeout and marks `timed_out`.
-- Truncates output at the cap and marks `truncated`.
-- Writes an audit record with hashes, not raw stdout.
+- Runs two steps in one request and stops after a failed step or a spent total
+  deadline.
+- Kills a process group on timeout, marks `timed_out`, and proves the child is
+  dead.
+- Truncates output at the cap and marks `truncated`; the total byte cap holds
+  across both streams and steps, and the hashes match the delivered text.
+- Preserves non-UTF-8 child output as replacement characters, with no reader
+  thread traceback.
+- Writes an audit record with hashes, not raw stdout; the execute intent is
+  written before running, and an unwritable audit log blocks execution.
 - Scope mode returns the scope without executing anything.
-- Check mode returns risk and targets without executing anything.
+- Check mode returns risk and targets without executing anything, and is the
+  default when the request omits `mode`.
+- Refuses malformed JSON, a non-integer or wrong protocol version, a missing
+  objective, too many steps, and out-of-range timeouts, each as JSON.
+- Confines curl `@file` references and licenses credential pairs and decimal
+  numbers without licensing a destination.
 
 ### Kestrel tests (Windows)
 

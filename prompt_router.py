@@ -39,6 +39,12 @@ RULES = {
         "media_control. Never claim a song was found, queued, or played "
         "without a successful tool result."
     ),
+    "security": (
+        "Security lab: use kali_scope to read the allowed targets and "
+        "kali_task to run an approved sequence. Load the core_tools manual "
+        "first. Never target anything outside the returned scope; never use "
+        "a shell string."
+    ),
 }
 
 DOCUMENT_WRITE_VERBS = r"write|create|make|generate|draft|save|export|edit|modify|update|rewrite|produce"
@@ -80,6 +86,25 @@ INTENT_PATTERNS = {
         r"^(?!.*\b(?:pause|paused|skip|skipping|next|previous|prev|stop|"
         r"stopping|resume|resuming)\b.*\b(?:songs?|music|artists?|albums?|"
         r"tracks?)\b).*\b(?:songs?|music|artists?|albums?|tracks?)\b",
+    ),
+    # People ask for the work, not the binary. A bare `scan` counts unless the
+    # request names something Kestrel already has a local tool for: a virus
+    # scan, a PDF, a barcode or a printer must not light up the lab tools. The
+    # guard is one whole-utterance lookahead because "virus scan" puts the
+    # object before the verb, and each everyday word carries its own left
+    # boundary: without it "keywords" matches "words" and the guard fires on
+    # every request.
+    "security": (
+        r"\b(?:kali|nmap|masscan|nuclei|ffuf|gobuster|feroxbuster|nikto|"
+        r"sqlmap|metasploit|msfconsole|hydra|recon|pentest|"
+        r"penetration\s+test|vulnerability\s+scan|security\s+test)\b"
+        r"|\b(?:vulnerabilit(?:y|ies)\s+assessment|"
+        r"enumerate\s+(?:services|ports|hosts|shares))\b"
+        r"|^(?!.*\b(?:documents?|docs?|pdfs?|files?|folders?|drive|"
+        r"downloads|disk|receipts?|qr|codes?|barcodes?|photos?|images?|"
+        r"papers?|inbox|emails?|invoices?|printers?|routers?|tvs?|scanners?|"
+        r"keywords?|text|words?|virus|viruses|malware|spyware|adware|"
+        r"trojans?|full\s+system)\b).*\b(?:port\s+)?scan\b",
     ),
 }
 
@@ -186,6 +211,16 @@ def positive_tool_request(user_request: str) -> str:
 USE_VERBS = r"(?:use|using|used|call|calling|invoke|invoking|run|running|execute|executing|via)"
 
 
+def matching_intents(user_request: str) -> tuple[str, ...]:
+    """Intent rule groups whose keyword patterns match this request."""
+    positive = positive_tool_request(user_request)
+    return tuple(sorted(
+        group for group, patterns in INTENT_PATTERNS.items()
+        if any(re.search(pattern, positive, re.I | re.S)
+               for pattern in patterns)
+    ))
+
+
 def explicitly_requested_tool_names(user_request: str,
                                     available_names: Iterable[str]) -> tuple[str, ...]:
     """Tools the user asked to be used, so an ordinary verb like "notify" is not one."""
@@ -230,13 +265,7 @@ def build_dynamic_prompt(
         if group not in RULES:
             raise ValueError(f"Unknown fallback group {group!r}")
 
-    positive_request = positive_tool_request(user_request)
-    intents = {
-        group
-        for group, patterns in INTENT_PATTERNS.items()
-        if any(re.search(pattern, positive_request, re.I | re.S)
-               for pattern in patterns)
-    }
+    intents = set(matching_intents(user_request))
 
     # A classifier may select known IDs, never author system instructions.
     if not intents and classify_intents is not None:

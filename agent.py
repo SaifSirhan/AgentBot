@@ -30,6 +30,8 @@ import scheduler
 import memory
 import artifact_store
 import musicapp_bridge
+import kali_bridge
+import kali_bus
 import sprite_bus
 from tool_registry import (
     InputValidationError,
@@ -982,6 +984,11 @@ def _classify_unmatched_intents(user_request):
 
 def _route_prompt(user_request):
     tools = prompt_catalog.build_tools(frozenset(VALID_TOOLS))
+    if "security" not in prompt_router.matching_intents(user_request):
+        tools = [
+            tool for tool in tools
+            if tool.name not in prompt_catalog.SECURITY_TOOLS
+        ]
     routed = prompt_router.build_dynamic_prompt(
         user_request,
         tools,
@@ -4968,13 +4975,15 @@ VALID_TOOLS = {
     "inspect_docx", "edit_docx_safe",
     "skill_manage", "load_skill", "browse_web", "sprite_control",
     "musicapp_control",
+    "kali_task", "kali_scope",
 }
 
 
 # Progressive disclosure: the full tool manual lives in
 # skills/core_tools/SKILL.md. The prompt only lists names; the model must load
 # the skill for exact input formats before calling a tool.
-_PROMPT_TOOL_NAMES = ", ".join(sorted(VALID_TOOLS - {"chat", "done"}))
+_PROMPT_TOOL_NAMES = ", ".join(sorted(
+    VALID_TOOLS - {"chat", "done"} - prompt_catalog.SECURITY_TOOLS))
 TOOL_DESCRIPTIONS = (
     "AVAILABLE TOOLS: " + _PROMPT_TOOL_NAMES + ".\n"
     "IMPORTANT: This is just a list of names. You MUST call "
@@ -5583,6 +5592,203 @@ def musicapp_control(inp):
     return musicapp_bridge.describe(action, result)
 
 
+# Mirrors the Kali wrapper's caps; the wrapper enforces all three too.
+KALI_MAX_STEPS = 8
+KALI_MAX_STEP_TIMEOUT = 600
+KALI_MAX_TOTAL_TIMEOUT = 1800
+# T5-2: generous client-side input bounds so nothing unbounded crosses SSH.
+# The wrapper does not enforce these; the schema and kali_task share them.
+KALI_MAX_OBJECTIVE_CHARS = 4000
+KALI_MAX_ARGV_TOKEN_CHARS = 4000
+KALI_MAX_ARGV_ITEMS = 128
+
+
+def kali_scope(inp=""):
+    """Return the Kali lab's allowed targets and expiry."""
+    try:
+        data = kali_bridge.scope()
+    except kali_bridge.KaliUnavailable as exc:
+        return "ERROR: %s" % exc
+    except kali_bridge.KaliPolicyError as exc:
+        return "ERROR: Kali policy refused the task: %s" % exc
+    except kali_bridge.KaliError as exc:
+        return "ERROR: Kali scope failed: %s" % exc
+    networks = data.get("networks", [])
+    domains = data.get("domains", [])
+    # The bridge checks only that the scope is a dict, so its members are
+    # VM-influenceable too. A non-string member would raise out of the tool
+    # loop; a bare string would join character-wise and read as a real scope.
+    if not all(isinstance(item, list)
+               and all(isinstance(entry, str) for entry in item)
+               for item in (networks, domains)):
+        return "ERROR: Kali returned a malformed scope payload."
+    allow_public = data.get("allow_public", False)
+    expires = data.get("expires", "unknown")
+    if not isinstance(allow_public, bool) or not isinstance(expires, str):
+        # `[1]` is truthy and `{"a": 1}` renders as a dict repr: both would
+        # show a scope the wrapper never published.
+        return "ERROR: Kali returned a malformed scope payload."
+    networks = ", ".join(networks) or "none"
+    domains = ", ".join(domains) or "none"
+    public = "allowed" if allow_public else "denied"
+    return ("Kali scope: networks %s; domains %s; public %s; expires %s."
+            % (networks, domains, public, expires))
+
+
+# T5-1: kali_bridge validates only `ok is True` and dict-ness, so the shapes
+# inside `results` are VM-influenceable. A malformed payload is reported as an
+# error string, never raised into the tool loop (the same posture as
+# kali_bus.format_approval, which consumes the same data).
+_KALI_MALFORMED_RESULT = "ERROR: Kali returned a malformed result payload."
+
+
+def _kali_step_is_well_formed(item):
+    """True when every field the formatter touches has a renderable type.
+
+    Absent optional fields keep the brief's .get() defaults; a present field
+    of the wrong type is malformed, not silently coerced.
+    """
+    if not isinstance(item, dict):
+        return False
+    argv = item.get("argv", [])
+    if not isinstance(argv, list) or not all(
+            isinstance(arg, str) for arg in argv):
+        return False
+    for key in ("stdout", "stderr"):
+        value = item.get(key)
+        if value is not None and not isinstance(value, str):
+            return False
+    errors = item.get("read_errors")
+    if errors is not None and (
+            not isinstance(errors, list)
+            or not all(isinstance(err, str) for err in errors)):
+        return False
+    return True
+
+
+def _format_kali_result(result):
+    if not isinstance(result, dict):
+        return _KALI_MALFORMED_RESULT
+    results = result.get("results")
+    if results is None:
+        results = []
+    if not isinstance(results, list):
+        return _KALI_MALFORMED_RESULT
+    if not results:
+        return "Kali returned no results."
+    if not all(_kali_step_is_well_formed(item) for item in results):
+        return _KALI_MALFORMED_RESULT
+    failed = any(
+        item.get("timed_out") or item.get("exit_code") not in (0, None)
+        for item in results)
+    lines = ["Kali task %s (risk %s)." %
+             ("failed" if failed else "finished", result.get("risk", "unknown"))]
+    for index, item in enumerate(results, 1):
+        if item.get("timed_out"):
+            status = "timed out"
+        else:
+            status = "ok" if item.get("exit_code") == 0 else "exit %s" % (
+                item.get("exit_code"))
+        output = (item.get("stdout") or "").strip()
+        if not output:
+            output = (item.get("stderr") or "").strip()
+        if len(output) > 1500:
+            # T5-3: a cut must not read as ordinary complete output.
+            output = output[:1500] + " ... (%d more characters omitted)" % (
+                len(output) - 1500)
+        line = "Step %d [%s] %s" % (
+            index, status, " ".join(item.get("argv", [])))
+        if output:
+            line += ": " + output
+        # T5-3: the wrapper cut this stream at its byte cap; say so.
+        if item.get("truncated"):
+            line += " (output truncated by Kali)"
+        # A stream that could not be read is not the same as a silent command.
+        read_errors = item.get("read_errors") or []
+        if read_errors:
+            line += " (output could not be read: %s)" % (
+                "; ".join(read_errors)[:300])
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def kali_task(inp):
+    """Validate, approve, and run one Kali task."""
+    data = inp if isinstance(inp, dict) else {}
+    objective = data.get("objective")
+    if not isinstance(objective, str):
+        return "ERROR: kali_task objective must be a string."
+    if len(objective) > KALI_MAX_OBJECTIVE_CHARS:
+        return ("ERROR: kali_task objective must be at most %d characters."
+                % KALI_MAX_OBJECTIVE_CHARS)
+    objective = objective.strip()
+    raw_steps = data.get("steps")
+    if not objective:
+        return "ERROR: kali_task needs an objective."
+    if not isinstance(raw_steps, list) or not raw_steps:
+        return "ERROR: kali_task needs at least one step."
+    if len(raw_steps) > KALI_MAX_STEPS:
+        return ("ERROR: kali_task supports at most %d steps."
+                % KALI_MAX_STEPS)
+
+    steps = []
+    for raw in raw_steps:
+        if not isinstance(raw, dict):
+            return "ERROR: each Kali step must be an object."
+        argv = raw.get("argv")
+        if (not isinstance(argv, list) or not argv
+                or not all(isinstance(arg, str) and arg for arg in argv)):
+            return "ERROR: each Kali step needs a non-empty argv list."
+        if len(argv) > KALI_MAX_ARGV_ITEMS:
+            return ("ERROR: each Kali step argv supports at most %d items."
+                    % KALI_MAX_ARGV_ITEMS)
+        if any(len(arg) > KALI_MAX_ARGV_TOKEN_CHARS for arg in argv):
+            return ("ERROR: each Kali argv token must be at most %d "
+                    "characters." % KALI_MAX_ARGV_TOKEN_CHARS)
+        timeout = raw.get("timeout", 120)
+        if (not isinstance(timeout, int) or isinstance(timeout, bool)
+                or not 1 <= timeout <= KALI_MAX_STEP_TIMEOUT):
+            return ("ERROR: each Kali step timeout must be 1-%d seconds."
+                    % KALI_MAX_STEP_TIMEOUT)
+        steps.append({"argv": argv, "timeout": timeout})
+
+    total_timeout = data.get("total_timeout", 300)
+    if (not isinstance(total_timeout, int) or isinstance(total_timeout, bool)
+            or not 1 <= total_timeout <= KALI_MAX_TOTAL_TIMEOUT):
+        return ("ERROR: total_timeout must be 1-%d seconds."
+                % KALI_MAX_TOTAL_TIMEOUT)
+
+    try:
+        check = kali_bridge.check(objective, steps,
+                                  total_timeout=total_timeout)
+    except kali_bridge.KaliUnavailable as exc:
+        return "ERROR: %s" % exc
+    except kali_bridge.KaliPolicyError as exc:
+        return "ERROR: Kali policy refused the task: %s" % exc
+    except kali_bridge.KaliError as exc:
+        return "ERROR: Kali check failed: %s" % exc
+
+    plan = {
+        "objective": objective,
+        "risk": check.get("risk", "unknown"),
+        "targets": check.get("targets", []),
+        "steps": steps,
+    }
+    if not kali_bus.request_approval(plan):
+        return "Kali task was not approved; nothing ran."
+
+    try:
+        result = kali_bridge.task(objective, steps,
+                                  total_timeout=total_timeout)
+    except kali_bridge.KaliUnavailable as exc:
+        return "ERROR: %s" % exc
+    except kali_bridge.KaliPolicyError as exc:
+        return "ERROR: Kali policy refused the task: %s" % exc
+    except kali_bridge.KaliError as exc:
+        return "ERROR: Kali task failed: %s" % exc
+    return _format_kali_result(result)
+
+
 def _build_tool_registry():
     """Register the migrated core tools. Everything else stays legacy."""
     registry = ToolRegistry()
@@ -5841,6 +6047,61 @@ def _build_tool_registry():
             timeout=15,
             func=musicapp_control,
         ),
+        ToolSpec(
+            name="kali_scope",
+            description="Show the Kali lab's allowed targets and expiry.",
+            input_schema=_input_string(max_length=0),
+            effect_class="read_only",
+            timeout=20,
+            func=kali_scope,
+        ),
+        ToolSpec(
+            name="kali_task",
+            description=(
+                "Run an approved security task in the Kali lab. Input is an "
+                "object with objective and steps[] (up to %d steps, each "
+                "argv[], optional timeout %ds)." % (KALI_MAX_STEPS,
+                                                    KALI_MAX_STEP_TIMEOUT)),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string", "minLength": 1,
+                                  "maxLength": KALI_MAX_OBJECTIVE_CHARS},
+                    "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": KALI_MAX_STEPS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "argv": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": KALI_MAX_ARGV_ITEMS,
+                                    "items": {"type": "string",
+                                              "minLength": 1,
+                                              "maxLength":
+                                                  KALI_MAX_ARGV_TOKEN_CHARS},
+                                },
+                                "timeout": {"type": "integer",
+                                            "minimum": 1,
+                                            "maximum": KALI_MAX_STEP_TIMEOUT},
+                            },
+                            "required": ["argv"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "total_timeout": {"type": "integer",
+                                      "minimum": 1,
+                                      "maximum": KALI_MAX_TOTAL_TIMEOUT},
+                },
+                "required": ["objective", "steps"],
+                "additionalProperties": False,
+            },
+            effect_class="system_control",
+            timeout=1800,
+            func=kali_task,
+        ),
     )
     for spec in specs:
         registry.register(spec)
@@ -5858,7 +6119,7 @@ def _live_tool_func(func):
 
 # Tools whose input is a structured envelope rather than a "a|b" string.
 OBJECT_INPUT_TOOLS = frozenset({
-    "edit_docx_safe", "sprite_control", "musicapp_control",
+    "edit_docx_safe", "sprite_control", "musicapp_control", "kali_task",
 })
 
 
