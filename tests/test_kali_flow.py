@@ -139,6 +139,58 @@ class KaliFlowTests(unittest.TestCase):
         task.assert_not_called()
         self.assertIn("nothing ran", text)
 
+    def test_a_credential_plan_needs_two_yeses_through_the_real_bus(self):
+        """Tier 2 is gated the same way as tier 1, by the same real bus."""
+        answers = []
+
+        def listener(plan, timeout):
+            answers.append(dict(plan))
+            return True
+
+        kali_bus.register(listener)
+        steps = [{"argv": ["hydra", "-l", "admin", "-P",
+                           "/usr/share/wordlists/rockyou.txt",
+                           "192.168.56.10", "ssh"], "timeout": 60}]
+        check = dict(self.check, risk="credential",
+                     targets=["192.168.56.10"], steps=steps)
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=check),              mock.patch.object(agent.kali_bridge, "task",
+                               return_value=dict(self.result,
+                                                 risk="credential")) as task:
+            text = agent.kali_task({"objective": "ssh guess",
+                                    "steps": steps, "total_timeout": 120})
+
+        self.assertEqual(len(answers), 2)
+        self.assertEqual(answers[0]["risk"], "credential")
+        self.assertTrue(answers[1].get("second_confirmation"))
+        task.assert_called_once()
+        self.assertIn("credential", text)
+
+    def test_a_declared_risk_cannot_lower_the_gate(self):
+        # The model is allowed to describe its plan; it is not allowed to tier
+        # it. Whatever `risk` the request carries, the dialog count follows the
+        # wrapper's own `check` verdict.
+        answers = []
+
+        def listener(plan, timeout):
+            answers.append(dict(plan))
+            return True
+
+        kali_bus.register(listener)
+        steps = [{"argv": ["sqlmap", "-u", "http://app.lab.local/i.php?id=1",
+                           "--dump"], "timeout": 60}]
+        check = dict(self.check, risk="credential",
+                     targets=["app.lab.local"], steps=steps)
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=check),              mock.patch.object(agent.kali_bridge, "task",
+                               return_value=dict(self.result,
+                                                 risk="credential")):
+            agent.kali_task({"objective": "sqli", "risk": "recon",
+                             "steps": steps, "total_timeout": 120})
+
+        self.assertEqual(len(answers), 2)
+        self.assertEqual(answers[0]["risk"], "credential")
+
     def test_denial_never_executes(self):
         with mock.patch.object(agent.kali_bridge, "check",
                                return_value=self.check), \
