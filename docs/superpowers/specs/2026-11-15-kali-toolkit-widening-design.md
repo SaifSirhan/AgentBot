@@ -73,13 +73,26 @@ becomes reachable for the first time, and `exploitation` (3) stays unreachable
 because no permitted binary is assigned to it.
 
 ```
-CREDENTIAL = frozenset({"hydra", "medusa", "sqlmap"})
+CREDENTIAL = frozenset({"hydra", "sqlmap"})
 ```
+
+`medusa` is named in §6 but is **not shipped in this arc**: its option letters cannot
+be declared from evidence (`-h` is a host list in medusa, where it is help in hydra),
+and a wrong letter in a security table is worse than one fewer tool. It returns with a
+table built from the installed version's own report, per the licence below.
 
 `kali_bus.RISK_TIERS` already mirrors 0/1/2/3 with `SECOND_CONFIRMATION_TIER = 1`,
 so the double approval covers credential work without change. The existing
 tier-guard and drift tests are extended to assert the mirror and that every tier
 named in a prompt is a tier the wrapper can actually return.
+
+**Report-flag licence (added during Task 2, not in the original design).** A strict
+binary may be run with nothing in argv but `-h`, `--help`, `-V` or `--version`. That
+is how a permit table gets built from the version actually installed rather than from
+memory, it runs no attack, and it reveals nothing about the lab. The licence applies
+only when the whole argv is a report, and only to strict binaries: `nmap -h` is still
+refused for lacking a target, so staging a binary into strict mode cannot silently
+widen what any other binary may do.
 
 ## 6. Binaries added
 
@@ -101,17 +114,25 @@ named in a prompt is a tier the wrapper can actually return.
 
 ### 6.1 hydra
 
-`-l`, `-p` are `credential` class values; `-L`, `-P`, `-m`, `-x` are `READ_FLAGS`
-confined to `OUTPUT_ROOT` + `/usr/share/wordlists` + `/usr/share/seclists`.
-Refused: `-o`/`-O` outside `OUTPUT_ROOT`, `-b`/`-c`/`-R` session-file read/write
-(state smuggling and resume past approval), `-e` except the literal `ns`/`n`/`s`,
-`-K`, `-M` (target list), `--restore`, and any service module whose syntax
-embeds a URL (`http-get-form`/`http-post-form`/`https-*`): the form spec carries
-a destination the wrapper cannot see as an argv target, so those modules are
-permitted only when the module's host field is given as a separate in-scope
-token — which in practice means **operator-approved direct-IP forms only**, and
-the simplest honest rule is to permit `ssh`, `ftp`, `http-get`, `https-get` and
-refuse the `-form` variants.
+`-l`, `-p` are `credential` class values; `-L`, `-P`, `-C` are `READ_FLAGS`
+confined to `OUTPUT_ROOT` + `/usr/share/wordlists` + `/usr/share/seclists`;
+`-o` is a `PATH_FLAGS` write confined to `OUTPUT_ROOT`; `-e` is a `word`, so
+`ns` is a guess spec and `/etc/shadow` is not. Refused: `-M` (target list), and
+`-b`/`-R`/`-S`/`--restore`/`-k` stay undeclared, because a saved session that can
+be resumed is a run continuing past the approval that started it, and `-k`'s
+output semantics are not established here.
+
+**The `*-form` service modules are refused, and the reason is `&`, not smuggling.**
+The original draft of this section claimed the form spec "carries a destination the
+wrapper cannot see". That is wrong: hydra's form syntax is `/path:payload:failure`,
+and the destination is the positional target, which the scope does check. The real
+blocker is that a multi-field payload needs `&` between fields, and `SHELL_CHARS`
+refuses `&` in every argv token — a rule with no shell behind it (the wrapper uses
+`Popen` with a list) but which has survived three review rounds as defence against
+values a child tool re-parses. Relaxing it for one declared value class is a
+decision in its own right, so the family stays unreachable and the refusal names
+the module. Service modules that take no inline spec (`ssh`, `ftp`, `http-get`,
+`mysql`, and the rest of `SUBCOMMAND_WORDS["hydra"]`) are permitted.
 
 ### 6.2 sqlmap
 
