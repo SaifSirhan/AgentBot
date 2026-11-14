@@ -35,7 +35,8 @@ KILL_WAIT_SECONDS = 5
 READER_JOIN_SECONDS = 2
 
 RECON = frozenset({"nmap", "whatweb", "dig", "host", "whois", "curl",
-                   "openssl", "searchsploit"})
+                   "openssl", "searchsploit", "ping", "traceroute",
+                   "arp-scan", "httpx"})
 INTRUSIVE = frozenset({"ffuf", "gobuster", "feroxbuster", "nuclei",
                        "nikto", "masscan", "nc"})
 LOCAL_SAFE = frozenset({"searchsploit", "openssl"})
@@ -59,6 +60,15 @@ DESTRUCTIVE_FLAGS = {
     "nc": ("-e", "--exec", "-c"),
 }
 DENIED_FLAGS = {
+    # Flood and spoof primitives: ping -f/-l change the rate, -s changes the
+    # source, and traceroute -g asks someone else's router to route for us.
+    # arp-scan --localnet asks the interface which segment to sweep, so the
+    # scope file never sees the answer.
+    "ping": ("-f", "-l", "-L", "-s", "--file"),
+    "traceroute": ("-g", "-s", "-F", "--address"),
+    "arp-scan": ("-l", "--localnet", "-b", "--BRIDGE", "-O"),
+    "httpx": ("-proxy", "--proxy", "-listener", "--listener", "-resx",
+              "--version-path"),
     # A proxy or a TOR circuit is a relay: the destination the scope checked is
     # not the destination that gets dialed. And a search engine as a target
     # source means Google chose the targets, not the operator.
@@ -126,6 +136,7 @@ TARGET_LIST_FLAGS = {
     "curl": ("-K", "--config"),
     "hydra": ("-M",),
     "sqlmap": ("-m",),
+    "httpx": ("-l", "--list"),
 }
 OUTPUT_ROOT = Path("/tmp/kestrel")
 # R2: the only directories a known read flag may open besides OUTPUT_ROOT.
@@ -222,6 +233,16 @@ VALUE_FLAGS = {
     # written as `1-6:$/#`, and `$` is refused in every argv token.
     "hydra": ("-l", "-p", "-e", "-s", "-m", "-t", "-c", "-w", "-D",
               "-L", "-P", "-C", "-o"),
+    # ping's -L is preload (a flood primitive), and traceroute's -s is a spoofed
+    # source: neither is declared, both are refused by name below.
+    "ping": ("-c", "-i", "-t", "-W", "-w"),
+    "traceroute": ("-m", "-w", "-q", "-p", "-t", "-P", "-z"),
+    "arp-scan": ("-t", "-r"),
+    # A destination flag still has to be declared as a value flag: the permit
+    # list is built from VALUE_FLAGS/BOOLEAN_FLAGS, and DESTINATION_FLAGS only
+    # says how the value is validated.
+    "httpx": ("-u", "--url", "-o", "-timeout", "-threads", "-rps",
+              "-retries"),
     "sqlmap": ("-u", "--url", "--data", "--data-ascii", "--data-binary",
                "--data-urlencode", "--method", "--cookie", "--user-agent",
                "--auth", "--auth-type", "--headers", "-p", "--dbms",
@@ -267,6 +288,7 @@ PATH_FLAGS = {
     "nikto": ("-o", "-output", "--output"),
     "masscan": ("-oX", "-oJ", "-oG", "-oL"),
     "hydra": ("-o",),
+    "httpx": ("-o",),
     "sqlmap": ("--output-dir",),
 }
 # R10: these flags carry the destination itself. Their values must always
@@ -280,6 +302,7 @@ DESTINATION_FLAGS = {
     "dig": ("-q",),
     "masscan": ("--range",),
     "sqlmap": ("-u", "--url"),
+    "httpx": ("-u", "--url"),
 }
 # R4: these values are script names / script arguments, so they are not
 # parsed as targets; classify checks the names and target_tokens checks the
@@ -397,6 +420,14 @@ NON_DESTINATION_VALUES = {
     },
     "nc": {"-p": "ports", "-w": "number", "-q": "number", "-i": "number",
            "-G": "number", "-T": "word", "-X": "word", "-P": "text"},
+    "ping": {"-c": "number", "-i": "number", "-t": "number",
+             "-W": "number", "-w": "number"},
+    "traceroute": {"-m": "number", "-w": "number", "-q": "number",
+                   "-p": "ports", "-t": "number", "-P": "word",
+                   "-z": "number"},
+    "arp-scan": {"-t": "number", "-r": "number"},
+    "httpx": {"-timeout": "number", "-threads": "number",
+              "-rps": "number", "-retries": "number"},
     # hydra: `-e` is the empty/salt guess spec (ns, n or s), so a word and never
     # a path; `-s` is a port; the rest are counts. Credentials use the existing
     # class, which already refuses `/` and `@`.
@@ -495,7 +526,8 @@ NO_VALUE_FLAGS = {
 # session, which would let a run continue past the approval that started it, and
 # -k is declared nowhere because its output semantics are not established. Every
 # entry below is a flag whose meaning and value class are known.
-STRICT_BINARIES = frozenset({"hydra", "sqlmap", "masscan"})
+STRICT_BINARIES = frozenset({"hydra", "sqlmap", "masscan", "ping",
+                              "traceroute", "arp-scan", "httpx"})
 BOOLEAN_FLAGS = {
     "hydra": ("-q", "-f", "-F", "-u", "-I", "-v", "-4", "-6", "-h", "-V"),
     # `--level`/`--risk`/`--threads` are values, not booleans, and `-v` takes a
@@ -514,6 +546,12 @@ BOOLEAN_FLAGS = {
     "masscan": ("-h", "--help", "-V", "--version", "-v", "-d", "--debug",
                 "--stats", "--echo", "--verify", "--only-open", "--banners",
                 "-6", "--exclude-udp"),
+    "ping": ("-4", "-6", "-n", "-q", "-N"),
+    "traceroute": ("-4", "-6", "-n", "-A", "-N"),
+    "arp-scan": ("-q", "-v", "-x", "-h", "--help", "--version"),
+    # httpx declares only what changes the output, not what gets dialed.
+    "httpx": ("-json", "-silent", "-no-color", "-title", "-status-code",
+              "-tech-detect", "-web-server", "-h", "--help", "--version"),
 }
 # `-h`/`--version` are the only flags that may stand in place of a target: an
 # argv that is nothing but a report request asks the installed version what it

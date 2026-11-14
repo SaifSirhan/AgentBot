@@ -2076,3 +2076,109 @@ class MasscanStrictMigrationTests(TempOutputRoot):
         self.denied(["masscan", "-p80", "8.8.8.8"])
         self.denied(["masscan", "-p80", "--range", "8.8.8.1-8.8.8.9"])
         self.denied(["masscan", "-p80", "192.168.56.0/16"])
+
+
+class ReconAdditionsTests(TempOutputRoot):
+    """ping, traceroute, arp-scan and httpx, declared strictly from birth.
+
+    The tables are deliberately smaller than each tool's real option set. Under
+    a permit list an omission is a refusal the operator sees and can ask to have
+    opened, whereas a wrong declaration -- a boolean that is really a value, a
+    path that is really a target list -- is the hole. The report licence from
+    Task 2 is what closes the gap against the installed version's own help.
+    """
+
+    TARGETS = {
+        "ping": "192.168.56.10",
+        "traceroute": "192.168.56.10",
+        "arp-scan": "192.168.56.0/24",
+        "httpx": "http://app.lab.local/",
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.scope = kr.load_scope(write_scope(self.temp.name))
+
+    def validate(self, argv):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], self.scope)
+
+    def denied(self, argv):
+        with self.assertRaises(kr.PolicyError) as caught:
+            self.validate(argv)
+        return str(caught.exception)
+
+    def test_each_is_permitted_at_recon_tier(self):
+        for binary, target in self.TARGETS.items():
+            with self.subTest(binary=binary):
+                argv = [binary] if binary == "arp-scan" else [binary, target]
+                if binary == "arp-scan":
+                    argv.append(target)
+                self.assertEqual(kr.classify(argv), "recon")
+
+    def test_each_is_strict_from_birth(self):
+        for binary in self.TARGETS:
+            with self.subTest(binary=binary):
+                self.assertIn(binary, kr.STRICT_BINARIES)
+                argv = [binary, "--flag-nobody-declared",
+                        self.TARGETS[binary]]
+                reason = self.denied(argv)
+                self.assertIn("--flag-nobody-declared", reason)
+                self.assertIn(binary, reason)
+
+    def test_useful_option_sets_pass(self):
+        for argv in (
+            ["ping", "-c", "4", "192.168.56.10"],
+            ["ping", "-4", "-n", "-i", "0.5", "192.168.56.10"],
+            ["traceroute", "-m", "16", "-w", "2", "-n", "192.168.56.10"],
+            ["traceroute", "-P", "tcp", "-p", "22", "192.168.56.10"],
+            ["arp-scan", "192.168.56.0/24"],
+            ["arp-scan", "-t", "3", "-r", "1", "192.168.56.10"],
+            ["httpx", "-u", "http://app.lab.local/", "-title", "-json"],
+        ):
+            with self.subTest(argv=" ".join(argv)):
+                self.validate(argv)
+
+    def test_evasion_and_flood_primitives_are_refused_by_name(self):
+        for argv, flag in (
+            (["ping", "-f", "192.168.56.10"], "-f"),
+            (["ping", "-l", "65500", "192.168.56.10"], "-l"),
+            (["ping", "-s", "192.168.56.1", "192.168.56.10"], "-s"),
+            (["traceroute", "-g", "192.168.56.1", "192.168.56.10"], "-g"),
+            (["traceroute", "-s", "10.0.0.1", "192.168.56.10"], "-s"),
+            (["arp-scan", "--localnet"], "--localnet"),
+            (["httpx", "-l", "hosts.txt"], "-l"),
+            (["httpx", "-proxy", "http://192.168.56.1:8080",
+              "-u", "http://app.lab.local/"], "-proxy"),
+            (["httpx", "-listener", "-u", "http://app.lab.local/"],
+             "-listener"),
+        ):
+            with self.subTest(argv=" ".join(argv)):
+                reason = self.denied(argv)
+                self.assertIn(flag, reason)
+                # A named escape is refused as a known escape, not merely as a
+                # flag nobody declared: that is the difference between the deny
+                # tables still carrying weight and them being dead config.
+                self.assertNotIn("not permitted", reason)
+
+    def test_the_segment_wide_probe_needs_an_in_scope_network(self):
+        # `--localnet` asks the interface which segment to sweep, so the scope
+        # file never sees the answer. An explicit network is refused instead.
+        self.denied(["arp-scan", "192.168.1.0/24"])
+        self.denied(["arp-scan", "8.8.8.8"])
+
+    def test_every_new_binary_still_needs_an_in_scope_target(self):
+        # The whole point of adding these is that they cannot be pointed
+        # anywhere but the lab, including through a value flag.
+        for argv in (["ping", "8.8.8.8"], ["traceroute", "example.com"],
+                     ["arp-scan", "8.8.8.8"],
+                     ["httpx", "-u", "http://example.com/"]):
+            with self.subTest(argv=" ".join(argv)):
+                self.denied(argv)
+
+    def test_httpx_output_stays_confined(self):
+        self.validate(["httpx", "-u", "http://app.lab.local/",
+                       "-o", "found.txt"])
+        self.denied(["httpx", "-u", "http://app.lab.local/",
+                     "-o", "/etc/apt/sources.list"])
+        self.denied(["httpx", "-u", "http://app.lab.local/",
+                     "-timeout", "/etc/shadow"])
