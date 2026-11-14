@@ -5632,7 +5632,45 @@ def kali_scope(inp=""):
     domains = ", ".join(domains) or "none"
     public = "allowed" if allow_public else "denied"
     return ("Kali scope: networks %s; domains %s; public %s; expires %s."
-            % (networks, domains, public, expires))
+            % (networks, domains, public, expires)
+            + _kali_inventory_summary())
+
+
+# The inventory is rendered for a model's context, and it is published by the
+# VM, so it gets the same posture the scope payload already has: shape-checked,
+# name-checked and bounded. A name that is not an identifier is dropped rather
+# than displayed, because displayed text from the target side is an input
+# channel, not a report.
+_KALI_INVENTORY_TIERS = ("recon", "intrusive", "credential")
+_KALI_INVENTORY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+_KALI_INVENTORY_MAX_NAMES = 25
+
+
+def _kali_inventory_summary():
+    """One bounded sentence on what this Kali host can actually run."""
+    try:
+        data = kali_bridge.inventory()
+    except kali_bridge.KaliError as exc:
+        reason = " ".join(str(exc).split())
+        return " Inventory unavailable: %s" % reason[:200]
+    tiers = {}
+    for name in _KALI_INVENTORY_TIERS:
+        values = data.get(name)
+        if not isinstance(values, list) or not all(
+                isinstance(item, str) for item in values):
+            return " Inventory unavailable: malformed payload."
+        tiers[name] = sorted(item for item in values
+                             if _KALI_INVENTORY_NAME_RE.match(item))
+    parts = []
+    for name in _KALI_INVENTORY_TIERS:
+        binaries = tiers[name]
+        shown = " ".join(binaries[:_KALI_INVENTORY_MAX_NAMES])
+        if len(binaries) > _KALI_INVENTORY_MAX_NAMES:
+            shown += " +" + str(len(binaries) - _KALI_INVENTORY_MAX_NAMES)
+        parts.append("%s %s" % (name, shown or "none"))
+    egress = "egress enforced" if data.get("egress_enforced") is True         else "egress not enforced"
+    return " Installed here: %s; %s." % ("; ".join(parts), egress)
+
 
 
 # T5-1: kali_bridge validates only `ok is True` and dict-ness, so the shapes

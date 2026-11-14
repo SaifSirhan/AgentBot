@@ -173,6 +173,21 @@ def scope(timeout=15, config=None, path=None, runner=None):
     return result
 
 
+def inventory(timeout=15, config=None, path=None, runner=None):
+    """Ask the wrapper which permitted binaries actually exist here.
+
+    Read-only and target-free: it never runs a scanner, and it is the only way
+    Kestrel can tell "not installed" from "refused by policy" instead of
+    inventing one of them.
+    """
+    config = config or load_config(path)
+    payload = _run({"version": 1, "mode": "inventory"}, config, timeout, runner)
+    result = payload.get("inventory")
+    if not isinstance(result, dict):
+        raise KaliProtocolError("Kali returned no inventory object")
+    return result
+
+
 def check(objective, steps, total_timeout=300, config=None, path=None,
           runner=None):
     config = config or load_config(path)
