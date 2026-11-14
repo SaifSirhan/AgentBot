@@ -495,7 +495,7 @@ NO_VALUE_FLAGS = {
 # session, which would let a run continue past the approval that started it, and
 # -k is declared nowhere because its output semantics are not established. Every
 # entry below is a flag whose meaning and value class are known.
-STRICT_BINARIES = frozenset({"hydra", "sqlmap"})
+STRICT_BINARIES = frozenset({"hydra", "sqlmap", "masscan"})
 BOOLEAN_FLAGS = {
     "hydra": ("-q", "-f", "-F", "-u", "-I", "-v", "-4", "-6", "-h", "-V"),
     # `--level`/`--risk`/`--threads` are values, not booleans, and `-v` takes a
@@ -507,6 +507,13 @@ BOOLEAN_FLAGS = {
                "--skip-waf", "--predict-output", "--fresh-queries",
                "--flush-session", "--no-cast", "--crawl-log", "--version",
                "--help"),
+    # The pilot migration. These are the boolean flags masscan documents as
+    # output style, local reporting or an active banner grab -- no write, no
+    # exec, no proxy, no target source. `--banners` belongs at intrusive
+    # because it talks to the target, which the tier already says.
+    "masscan": ("-h", "--help", "-V", "--version", "-v", "-d", "--debug",
+                "--stats", "--echo", "--verify", "--only-open", "--banners",
+                "-6", "--exclude-udp"),
 }
 # `-h`/`--version` are the only flags that may stand in place of a target: an
 # argv that is nothing but a report request asks the installed version what it

@@ -2004,3 +2004,75 @@ class StrictPermitTests(TempOutputRoot):
         self.assertEqual(risk, "recon")
         self.assertEqual(kr.classify(["curl", "--whatever",
                                       "http://app.lab.local/"]), "recon")
+
+
+class MasscanStrictMigrationTests(TempOutputRoot):
+    """The pilot migration: a binary that already works, on the permit list.
+
+    This is the change that has to be provably inert. masscan is used in the
+    live lab today, so a flag missing from its declaration would be a
+    regression the operator meets mid-scan rather than a test failure here --
+    which is why the flags asserted below are the ones the README and the
+    existing suite actually use.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.scope = kr.load_scope(write_scope(self.temp.name))
+
+    def validate(self, argv):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], self.scope)
+
+    def denied(self, argv):
+        with self.assertRaises(kr.PolicyError) as caught:
+            self.validate(argv)
+        return str(caught.exception)
+
+    def test_masscan_is_declared_strict(self):
+        self.assertIn("masscan", kr.STRICT_BINARIES)
+
+    def test_the_flags_the_live_lab_uses_still_pass(self):
+        for argv in (
+            ["masscan", "-p80", "--rate", "100", "192.168.56.10"],
+            ["masscan", "-p", "1-1024", "192.168.56.0/24"],
+            ["masscan", "-pT:443", "-oX", "scan.xml", "192.168.56.10"],
+            ["masscan", "-p22", "--wait", "2", "--retries", "1",
+             "192.168.56.10"],
+            ["masscan", "-p80", "--exclude", "192.168.56.1", "192.168.56.0/24"],
+            ["masscan", "-p80", "--adapter-ip", "192.168.56.5",
+             "192.168.56.10"],
+            ["masscan", "-p80", "--banners", "--stats", "192.168.56.10"],
+        ):
+            with self.subTest(argv=" ".join(argv)):
+                self.assertEqual(kr.classify(argv), "intrusive")
+                self.validate(argv)
+
+    def test_the_loopback_form_the_readme_documents_still_passes(self):
+        # Model B: the VM is reached through a port forward, so the target the
+        # operator is told to scan is the VM's own loopback -- which needs
+        # 127.0.0.0/8 in scope, exactly as README section 4 says.
+        scope = kr.load_scope(write_scope(self.temp.name,
+                                          networks=["127.0.0.0/8"]))
+        kr.validate_steps([{"argv": ["masscan", "-p80", "--rate", "100",
+                                     "127.0.0.1"], "timeout": 5}], scope)
+
+    def test_an_undeclared_masscan_flag_is_refused_by_name(self):
+        reason = self.denied(["masscan", "-p80", "--new-release-flag",
+                              "192.168.56.10"])
+        self.assertIn("--new-release-flag", reason)
+        self.assertIn("masscan", reason)
+
+    def test_the_resume_and_target_list_refusals_keep_their_own_messages(self):
+        # These were known escapes, so the sharper refusal must survive the
+        # permit check running over the same argv.
+        for flag in ("--resume", "--excludefile", "-iL"):
+            with self.subTest(flag=flag):
+                argv = ["masscan", "-p80", flag, "x", "192.168.56.10"]
+                reason = self.denied(argv)
+                self.assertIn(flag, reason)
+                self.assertNotIn("not permitted", reason)
+
+    def test_targets_are_still_the_thing_being_checked(self):
+        self.denied(["masscan", "-p80", "8.8.8.8"])
+        self.denied(["masscan", "-p80", "--range", "8.8.8.1-8.8.8.9"])
+        self.denied(["masscan", "-p80", "192.168.56.0/16"])
