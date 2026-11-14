@@ -1775,3 +1775,92 @@ class CliExecuteTests(TempOutputRoot):
         self.assertFalse(marker.exists())
         # The intent was recorded; the result record could not be.
         self.assertEqual(self.events(), ["execute_intent"])
+
+
+class InventoryModeTests(TempOutputRoot):
+    """The wrapper can say what it is able to run, without running anything.
+
+    Without this, Kestrel cannot tell "hydra is refused by policy" from "hydra is
+    not installed", so it invents either a scan or a refusal. Presence is read
+    from SAFE_PATH only, so a request cannot describe its own PATH, and no child
+    is ever spawned on this path.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.scope = write_scope(self.temp.name)
+        self.audit = self.root / "audit.jsonl"
+        self.bindir = self.root / "bin"
+        self.bindir.mkdir()
+
+    def install(self, *names):
+        for name in names:
+            path = self.bindir / name
+            path.write_text("#!/bin/sh\n", encoding="utf-8")
+            path.chmod(0o755)
+
+    def cli(self, **overrides):
+        payload = {"version": 1, "mode": "inventory"}
+        payload.update(overrides)
+        with mock.patch.object(kr, "SAFE_PATH",
+                               str(self.bindir) + ":/nonexistent-dir"), \
+                mock.patch.object(kr, "EGRESS_RULE",
+                                  str(self.root / "egress.conf")):
+            return run_cli(self.scope, self.audit, payload)
+
+    def inventory(self, **overrides):
+        completed = self.cli(**overrides)
+        self.assertEqual(completed.stderr, "")
+        self.assertEqual(completed.returncode, 0)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"], payload)
+        return payload["inventory"]
+
+    def test_reports_present_binaries_under_their_own_tier(self):
+        self.install("nmap", "masscan")
+        inventory = self.inventory()
+        self.assertIn("nmap", inventory["recon"])
+        self.assertIn("masscan", inventory["intrusive"])
+        self.assertNotIn("whatweb", inventory["recon"])
+
+    def test_local_safe_and_denied_names_are_reported_as_presence(self):
+        self.install("searchsploit", "bash")
+        inventory = self.inventory()
+        self.assertIn("searchsploit", inventory["local_safe"])
+        self.assertIn("bash", inventory["denied_present"])
+        self.assertNotIn("python3", inventory["denied_present"])
+
+    def test_needs_no_objective_no_steps_and_no_target(self):
+        self.assertTrue(self.inventory()["egress_enforced"] in (True, False))
+
+    def test_never_spawns_a_child(self):
+        self.install("nmap")
+        with mock.patch.object(kr.subprocess, "Popen",
+                               side_effect=AssertionError("spawned")), \
+                mock.patch.object(kr, "run_steps",
+                                  side_effect=AssertionError("ran steps")):
+            self.assertIn("nmap", self.inventory()["recon"])
+
+    def test_egress_flag_tracks_the_rule_file(self):
+        self.assertFalse(self.inventory()["egress_enforced"])
+        (self.root / "egress.conf").write_text("table inet kestrel\n",
+                                               encoding="utf-8")
+        self.assertTrue(self.inventory()["egress_enforced"])
+
+    def test_writes_only_an_inventory_event(self):
+        self.inventory()
+        events = [json.loads(line)["event"]
+                  for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(events, ["inventory"])
+
+    def test_an_expired_scope_still_refuses_inventory(self):
+        # 2, not 3: an expired scope is a policy denial, the same status every
+        # other mode gets for it. Inventory is not a side-effect-free hole in the
+        # fail-closed rule, because presence information is still information.
+        self.scope = write_scope(self.temp.name,
+                                 expires="2000-01-01T00:00:00Z")
+        completed = self.cli()
+        self.assertEqual(completed.returncode, 2)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["denied"])
+        self.assertFalse(self.audit.exists())

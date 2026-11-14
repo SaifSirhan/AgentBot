@@ -292,6 +292,12 @@ address, so use its loopback, which needs `127.0.0.0/8` in `networks` from
 step 4 first:
 
 - `kali_scope` returns the scope.
+- `printf '{"version":1,"mode":"inventory"}' | ssh -p 2222 kestrel@127.0.0.1`
+  answers with the permitted binaries that exist on this host, the refused ones
+  that exist, and whether the egress rule is installed. It needs no objective and
+  no steps, and it never runs a child — presence is read from the wrapper's own
+  fixed `PATH`. This is what separates "hydra is not installed" from "hydra is
+  refused by policy", which Kestrel cannot otherwise tell.
 - `kali_task` with `nmap -sV 192.168.56.20` shows the approval dialog.
 - `kali_task` with `nmap -sV 127.0.0.1` is the Model B equivalent, and it proves
   the target resolves inside the VM: the answer is the Kali box's own open

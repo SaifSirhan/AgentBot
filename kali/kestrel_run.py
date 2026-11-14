@@ -1446,6 +1446,38 @@ def main(scope_path=None, audit_path=None):
             return 1             # stdout itself is gone (e.g. a closed pipe)
 
 
+EGRESS_RULE = "/etc/kestrel/egress.conf"
+
+
+def _binary_present(name):
+    """Does this permitted name actually exist on this host?
+
+    SAFE_PATH is a policy constant, never the inherited PATH, so a request cannot
+    describe a search path for itself. No child is spawned to find out: asking
+    `command -v` would run something.
+    """
+    for directory in SAFE_PATH.split(":"):
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return True
+    return False
+
+
+def build_inventory():
+    """Report what the wrapper can run here, so Kestrel need not guess."""
+    inventory = {tier: sorted(name for name in binaries
+                              if _binary_present(name))
+                 for tier, binaries in (("recon", RECON),
+                                        ("intrusive", INTRUSIVE),
+                                        ("local_safe", LOCAL_SAFE))}
+    # The refused names are presence, not permission: they tell the operator what
+    # the policy is protecting against on this host.
+    inventory["denied_present"] = sorted(name for name in DENIED_BINARIES
+                                         if _binary_present(name))
+    inventory["egress_enforced"] = os.path.isfile(EGRESS_RULE)
+    return inventory
+
+
 def _main(scope_path, audit_path):
     scope_path = scope_path or DEFAULT_SCOPE
     audit_path = audit_path or DEFAULT_AUDIT
@@ -1459,8 +1491,15 @@ def _main(scope_path, audit_path):
 
     # I7: a request that does not say "execute" must never run anything.
     mode = request.get("mode", "check")
-    if mode not in ("scope", "check", "execute"):
+    if mode not in ("scope", "check", "execute", "inventory"):
         return _denied("unknown mode %r" % mode, 3)
+    if mode == "inventory":
+        # Read-only and target-free, so it takes no steps and no objective: this
+        # is the wrapper describing itself, never a request to do something.
+        refused = _audit_or_refuse(audit_path, {"event": "inventory"})
+        if refused is not None:
+            return refused
+        return _ok(inventory=build_inventory())
     if mode == "scope":
         refused = _audit_or_refuse(audit_path, {"event": "scope",
                                                "scope": scope.as_dict()})
