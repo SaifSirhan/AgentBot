@@ -2182,3 +2182,114 @@ class ReconAdditionsTests(TempOutputRoot):
                      "-o", "/etc/apt/sources.list"])
         self.denied(["httpx", "-u", "http://app.lab.local/",
                      "-timeout", "/etc/shadow"])
+
+
+class IntrusiveAdditionsTests(TempOutputRoot):
+    """dirsearch, wfuzz, wpscan and sslyze at intrusive tier, declared strictly.
+
+    `dirb` is deliberately absent from this arc: its wordlist is a second
+    positional, and a positional path has no confined representation in the
+    model -- the only mechanism for a non-target positional (FREE_POSITIONALS)
+    skips the checks entirely, so declaring dirb would either refuse every real
+    command or let it read any path as a dictionary. gobuster and feroxbuster
+    already do the same job with `-w` confined to the packaged wordlists.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.scope = kr.load_scope(write_scope(self.temp.name))
+        self.wordlist = "/usr/share/wordlists/dirb/common.txt"
+
+    def validate(self, argv):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], self.scope)
+
+    def denied(self, argv):
+        with self.assertRaises(kr.PolicyError) as caught:
+            self.validate(argv)
+        return str(caught.exception)
+
+    def test_each_is_permitted_at_intrusive_tier(self):
+        for argv in (
+            ["dirsearch", "-u", "http://app.lab.local/", "-e", "php,html"],
+            ["wfuzz", "-c", "-u", "http://app.lab.local/FUZZ",
+             "-w", self.wordlist],
+            ["wpscan", "--url", "http://app.lab.local/", "--random-useragent"],
+            ["sslyze", "--regular", "app.lab.local:443"],
+        ):
+            with self.subTest(argv=" ".join(argv)):
+                self.assertEqual(kr.classify(argv), "intrusive")
+                self.validate(argv)
+
+    def test_each_is_strict_from_birth(self):
+        for binary in ("dirsearch", "wfuzz", "wpscan", "sslyze"):
+            with self.subTest(binary=binary):
+                self.assertIn(binary, kr.STRICT_BINARIES)
+                reason = self.denied([binary, "--flag-nobody-declared",
+                                      "http://app.lab.local/"])
+                self.assertIn("--flag-nobody-declared", reason)
+                self.assertIn(binary, reason)
+
+    def test_a_wordlist_scanner_is_refused_because_paths_hide_in_its_value(self):
+        # `wfuzz -z file,/etc/shadow` reads a path through a value the walker
+        # cannot separate from the scanner spec. `-w`, confined, does the job.
+        reason = self.denied(["wfuzz", "-u", "http://app.lab.local/FUZZ",
+                              "-z", "file,/etc/shadow"])
+        # Pinned to the deny-table message on purpose. Refusing `-z` merely
+        # because its value does not parse as a target would be enough to block
+        # this one input, and would let any other spec-shaped value through.
+        self.assertIn("-z is not allowed", reason)
+
+    def test_target_lists_and_relays_are_refused(self):
+        for argv, flag in (
+            (["dirsearch", "-l", "hosts.txt"], "-l"),
+            (["wfuzz", "--pickle", "state.pkl"], "--pickle"),
+            (["wfuzz", "-p", "http://192.168.56.1:8080",
+              "-u", "http://app.lab.local/FUZZ"], "-p"),
+            (["wpscan", "--url", "http://app.lab.local/",
+              "--proxy", "http://192.168.56.1:8080"], "--proxy"),
+            (["sslyze", "--targets_in", "list.txt", "app.lab.local:443"],
+             "--targets_in"),
+        ):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, self.denied(argv))
+
+    def test_output_paths_stay_confined(self):
+        self.validate(["wfuzz", "-u", "http://app.lab.local/FUZZ",
+                       "-w", self.wordlist, "--output-file", "found.txt"])
+        for argv in (
+            ["wfuzz", "-u", "http://app.lab.local/FUZZ", "-w", self.wordlist,
+             "--output-file", "/etc/cron.d/x"],
+            ["wpscan", "--url", "http://app.lab.local/",
+             "--output", "/etc/sudoers"],
+            ["dirsearch", "-u", "http://app.lab.local/",
+             "--wordlist", "/etc/shadow"],
+        ):
+            with self.subTest(argv=" ".join(argv[1:])):
+                self.denied(argv)
+
+    def test_a_word_list_may_not_name_an_absolute_or_escaped_path(self):
+        # These flags do not open files, so the value class is documentation of
+        # intent rather than the enforcement: what refuses these inputs is the
+        # confinement rule that has always applied to a value that looks like a
+        # path. An absolute or traversal value here is refused because it names
+        # somewhere outside the root, and a relative one (`4/etc`) is permitted
+        # because it resolves inside it -- proved by the case below.
+        for argv in (
+            ["dirsearch", "-u", "http://app.lab.local/", "-e", "/etc/shadow"],
+            ["wpscan", "--url", "http://app.lab.local/", "-e", "/etc/passwd"],
+            ["wfuzz", "-u", "http://app.lab.local/FUZZ", "--hc", "../etc"],
+        ):
+            with self.subTest(argv=" ".join(argv[1:])):
+                self.denied(argv)
+        self.validate(["wfuzz", "-u", "http://app.lab.local/FUZZ",
+                       "--hc", "4/etc"])
+
+    def test_destinations_are_still_scope_checked(self):
+        for argv in (
+            ["dirsearch", "-u", "http://example.com/"],
+            ["wfuzz", "-u", "http://example.com/FUZZ", "-w", self.wordlist],
+            ["wpscan", "--url", "http://example.com/"],
+            ["sslyze", "--regular", "example.com:443"],
+        ):
+            with self.subTest(argv=" ".join(argv)):
+                self.denied(argv)

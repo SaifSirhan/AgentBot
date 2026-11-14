@@ -38,7 +38,8 @@ RECON = frozenset({"nmap", "whatweb", "dig", "host", "whois", "curl",
                    "openssl", "searchsploit", "ping", "traceroute",
                    "arp-scan", "httpx"})
 INTRUSIVE = frozenset({"ffuf", "gobuster", "feroxbuster", "nuclei",
-                       "nikto", "masscan", "nc"})
+                       "nikto", "masscan", "nc", "dirsearch", "wfuzz",
+                       "wpscan", "sslyze"})
 LOCAL_SAFE = frozenset({"searchsploit", "openssl"})
 # Credential-tier work is the one place where a successful step means someone
 # else's authentication failed, so it is also the tier that asks you twice.
@@ -69,6 +70,14 @@ DENIED_FLAGS = {
     "arp-scan": ("-l", "--localnet", "-b", "--BRIDGE", "-O"),
     "httpx": ("-proxy", "--proxy", "-listener", "--listener", "-resx",
               "--version-path"),
+    # `-z` is wfuzz's scanner spec: `file,/etc/shadow` reads a path through a
+    # value the walker cannot separate from the scanner name. `-w` does the
+    # same job confined. `--pickle`/`-R` resume a saved session past approval,
+    # and `-p` is a relay.
+    "wfuzz": ("-z", "-p", "--proxy", "--pickle", "-R", "--resume",
+              "--file", "--csv"),
+    "wpscan": ("--proxy", "--url-file"),
+    "dirsearch": ("-p", "--proxy", "--save-config"),
     # A proxy or a TOR circuit is a relay: the destination the scope checked is
     # not the destination that gets dialed. And a search engine as a target
     # source means Google chose the targets, not the operator.
@@ -137,6 +146,8 @@ TARGET_LIST_FLAGS = {
     "hydra": ("-M",),
     "sqlmap": ("-m",),
     "httpx": ("-l", "--list"),
+    "dirsearch": ("-l", "--list"),
+    "sslyze": ("--targets_in",),
 }
 OUTPUT_ROOT = Path("/tmp/kestrel")
 # R2: the only directories a known read flag may open besides OUTPUT_ROOT.
@@ -243,6 +254,15 @@ VALUE_FLAGS = {
     # says how the value is validated.
     "httpx": ("-u", "--url", "-o", "-timeout", "-threads", "-rps",
               "-retries"),
+    "dirsearch": ("-u", "--url", "-e", "--extensions", "-t", "--threads",
+                  "--timeout", "-w", "-i", "-x", "--wordlist", "-o",
+                  "--output"),
+    "wfuzz": ("-u", "--url", "-w", "--wordlist", "-t", "--timeout",
+              "--repeat", "--hc", "--sc", "--hf", "--sf", "--output-file",
+              "-o", "--headers", "--user-agent"),
+    "wpscan": ("--url", "-e", "--enumerate", "--request-timeout", "--threads",
+               "--output", "--format", "--wordlist", "--max-id"),
+    "sslyze": ("--retries", "--json_out", "--conn_retries", "--timeout"),
     "sqlmap": ("-u", "--url", "--data", "--data-ascii", "--data-binary",
                "--data-urlencode", "--method", "--cookie", "--user-agent",
                "--auth", "--auth-type", "--headers", "-p", "--dbms",
@@ -256,6 +276,9 @@ VALUE_FLAGS = {
 # R2: read flags may also open the packaged wordlists/scripts/CA bundle.
 READ_FLAGS = {
     "ffuf": ("-w", "--wordlist"),
+    "dirsearch": ("--wordlist",),
+    "wfuzz": ("-w", "--wordlist"),
+    "wpscan": ("--wordlist",),
     "gobuster": ("-w", "--wordlist"),
     "feroxbuster": ("-w", "--wordlist"),
     "openssl": ("-in", "-CAfile", "-cert", "-key", "-untrusted"),
@@ -289,6 +312,10 @@ PATH_FLAGS = {
     "masscan": ("-oX", "-oJ", "-oG", "-oL"),
     "hydra": ("-o",),
     "httpx": ("-o",),
+    "dirsearch": ("-o", "--output"),
+    "wfuzz": ("--output-file", "-o"),
+    "wpscan": ("--output", "--log"),
+    "sslyze": ("--json_out",),
     "sqlmap": ("--output-dir",),
 }
 # R10: these flags carry the destination itself. Their values must always
@@ -303,6 +330,9 @@ DESTINATION_FLAGS = {
     "masscan": ("--range",),
     "sqlmap": ("-u", "--url"),
     "httpx": ("-u", "--url"),
+    "dirsearch": ("-u", "--url"),
+    "wfuzz": ("-u", "--url"),
+    "wpscan": ("--url",),
 }
 # R4: these values are script names / script arguments, so they are not
 # parsed as targets; classify checks the names and target_tokens checks the
@@ -428,6 +458,18 @@ NON_DESTINATION_VALUES = {
     "arp-scan": {"-t": "number", "-r": "number"},
     "httpx": {"-timeout": "number", "-threads": "number",
               "-rps": "number", "-retries": "number"},
+    "dirsearch": {"-t": "number", "--threads": "number",
+                  "--timeout": "number", "-e": "wordset",
+                  "--extensions": "wordset", "-w": "wordset",
+                  "-i": "wordset", "-x": "wordset"},
+    "wfuzz": {"-t": "number", "--timeout": "number", "--repeat": "number",
+              "--hc": "wordset", "--sc": "wordset", "--hf": "text",
+              "--sf": "text", "--headers": "text", "--user-agent": "text"},
+    "wpscan": {"-e": "wordset", "--enumerate": "wordset",
+               "--request-timeout": "number", "--threads": "number",
+               "--format": "word", "--max-id": "number"},
+    "sslyze": {"--retries": "number", "--conn_retries": "number",
+               "--timeout": "number"},
     # hydra: `-e` is the empty/salt guess spec (ns, n or s), so a word and never
     # a path; `-s` is a port; the rest are counts. Credentials use the existing
     # class, which already refuses `/` and `@`.
@@ -479,6 +521,10 @@ VALUE_CLASSES = {
         r"(?:[TUSP]:)?(?:[0-9]+(?:-[0-9]+)?|[A-Za-z][A-Za-z0-9_-]*|-)"),
     "range": re.compile(r"(?:[0-9]+-[0-9]*|-[0-9]+)"),
     "word": re.compile(r"[A-Za-z0-9_-]+"),
+    # A comma-separated list of words -- status-code sets, extension lists. No
+    # slash, no "@", no scheme, so it can never describe a path or a host the
+    # way a bare `text` licence would.
+    "wordset": re.compile(r"[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*"),
     "record": RECORD_TYPES,
     "method": HTTP_METHODS,
     # R14: the pattern excludes "@" and "/"; _class_matches additionally
@@ -527,7 +573,8 @@ NO_VALUE_FLAGS = {
 # -k is declared nowhere because its output semantics are not established. Every
 # entry below is a flag whose meaning and value class are known.
 STRICT_BINARIES = frozenset({"hydra", "sqlmap", "masscan", "ping",
-                              "traceroute", "arp-scan", "httpx"})
+                              "traceroute", "arp-scan", "httpx", "dirsearch",
+                              "wfuzz", "wpscan", "sslyze"})
 BOOLEAN_FLAGS = {
     "hydra": ("-q", "-f", "-F", "-u", "-I", "-v", "-4", "-6", "-h", "-V"),
     # `--level`/`--risk`/`--threads` are values, not booleans, and `-v` takes a
@@ -552,6 +599,15 @@ BOOLEAN_FLAGS = {
     # httpx declares only what changes the output, not what gets dialed.
     "httpx": ("-json", "-silent", "-no-color", "-title", "-status-code",
               "-tech-detect", "-web-server", "-h", "--help", "--version"),
+    "dirsearch": ("-r", "--recursive", "--random-agent", "-q", "--quiet",
+                  "--no-color", "-h", "--help", "--version"),
+    "wfuzz": ("-c", "-k", "-N", "-B", "-q", "--mute", "-h", "--help",
+              "-V", "--version"),
+    "wpscan": ("--random-useragent", "--force", "--no-banner", "--verbose",
+               "-h", "--help", "--version", "--only-enum-ok"),
+    "sslyze": ("--regular", "--slow_target", "--offline",
+               "--print_out_json", "--print_out_txt", "-h", "--help",
+               "--version"),
 }
 # `-h`/`--version` are the only flags that may stand in place of a target: an
 # argv that is nothing but a report request asks the installed version what it
