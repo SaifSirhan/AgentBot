@@ -12,6 +12,7 @@ rewrite itself with terminal control characters or grow without bound.
 
 Run: python -m unittest tests.test_kali_bus -v
 """
+import importlib.util
 import subprocess
 import sys
 import threading
@@ -21,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+ROOT = Path(__file__).resolve().parents[1]
 
 import kali_bus
 
@@ -431,6 +434,71 @@ class FormatApprovalTests(unittest.TestCase):
                 self.assertIsInstance(text, str)
                 self.assertNotIn("\x00", text)
                 self.assertNotIn("\x1b", text)
+
+
+class SecondConfirmationTests(unittest.TestCase):
+    """Intrusive-and-above tasks need a second, separately refused yes."""
+
+    def load_wrapper(self):
+        # Test-only load by path: production code never imports the Kali-side
+        # wrapper, which is deployed on the VM, not on this machine.
+        spec = importlib.util.spec_from_file_location(
+            "kestrel_run_tier_guard", ROOT / "kali" / "kestrel_run.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_the_risk_tiers_mirror_the_wrapper(self):
+        # The wrapper decides the tier; the client only reads it. If the two
+        # tables drift, a plan can be tiered low here and run high there.
+        wrapper = self.load_wrapper()
+        self.assertEqual(kali_bus.RISK_TIERS, wrapper.TIERS)
+
+    def test_intrusive_and_above_need_a_second_confirmation(self):
+        for risk in ("intrusive", "credential", "exploitation"):
+            self.assertTrue(kali_bus.needs_second_confirmation(risk), risk)
+
+    def test_recon_needs_only_the_first_confirmation(self):
+        # The friction budget: a plain service scan stays one dialog.
+        self.assertFalse(kali_bus.needs_second_confirmation("recon"))
+
+    def test_an_unclassifiable_risk_needs_a_second_confirmation(self):
+        # Fail closed. An absent or malformed tier must not buy the cheap gate,
+        # so anything outside the table is treated as intrusive-or-worse.
+        for risk in ("unknown", "", None, 7, ["recon"], {"a": 1}):
+            with self.subTest(risk=repr(risk)):
+                self.assertTrue(kali_bus.needs_second_confirmation(risk))
+
+    def test_the_second_confirmation_dialog_says_so(self):
+        plan = {"objective": "sweep", "risk": "intrusive",
+                "targets": ["127.0.0.1"],
+                "steps": [{"argv": ["masscan", "-p80", "--rate", "100",
+                                    "127.0.0.1"]}]}
+        first = kali_bus.format_approval(plan)
+        second = kali_bus.format_approval(dict(plan, second_confirmation=True))
+        self.assertNotIn("SECOND CONFIRMATION", first)
+        self.assertIn("SECOND CONFIRMATION", second)
+        self.assertIn("intrusive", second)
+        # The commands must be re-readable, not summarised away.
+        self.assertIn("masscan -p80 --rate 100 127.0.0.1", second)
+
+    def test_the_second_confirmation_flag_cannot_raise(self):
+        for plan in ({"second_confirmation": True},
+                     {"second_confirmation": "yes", "risk": None},
+                     {"second_confirmation": 1, "steps": None},
+                     dict({"objective": 5}, second_confirmation=True)):
+            with self.subTest(plan=plan):
+                self.assertIsInstance(kali_bus.format_approval(plan), str)
+
+    def test_the_second_confirmation_is_still_fail_closed(self):
+        # A second ask with no listener is a denial, exactly like the first.
+        kali_bus.unregister()
+        approved = kali_bus.request_approval(
+            {"objective": "sweep", "risk": "intrusive", "targets": [],
+             "steps": [], "second_confirmation": True})
+        self.assertFalse(approved)
 
 
 if __name__ == "__main__":

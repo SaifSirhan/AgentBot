@@ -392,6 +392,72 @@ class KaliApprovalOrderTests(KaliFixture):
         task.assert_called_once()
 
 
+    def test_an_intrusive_plan_is_approved_twice_before_it_runs(self):
+        check = dict(self.check, risk="intrusive")
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=check), \
+             mock.patch.object(agent.kali_bus, "request_approval",
+                               side_effect=[True, True]) as approve, \
+             mock.patch.object(agent.kali_bridge, "task",
+                               return_value=self.result) as task:
+            text = agent.kali_task(self.input)
+        self.assertEqual(approve.call_count, 2)
+        task.assert_called_once()
+        self.assertIn("finished", text)
+
+    def test_a_second_refusal_runs_nothing(self):
+        # The first yes buys nothing on its own: the second no is still a no.
+        check = dict(self.check, risk="intrusive")
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=check), \
+             mock.patch.object(agent.kali_bus, "request_approval",
+                               side_effect=[True, False]), \
+             mock.patch.object(agent.kali_bridge, "task",
+                               return_value=self.result) as task:
+            text = agent.kali_task(self.input)
+        self.assertIn("nothing ran", text)
+        task.assert_not_called()
+
+    def test_a_first_refusal_does_not_ask_twice(self):
+        # Once the answer is no, a second dialog would only spend attention.
+        check = dict(self.check, risk="exploitation")
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=check), \
+             mock.patch.object(agent.kali_bus, "request_approval",
+                               side_effect=[False, True]) as approve, \
+             mock.patch.object(agent.kali_bridge, "task") as task:
+            agent.kali_task(self.input)
+        self.assertEqual(approve.call_count, 1)
+        task.assert_not_called()
+
+    def test_the_second_ask_repeats_the_commands_and_marks_itself(self):
+        check = dict(self.check, risk="credential")
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=check), \
+             mock.patch.object(agent.kali_bus, "request_approval",
+                               side_effect=[True, True]) as approve, \
+             mock.patch.object(agent.kali_bridge, "task",
+                               return_value=self.result) as task:
+            agent.kali_task(self.input)
+        first, second = (call.args[0] for call in approve.call_args_list)
+        self.assertNotIn("second_confirmation", first)
+        self.assertTrue(second.get("second_confirmation"))
+        self.assertEqual(first["steps"], second["steps"])
+        self.assertEqual(second["steps"], task.call_args.args[1])
+
+    def test_an_unclassifiable_risk_asks_twice(self):
+        # A check response with no usable tier gets the harder gate.
+        check = {"ok": True, "targets": ["192.168.56.10"]}
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=check), \
+             mock.patch.object(agent.kali_bus, "request_approval",
+                               side_effect=[True, True]) as approve, \
+             mock.patch.object(agent.kali_bridge, "task",
+                               return_value=self.result):
+            agent.kali_task(self.input)
+        self.assertEqual(approve.call_count, 2)
+
+
 class KaliValidationTests(KaliFixture):
     """Every invalid shape is refused locally, before any SSH round trip."""
 

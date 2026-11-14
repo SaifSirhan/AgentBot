@@ -298,9 +298,12 @@ step 4 first:
   ports, not Windows'.
 - Approve and verify the summary.
 - Deny a second task and verify nothing runs.
-- `kali_task` with `masscan -p80 --rate 100 192.168.56.20` exercises the one
-  capability the installer grants. Approve it: masscan runs as `kestrel`, never
-  as root. If it reports a raw-socket permission error, check
+- `kali_task` with `masscan -p80 --rate 100 127.0.0.1` exercises the one
+  capability the installer grants. The wrapper tiers masscan as `intrusive`, so
+  this asks you twice: a second dialog, with the commands repeated, only
+  appears for `intrusive`, `credential` and `exploitation` work, and either
+  answer of No stops the task before it runs. Approve it: masscan runs as
+  `kestrel`, never as root. If it reports a raw-socket permission error, check
   `getcap "$(command -v masscan)"` and re-run the installer; only `cap_net_raw`
   is granted, so a masscan build that also needs `cap_net_admin` will fail here.
 - Try `nmap -sV 8.8.8.8` and `bash -c "id"`; both are refused before execution.

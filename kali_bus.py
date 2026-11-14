@@ -49,6 +49,25 @@ MAX_TEXT_CHARS = 20000     # the whole rendered message
 _lock = threading.Lock()
 _listener = None
 
+# Mirrors the Kali wrapper's TIERS; the wrapper classifies and this client only
+# reads, and the drift test compares the two tables. At or above
+# SECOND_CONFIRMATION_TIER a human must say yes twice, because the first dialog
+# is the one a reader answers from the objective line alone.
+RISK_TIERS = {"recon": 0, "intrusive": 1, "credential": 2, "exploitation": 3}
+SECOND_CONFIRMATION_TIER = 1
+
+
+def needs_second_confirmation(risk) -> bool:
+    """True when this tier must be confirmed twice. Unknown tiers are yes.
+
+    A malformed or missing tier cannot be proven cheap, so it takes the harder
+    gate; only a risk named in the table below the threshold escapes it.
+    """
+    tier = RISK_TIERS.get(risk) if isinstance(risk, str) else None
+    if tier is None:
+        return True
+    return tier >= SECOND_CONFIRMATION_TIER
+
 
 def register(listener) -> None:
     """Install the GUI's marshaller. Passing None detaches whatever is there."""
@@ -232,13 +251,19 @@ def format_approval(plan) -> str:
     # past the cap is ever looked at. `total` is the whole plan: the omission
     # notice at the end counts from it.
     steps = steps[:MAX_STEPS]
-    lines = [
-        "Kali lab task",
+    lines = ["Kali lab task"]
+    if plan.get("second_confirmation"):
+        # Named as the second gate so it cannot be read as the first one: the
+        # commands below are repeated deliberately, because a yes given to an
+        # objective line is not a yes given to those commands.
+        lines.append("SECOND CONFIRMATION -- one yes already recorded. "
+                     "Yes runs the commands below now; No runs nothing.")
+    lines.extend([
         _clean(plan.get("objective", "") or ""),
         "Risk: %s" % _clean(plan.get("risk", "unknown") or "unknown"),
         "Targets: %s" % _targets(plan),
         "",
         "Commands:",
-    ]
+    ])
     lines.extend(_numbered(steps, total))
     return "\n".join(lines)

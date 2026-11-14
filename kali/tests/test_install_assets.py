@@ -316,12 +316,24 @@ class InstallAssetTests(unittest.TestCase):
         body = section(7)
         # The exact command, not just the tool name: masscan is the one tool
         # whose capability grant is installer-specific, so it must be run.
-        self.assertIn("masscan -p80 --rate 100 192.168.56.20", body)
+        # Loopback, not the example host-only address: that subnet belongs to
+        # the Windows host's WSL switch, so the old target sent SYNs toward
+        # host-owned space while proving nothing extra about the capability.
+        self.assertIn("masscan -p80 --rate 100 127.0.0.1", body)
         self.assertIn("cap_net_raw", body)
         self.assertIn("kali_scope", body)
         self.assertIn("kali_task", body)
         self.assertIn("nmap -sV 8.8.8.8", body)
         self.assertIn('bash -c "id"', body)
+
+    def test_readme_documents_the_second_confirmation_for_intrusive_work(self):
+        # An operator who expects one dialog will read a second as a bug and
+        # answer it without looking, which is the failure the gate prevents.
+        body = prose(section(7)).lower()
+        self.assertIn("asks you twice", body)
+        self.assertIn("intrusive", body)
+        self.assertIn("credential", body)
+        self.assertIn("exploitation", body)
 
     def test_readme_documents_the_installer_symlink_refusal(self):
         body = section(2)

@@ -433,6 +433,32 @@ class KaliDialogTests(unittest.TestCase):
         self.assertIn("nmap 192.168.56.10", calls[0]["text"])
         self.assertEqual(answers, [False])
 
+    def test_the_second_confirmation_dialog_is_labelled_in_the_gui(self):
+        from PySide6.QtWidgets import QMessageBox
+        view = self._view()
+        self.addCleanup(view.deleteLater)
+        calls = self._stub_question(QMessageBox.StandardButton.Yes)
+        plan = {"objective": "sweep", "risk": "intrusive",
+                "steps": [{"argv": ["masscan", "-p80", "127.0.0.1"]}]}
+
+        first, second = [], []
+        view._show_kali_approval(dict(plan), first.append)
+        view._show_kali_approval(dict(plan, second_confirmation=True),
+                                 second.append)
+
+        self.assertNotIn("SECOND CONFIRMATION", calls[0]["text"])
+        self.assertIn("SECOND CONFIRMATION", calls[1]["text"])
+        # The commands are repeated in the escalated dialog, not summarised.
+        self.assertIn("masscan -p80 127.0.0.1", calls[1]["text"])
+        # Same Yes/No, same default No: an extra question, never a weaker one.
+        for call in calls:
+            self.assertEqual(call["default"], QMessageBox.StandardButton.No)
+            self.assertEqual(
+                call["buttons"],
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        self.assertEqual(first, [True])
+        self.assertEqual(second, [True])
+
     def test_yes_approves_and_no_denies(self):
         view = self._view()
         self.addCleanup(view.deleteLater)

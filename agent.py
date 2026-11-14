@@ -5776,6 +5776,13 @@ def kali_task(inp):
     }
     if not kali_bus.request_approval(plan):
         return "Kali task was not approved; nothing ran."
+    if kali_bus.needs_second_confirmation(plan.get("risk")):
+        # A second, separately refused yes for intrusive-and-above work. The
+        # dialog is re-rendered with the commands in view, because the first
+        # question is often answered from the objective line alone.
+        if not kali_bus.request_approval(dict(plan, second_confirmation=True)):
+            return ("Kali task was approved once but not confirmed the second "
+                    "time; nothing ran.")
 
     try:
         result = kali_bridge.task(objective, steps,

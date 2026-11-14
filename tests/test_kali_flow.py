@@ -91,6 +91,54 @@ class KaliFlowTests(unittest.TestCase):
         task.assert_called_once()
         self.assertIn("22/tcp open ssh", text)
 
+    def test_an_intrusive_plan_needs_two_yeses_through_the_real_bus(self):
+        """No mocked approval helper: the real bus, the real second gate."""
+        answers = []
+
+        def listener(plan, timeout):
+            answers.append(dict(plan))
+            return True
+
+        kali_bus.register(listener)
+        steps = [{"argv": ["masscan", "-p80", "127.0.0.1"], "timeout": 10}]
+        check = dict(self.check, risk="intrusive", targets=["127.0.0.1"])
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=check), \
+             mock.patch.object(agent.kali_bridge, "task",
+                               return_value=dict(self.result,
+                                                 risk="intrusive")) as task:
+            text = agent.kali_task({"objective": "sweep", "steps": steps,
+                                    "total_timeout": 30})
+
+        self.assertEqual(len(answers), 2)
+        self.assertNotIn("second_confirmation", answers[0])
+        self.assertTrue(answers[1].get("second_confirmation"))
+        # Both asks must describe the same commands.
+        self.assertEqual(answers[0]["steps"], answers[1]["steps"])
+        self.assertEqual(answers[1]["steps"], task.call_args.args[1])
+        task.assert_called_once()
+
+    def test_the_real_bus_denies_the_second_ask_and_runs_nothing(self):
+        answers = []
+
+        def listener(plan, timeout):
+            answers.append(dict(plan))
+            return len(answers) == 1   # yes to the first, no to the second
+
+        kali_bus.register(listener)
+        steps = [{"argv": ["masscan", "-p80", "127.0.0.1"], "timeout": 10}]
+        check = dict(self.check, risk="intrusive", targets=["127.0.0.1"])
+        with mock.patch.object(agent.kali_bridge, "check",
+                               return_value=check), \
+             mock.patch.object(agent.kali_bridge, "task",
+                               return_value=self.result) as task:
+            text = agent.kali_task({"objective": "sweep", "steps": steps,
+                                    "total_timeout": 30})
+
+        self.assertEqual(len(answers), 2)
+        task.assert_not_called()
+        self.assertIn("nothing ran", text)
+
     def test_denial_never_executes(self):
         with mock.patch.object(agent.kali_bridge, "check",
                                return_value=self.check), \
