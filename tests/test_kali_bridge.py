@@ -108,6 +108,30 @@ class ConfigTests(unittest.TestCase):
                 kali_bridge.config_path(),
                 Path("C:/Users/operator/AppData/Roaming/Kestrel/kali.json"))
 
+    def test_ssh_argv_expands_the_appdata_paths_the_readme_documents(self):
+        # README 3 and 6 tell the operator to write %APPDATA% into key_path and
+        # known_hosts. sshd cannot resolve a literal "%APPDATA%", so the bridge
+        # must expand it before building the command -- otherwise the documented
+        # config shape fails with "no such identity" on every call.
+        environ = {k: v for k, v in os.environ.items()
+                   if k not in (kali_bridge.CONFIG_ENV, "APPDATA")}
+        environ["APPDATA"] = "C:/Users/operator/AppData/Roaming"
+        path = write_config(
+            self.temp.name, host="127.0.0.1", port=2222,
+            key_path="%APPDATA%\\Kestrel\\kali\\id_ed25519",
+            known_hosts="%APPDATA%\\Kestrel\\kali\\known_hosts")
+        with mock.patch.dict(os.environ, environ, clear=True):
+            config = kali_bridge.load_config(path)
+            argv = kali_bridge.ssh_argv(config)
+        base = environ["APPDATA"]
+        self.assertEqual(argv[argv.index("-i") + 1],
+                         base + "\\Kestrel\\kali\\id_ed25519")
+        self.assertIn("UserKnownHostsFile=" + base + "\\Kestrel\\kali\\known_hosts",
+                      argv)
+        # Model B: the forward's port, not 22.
+        self.assertEqual(argv[argv.index("-p") + 1], "2222")
+        self.assertIn("kestrel@127.0.0.1", argv)
+
     def test_config_path_without_appdata_is_unavailable(self):
         environ = {k: v for k, v in os.environ.items()
                    if k not in (kali_bridge.CONFIG_ENV, "APPDATA")}

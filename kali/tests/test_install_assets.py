@@ -346,6 +346,63 @@ class InstallAssetTests(unittest.TestCase):
         self.assertIn("CRLF", body)
         self.assertIn("sed -i 's/\\r$//' kali/*.sh", body)
 
+    # -- NAT port-forward topology: the guide must not assume host-only ------
+
+    def test_readme_distinguishes_the_two_transports(self):
+        # The wrapper resolves targets inside the VM, so the guide has to say
+        # which link the VM actually has: a host-only address, or a NAT address
+        # reached through a forwarded loopback port on Windows.
+        body = prose(section(1)).lower()
+        self.assertIn("model a", body)
+        self.assertIn("model b", body)
+        self.assertIn("port forward", body)
+        self.assertIn("10.0.2.15", body)
+        self.assertIn("get-netipaddress", body)
+
+    def test_readme_warns_before_claiming_a_subnet_the_host_already_owns(self):
+        # 192.168.56.1 is VirtualBox's default host-only address AND the Windows
+        # WSL/Hyper-V switch address. A guide that tells everyone to use it
+        # silently sets up two adapters on one subnet, where Windows routing
+        # picks which machine an in-scope target reaches.
+        body = prose(section(1)).lower()
+        self.assertIn("192.168.56.1", body)
+        self.assertIn("vethernet (wsl", body)
+        self.assertIn("already taken", body)
+        self.assertIn("192.168.120", body)
+
+    def test_readme_scope_step_says_targets_resolve_inside_the_vm(self):
+        body = prose(section(4)).lower()
+        self.assertIn("resolved inside the vm", body)
+        self.assertIn("127.0.0.0/8", body)
+        self.assertIn("10.0.2.0/24", body)
+        self.assertIn("never leaves the vm", body)
+
+    def test_readme_keeps_allow_public_as_the_lab_boundary(self):
+        # The temptation this documents is the one that actually happened:
+        # widening allow_public to stop an out-of-scope refusal.
+        body = prose(section(4)).lower()
+        self.assertIn("do not set `allow_public` to `true`", body)
+        self.assertIn("add that target", body)
+
+    def test_readme_host_key_step_matches_the_configured_port(self):
+        # known_hosts keys on host[:port]. An entry recorded for a different
+        # host or port than kali.json uses makes every call fail host-key
+        # verification, which reads as a broken tool rather than a wrong file.
+        body = prose(section(5))
+        self.assertIn("ssh-keyscan -p 2222 127.0.0.1 | Out-File -Encoding ascii",
+                      body)
+        self.assertIn("[127.0.0.1]:2222", body)
+        self.assertIn("Host key verification failed", body)
+
+    def test_readme_config_and_live_checks_cover_the_forward(self):
+        config = section(6)
+        self.assertIn('"host": "127.0.0.1"', config)
+        self.assertIn('"port": 2222', config)
+        # Commands keep their flag case; only the prose is matched loosely.
+        checks = prose(section(7))
+        self.assertIn("nmap -sV 127.0.0.1", checks)
+        self.assertIn("step 4", checks.lower())
+
     # -- Shipped Task 1 facts the assets must not contradict -----------------
 
     def test_assets_never_configure_the_wrapper_by_environment(self):
