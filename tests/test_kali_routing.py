@@ -2,12 +2,15 @@
 
 Run: python -m unittest tests.test_kali_routing -v
 """
+import importlib.util
+import re
 import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 import agent
 import prompt_catalog
@@ -143,3 +146,56 @@ class RoutingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PromptToolDriftTests(unittest.TestCase):
+    """Every binary the prompt text advertises must be one the wrapper permits.
+
+    On 2026-11-15 the security rule named `sqlmap` and `hydra` while
+    `classify()` had no entry for either, so the model was instructed to reach
+    for a tool it could not get and answered "no shell tool for it this turn" --
+    the exact failure the rule exists to prevent. The enumeration is matched by
+    its shape and the test requires it to find tools, so a reworded rule fails
+    instead of quietly checking nothing.
+    """
+
+    def load_wrapper(self):
+        # Test-only load by path: production code never imports the Kali-side
+        # wrapper, which is deployed on the VM, not on this machine.
+        spec = importlib.util.spec_from_file_location(
+            "kestrel_run_drift_guard",
+            ROOT / "kali" / "kestrel_run.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(module)
+        return module
+
+    def advertised_binaries(self, wrapper):
+        text = " ".join((prompt_router.RULES["security"],
+                         prompt_catalog.DESCRIPTIONS["kali_task"]))
+        found = []
+        for run in re.findall(
+                r"([a-z][a-z0-9_-]+(?:\s*,\s*[a-z][a-z0-9_-]+){2,})"
+                r"\s+or any other Kali binary", text):
+            found.extend(token.strip() for token in run.split(","))
+        self.assertGreaterEqual(len(found), 8,
+                                "the security rule no longer enumerates tools")
+        return found
+
+    def test_every_advertised_binary_is_permitted_not_denied(self):
+        wrapper = self.load_wrapper()
+        permitted = (wrapper.RECON | wrapper.INTRUSIVE | wrapper.CREDENTIAL
+                     | wrapper.LOCAL_SAFE)
+        for binary in self.advertised_binaries(wrapper):
+            with self.subTest(binary=binary):
+                self.assertIn(binary, permitted | wrapper.DENIED_BINARIES)
+
+    def test_advertised_binaries_reach_a_real_tier(self):
+        # Naming a tool the policy refuses is how the model ends up apologising
+        # about shells, so refusal is not an acceptable answer for the rule text.
+        wrapper = self.load_wrapper()
+        permitted = wrapper.RECON | wrapper.INTRUSIVE | wrapper.CREDENTIAL
+        for binary in self.advertised_binaries(wrapper):
+            with self.subTest(binary=binary):
+                self.assertIn(binary, permitted)

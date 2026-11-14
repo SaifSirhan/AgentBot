@@ -1864,3 +1864,143 @@ class InventoryModeTests(TempOutputRoot):
         payload = json.loads(completed.stdout)
         self.assertTrue(payload["denied"])
         self.assertFalse(self.audit.exists())
+
+
+class StrictPermitTests(TempOutputRoot):
+    """Credential-tier binaries declare every flag they accept; all else is refused.
+
+    The rest of the wrapper is a deny-list: an unknown flag is permitted and only
+    its value is constrained. That is affordable for twelve audited binaries and
+    not for forty, so a strict binary must name every flag it will accept and
+    refuse the rest by name -- including the flags nobody has thought to refuse
+    yet, on versions this machine has never seen.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.scope = kr.load_scope(write_scope(self.temp.name))
+        self.wordlist = "/usr/share/wordlists/rockyou.txt"
+
+    def validate(self, argv):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], self.scope)
+
+    def denied(self, argv):
+        with self.assertRaises(kr.PolicyError) as caught:
+            self.validate(argv)
+        return str(caught.exception)
+
+    def test_credential_binaries_are_tiered_credential(self):
+        for argv in (
+            ["hydra", "-l", "admin", "-P", self.wordlist,
+             "192.168.56.10", "ssh"],
+            ["sqlmap", "-u", "http://app.lab.local/item.php?id=1", "--dump"],
+        ):
+            with self.subTest(binary=argv[0]):
+                risk, _ = self.validate(argv)
+                self.assertEqual(risk, "credential")
+
+    def test_an_undeclared_flag_is_refused_and_named(self):
+        for argv, flag in (
+            (["hydra", "--restore", "192.168.56.10", "ssh"], "--restore"),
+            (["hydra", "-R", self.wordlist, "192.168.56.10", "ssh"], "-R"),
+            (["sqlmap", "--wizard",
+              "-u", "http://app.lab.local/item.php?id=1"], "--wizard"),
+        ):
+            with self.subTest(argv=argv[0] + " " + flag):
+                reason = self.denied(argv)
+                self.assertIn(flag, reason)
+                self.assertIn(argv[0], reason)
+
+    def test_declared_flags_still_work(self):
+        risk, targets = self.validate(
+            ["hydra", "-l", "admin", "-P", self.wordlist, "-t", "16", "-f",
+             "192.168.56.10", "ssh"])
+        self.assertEqual(risk, "credential")
+        self.assertEqual(targets, ["192.168.56.10"])
+
+    def test_target_is_still_scope_checked(self):
+        self.denied(["hydra", "-l", "admin", "-P", self.wordlist,
+                     "8.8.8.8", "ssh"])
+        self.denied(["sqlmap", "-u", "http://example.com/item.php?id=1"])
+
+    def test_wordlist_reads_stay_confined_to_the_packaged_dirs(self):
+        self.denied(["hydra", "-l", "admin", "-P", "/etc/shadow",
+                     "192.168.56.10", "ssh"])
+        self.denied(["sqlmap", "-u", "http://app.lab.local/i.php?id=1",
+                     "--password-file", "/etc/shadow"])
+
+    def test_output_writes_stay_confined_to_the_output_root(self):
+        risk, _ = self.validate(["hydra", "-l", "admin", "-p", "guess",
+                                 "-o", "found.txt", "192.168.56.10", "ssh"])
+        self.assertEqual(risk, "credential")
+        self.denied(["hydra", "-l", "admin", "-p", "guess",
+                     "-o", "/etc/cron.d/x", "192.168.56.10", "ssh"])
+
+    def test_a_target_list_file_is_refused(self):
+        self.denied(["hydra", "-l", "admin", "-P", self.wordlist,
+                     "-M", "hosts.txt", "ssh"])
+        self.denied(["sqlmap", "-m", "192.168.56.0/24"])
+
+    def test_form_service_modules_are_refused_by_name(self):
+        # hydra's http-*-form payload needs `&` between fields, and `&` is refused
+        # in every argv token by a control-character rule that has survived three
+        # review rounds. Relaxing it for one value class is a decision of its own,
+        # so the modules are refused and the refusal says why.
+        for module in ("http-post-form", "http-get-form"):
+            with self.subTest(module=module):
+                reason = self.denied(
+                    ["hydra", "-l", "admin", "-p", "guess",
+                     "192.168.56.10", module, "/login:u=^USER:failed"])
+                self.assertIn(module, reason)
+
+    def test_module_loading_flags_are_refused_as_exec(self):
+        # Both of these make the tool import Python code from disk: an exec
+        # primitive wearing a scanning flag.
+        self.denied(["sqlmap", "-u", "http://app.lab.local/i.php?id=1",
+                     "--tamper", "space2comment"])
+        self.denied(["sqlmap", "-u", "http://app.lab.local/i.php?id=1",
+                     "--preprocessor", "x.py"])
+
+    def test_a_search_engine_is_not_a_target_source(self):
+        self.denied(["sqlmap", "-g", "inurl:items.php?id="])
+
+    def test_help_and_version_report_needs_no_target(self):
+        # Strict tables are built from the installed version's own help text, so
+        # reading it has to be reachable. It runs no attack and reveals nothing
+        # about the lab, but it stays at the binary's own tier.
+        risk, targets = self.validate(["hydra", "-h"])
+        self.assertEqual(risk, "credential")
+        self.assertEqual(targets, [])
+        self.validate(["sqlmap", "--version"])
+        self.validate(["sqlmap", "--help"])
+
+    def test_inventory_names_the_credential_tier_and_what_is_strict(self):
+        bindir = self.root / "bin"
+        bindir.mkdir()
+        (bindir / "hydra").write_text("", encoding="utf-8")
+        with mock.patch.object(kr, "SAFE_PATH",
+                               str(bindir) + ":/nonexistent-dir"),                 mock.patch.object(kr, "EGRESS_RULE", str(self.root / "none")):
+            inventory = kr.build_inventory()
+        self.assertEqual(inventory["credential"], ["hydra"])
+        self.assertEqual(inventory["strict"], sorted(kr.STRICT_BINARIES))
+
+    def test_the_report_licence_does_not_extend_to_deny_list_binaries(self):
+        # Staging means a non-strict binary behaves exactly as it did before.
+        # `nmap -h` is harmless in itself, but the licence to run without a
+        # scoped target is the strict path's own trade, and letting it leak
+        # would silently widen every binary in the table below it.
+        self.denied(["nmap", "-h"])
+        self.denied(["curl", "--help"])
+        self.assertEqual(kr.classify(["nmap", "-sV", "192.168.56.10"]), "recon")
+
+    def test_a_report_flag_beside_a_real_scan_is_still_a_scan(self):
+        # The report licence is for the whole argv being a report, not for
+        # excusing a missing target when one is present.
+        self.denied(["hydra", "-h", "-P", self.wordlist, "8.8.8.8", "ssh"])
+
+    def test_non_strict_binaries_keep_the_deny_list_posture(self):
+        risk, _ = self.validate(["nmap", "--future-nmap-flag-not-known",
+                                 "192.168.56.10"])
+        self.assertEqual(risk, "recon")
+        self.assertEqual(kr.classify(["curl", "--whatever",
+                                      "http://app.lab.local/"]), "recon")

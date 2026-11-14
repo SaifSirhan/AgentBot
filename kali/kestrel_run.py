@@ -39,17 +39,32 @@ RECON = frozenset({"nmap", "whatweb", "dig", "host", "whois", "curl",
 INTRUSIVE = frozenset({"ffuf", "gobuster", "feroxbuster", "nuclei",
                        "nikto", "masscan", "nc"})
 LOCAL_SAFE = frozenset({"searchsploit", "openssl"})
+# Credential-tier work is the one place where a successful step means someone
+# else's authentication failed, so it is also the tier that asks you twice.
+CREDENTIAL = frozenset({"hydra", "sqlmap"})
 DENIED_BINARIES = frozenset({"bash", "sh", "zsh", "dash", "python3", "python",
                              "perl", "ruby", "rm", "dd", "mkfs", "mount",
                              "systemctl", "crontab"})
 TIERS = {"recon": 0, "intrusive": 1, "credential": 2, "exploitation": 3}
 DESTRUCTIVE_FLAGS = {
     "sqlmap": ("--os-shell", "--os-pwn", "--os-cmd", "--file-write",
-               "--file-dest", "--sql-shell"),
+               "--file-dest", "--sql-shell",
+               # A tamper script and a preprocessor are both Python imported and
+               # executed by sqlmap itself: an exec primitive wearing a scanning
+               # flag, and the reason the strict tables are built the way they
+               # are. Reading a local file is the same class of door.
+               "--tamper", "--preprocessor", "--file-read", "--load-file",
+               "--sql-file", "--sql-query"),
     "curl": ("-T", "--upload-file"),
     "nc": ("-e", "--exec", "-c"),
 }
 DENIED_FLAGS = {
+    # A proxy or a TOR circuit is a relay: the destination the scope checked is
+    # not the destination that gets dialed. And a search engine as a target
+    # source means Google chose the targets, not the operator.
+    "sqlmap": ("--proxy", "--proxy-file", "--ignore-proxy", "--tor",
+               "--tor-type", "--check-tor", "--google", "--bing", "-g",
+               "--config-file", "--direct"),
     # curl proxies and remote-name writes are exfiltration or write paths.
     # R3: following a redirect leaves the destination we validated.
     # R9: protocol control (--proto*), FTP quote/port and telnet options are
@@ -109,6 +124,8 @@ TARGET_LIST_FLAGS = {
     "nuclei": ("-l",),
     "ffuf": ("-request",),
     "curl": ("-K", "--config"),
+    "hydra": ("-M",),
+    "sqlmap": ("-m",),
 }
 OUTPUT_ROOT = Path("/tmp/kestrel")
 # R2: the only directories a known read flag may open besides OUTPUT_ROOT.
@@ -201,6 +218,19 @@ VALUE_FLAGS = {
                 "--router-ip", "--source-ip", "--source-port", "--retries",
                 "--timeout", "--wait", "--exclude", "-e", "--interface"),
     "nc": ("-p", "-w", "-s", "-q", "-i", "-G", "-T", "-X", "-x", "-P"),
+    # hydra's short `-x` charset spec is left undeclared on purpose: it is
+    # written as `1-6:$/#`, and `$` is refused in every argv token.
+    "hydra": ("-l", "-p", "-e", "-s", "-m", "-t", "-c", "-w", "-D",
+              "-L", "-P", "-C", "-o"),
+    "sqlmap": ("-u", "--url", "--data", "--data-ascii", "--data-binary",
+               "--data-urlencode", "--method", "--cookie", "--user-agent",
+               "--auth", "--auth-type", "--headers", "-p", "--dbms",
+               "--exclude-sysdbs", "--level", "--risk", "--threads",
+               "--timeout", "--delay", "--retries", "--technique",
+               "--string", "--not-string", "--regexp", "--code",
+               "--text-only", "--prefix", "--suffix", "--answers",
+               "--crawl", "--crawl-timeout", "--tables", "--columns",
+               "--schemas", "-v", "--error-limit", "--tcp-timeout"),
 }
 # R2: read flags may also open the packaged wordlists/scripts/CA bundle.
 READ_FLAGS = {
@@ -208,6 +238,8 @@ READ_FLAGS = {
     "gobuster": ("-w", "--wordlist"),
     "feroxbuster": ("-w", "--wordlist"),
     "openssl": ("-in", "-CAfile", "-cert", "-key", "-untrusted"),
+    "hydra": ("-L", "-P", "-C"),
+    "sqlmap": ("--password-file",),
 }
 # Values of these flags are always filesystem paths, never targets: they are
 # confined to OUTPUT_ROOT (plus READ_ONLY_DIRS for READ_FLAGS) instead of
@@ -234,6 +266,8 @@ PATH_FLAGS = {
     "nuclei": ("-o", "-output", "--output", "-debug-log"),
     "nikto": ("-o", "-output", "--output"),
     "masscan": ("-oX", "-oJ", "-oG", "-oL"),
+    "hydra": ("-o",),
+    "sqlmap": ("--output-dir",),
 }
 # R10: these flags carry the destination itself. Their values must always
 # parse as a target and be scope-checked; they can never be licensed as a
@@ -245,6 +279,7 @@ DESTINATION_FLAGS = {
     "ffuf": ("-u",),
     "dig": ("-q",),
     "masscan": ("--range",),
+    "sqlmap": ("-u", "--url"),
 }
 # R4: these values are script names / script arguments, so they are not
 # parsed as targets; classify checks the names and target_tokens checks the
@@ -362,6 +397,31 @@ NON_DESTINATION_VALUES = {
     },
     "nc": {"-p": "ports", "-w": "number", "-q": "number", "-i": "number",
            "-G": "number", "-T": "word", "-X": "word", "-P": "text"},
+    # hydra: `-e` is the empty/salt guess spec (ns, n or s), so a word and never
+    # a path; `-s` is a port; the rest are counts. Credentials use the existing
+    # class, which already refuses `/` and `@`.
+    "hydra": {"-e": "word", "-s": "ports", "-m": "number", "-t": "number",
+              "-c": "number", "-w": "number", "-D": "number",
+              "-l": "credential", "-p": "credential"},
+    # sqlmap: the request-interpolated strings get the same licence curl's
+    # `--data` already carries. Nothing here may name a host: `-u` is a
+    # destination, and `--dbms`/`--technique` are words.
+    "sqlmap": {"--level": "number", "--risk": "number",
+               "--threads": "number", "--timeout": "number",
+               "--delay": "number", "--retries": "number",
+               "--error-limit": "number", "--tcp-timeout": "number",
+               "--crawl": "number", "--crawl-timeout": "number",
+               "-v": "number", "--code": "number", "--dbms": "word",
+               "--technique": "word", "--auth-type": "word",
+               "--method": "method", "-p": "word",
+               "--exclude-sysdbs": "word", "--tables": "word",
+               "--columns": "word", "--schemas": "word", "--string": "text",
+               "--not-string": "text", "--regexp": "text",
+               "--text-only": "text", "--prefix": "text", "--suffix": "text",
+               "--answers": "text", "--headers": "text", "--cookie": "text",
+               "--user-agent": "text", "--data": "text",
+               "--data-ascii": "text", "--data-binary": "text",
+               "--data-urlencode": "text", "--auth": "credential"},
 }
 # R11: the record types dig/host accept as a positional argument. AXFR/IXFR
 # are zone transfers, not lookups, so they are deliberately absent.
@@ -424,11 +484,56 @@ NO_VALUE_FLAGS = {
     "ffuf": ("-recursion",),
     "nuclei": ("-tl",),
 }
+# A strict binary lists every flag it accepts, and anything absent from that
+# list is refused with the flag and the binary named. The rest of the wrapper is
+# a deny-list -- an unknown flag is permitted and only its value is constrained
+# -- which is affordable for twelve binaries that have each been through three
+# review rounds, and not for a toolkit that keeps growing. The escape was always
+# a flag nobody thought to refuse: nmap --proxies, curl -O, ffuf -input-cmd.
+#
+# Absence here is a decision, not an oversight: hydra's -b/-R/-S resume a saved
+# session, which would let a run continue past the approval that started it, and
+# -k is declared nowhere because its output semantics are not established. Every
+# entry below is a flag whose meaning and value class are known.
+STRICT_BINARIES = frozenset({"hydra", "sqlmap"})
+BOOLEAN_FLAGS = {
+    "hydra": ("-q", "-f", "-F", "-u", "-I", "-v", "-4", "-6", "-h", "-V"),
+    # `--level`/`--risk`/`--threads` are values, not booleans, and `-v` takes a
+    # verbosity number: listing a value-taking flag as boolean would let the
+    # permit list pass an argv where the number was read as a bare target.
+    "sqlmap": ("--batch", "--banner", "--check-internet", "--current-db",
+               "--count", "--dbs", "--dump", "--dump-all", "--fingerprint",
+               "--forms", "--is-dba", "--offline", "--random-agent",
+               "--skip-waf", "--predict-output", "--fresh-queries",
+               "--flush-session", "--no-cast", "--crawl-log", "--version",
+               "--help"),
+}
+# `-h`/`--version` are the only flags that may stand in place of a target: an
+# argv that is nothing but a report request asks the installed version what it
+# can do, which is how the rest of these tables get built from evidence rather
+# than from memory. The moment anything else is in the argv it is a scan again.
+REPORT_FLAGS = frozenset({"-h", "-V", "--help", "--version"})
+
+
+def PERMITTED_FLAGS(binary):
+    """Every flag name a strict binary may use, however it is written."""
+    permitted = set(VALUE_FLAGS.get(binary, ()))
+    permitted |= set(BOOLEAN_FLAGS.get(binary, ()))
+    permitted |= set(NO_VALUE_FLAGS.get(binary, ()))
+    return frozenset(permitted)
 # Positional arguments that are not targets: searchsploit takes search terms,
 # gobuster takes a mode word, nc takes a port number after the host.
 FREE_POSITIONALS = frozenset({"searchsploit"})
 SUBCOMMAND_WORDS = {
     "gobuster": frozenset({"dir", "dns", "fuzz", "vhost", "s3", "tftp"}),
+    # hydra names the service as a positional word after the target. Only the
+    # modules that take no inline spec are listed: `http-post-form` needs
+    # `&` between fields, which is refused in every argv token, so the whole
+    # *-form family stays unreachable rather than half-supported.
+    "hydra": frozenset({"ssh", "ftp", "sftp", "telnet", "http-get",
+                        "https-get", "mysql", "mssql", "postgres", "oracle",
+                        "vnc", "smb", "pop3", "imap", "smtp", "ldap", "svn",
+                        "irc", "snmp"}),
 }
 SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SHELL_CHARS = frozenset(";|&$`><\n\r")
@@ -1155,6 +1260,8 @@ def classify(argv):
         tier = "recon"
     elif binary in INTRUSIVE:
         tier = "intrusive"
+    elif binary in CREDENTIAL:
+        tier = "credential"
     else:
         raise PolicyError("binary %r is not allowed" % binary)
 
@@ -1180,6 +1287,15 @@ def classify(argv):
             raise PolicyError(
                 "flag %s is not allowed; write targets directly" % flag)
 
+    if binary in STRICT_BINARIES:
+        # The tables above name escapes that have been found. This one is the
+        # net for the escapes nobody has found yet, on a version this host has
+        # never run: a flag that is not declared is not permitted.
+        permitted = PERMITTED_FLAGS(binary)
+        for flag in sorted(flags - permitted):
+            raise PolicyError(
+                "flag %s is not permitted for %s" % (flag, binary))
+
     if binary == "curl":
         if any(name in ("-d", "--data", "--data-raw", "--data-binary",
                         "--data-ascii", "--data-urlencode", "-F", "--form",
@@ -1200,6 +1316,18 @@ def classify(argv):
     return tier
 
 
+def _report_only(argv):
+    """True when the argv is nothing but a request for the tool's own report.
+
+    `hydra -h` asks the installed version what it can do. That is how a strict
+    table gets built from evidence instead of from memory, and it runs no
+    attack and reveals nothing about the lab -- but the licence is for the whole
+    argv, so one real flag beside it makes the step a scan again.
+    """
+    return (argv[0] in STRICT_BINARIES and len(argv) > 1
+            and all(token in REPORT_FLAGS for token in argv[1:]))
+
+
 def validate_steps(steps, scope):
     _check_output_root()
     highest = "recon"
@@ -1208,10 +1336,11 @@ def validate_steps(steps, scope):
         argv = step["argv"]
         tier = classify(argv)
         found = target_tokens(argv, scope)
-        needs_target = (argv[0] not in LOCAL_SAFE
-                        or (argv[0] == "openssl"
-                            and len(argv) > 1
-                            and argv[1] == "s_client"))
+        needs_target = ((argv[0] not in LOCAL_SAFE
+                         or (argv[0] == "openssl"
+                             and len(argv) > 1
+                             and argv[1] == "s_client"))
+                        and not _report_only(argv))
         if not found and needs_target:
             raise PolicyError("%s requires a target" % argv[0])
         targets.extend(found)
@@ -1469,7 +1598,11 @@ def build_inventory():
                               if _binary_present(name))
                  for tier, binaries in (("recon", RECON),
                                         ("intrusive", INTRUSIVE),
+                                        ("credential", CREDENTIAL),
                                         ("local_safe", LOCAL_SAFE))}
+    # Which binaries are strict is a policy fact, not a presence fact: it tells
+    # Kestrel that an unknown flag there is a refusal rather than an omission.
+    inventory["strict"] = sorted(STRICT_BINARIES)
     # The refused names are presence, not permission: they tell the operator what
     # the policy is protecting against on this host.
     inventory["denied_present"] = sorted(name for name in DENIED_BINARIES
