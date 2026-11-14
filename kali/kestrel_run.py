@@ -27,6 +27,21 @@ MAX_STEPS = 8
 MAX_STEP_TIMEOUT = 600
 MAX_TOTAL_TIMEOUT = 1800
 MAX_STREAM_BYTES = 256 * 1024
+# The most any file a child writes inside the confinement root may reach, and
+# the most lines a wordlist generator may be asked for. The arithmetic check in
+# classify can only reason about the flags it understands; the rlimit is the
+# part that does not have to, which is why both exist.
+MAX_CHILD_FILE_BYTES = 32 * 1024 * 1024
+MAX_GENERATED_LINES = 5_000_000
+CRUNCH_DEFAULT_CHARSET_SIZE = 95
+CRUNCH_CHARSET_SIZES = {"digits": 10, "lowercase": 26, "lalpha": 26,
+                        "uppercase": 26, "ualpha": 26, "letters": 52,
+                        "alphanum": 62, "alphanumeric": 62,
+                        "punctuation": 32, "printable": 95, "all": 95}
+# crunch(1) documents these as the variable positions in a -t template; every
+# other character is emitted literally, so a six-character template with two
+# placeholders is 95^2 lines and not 95^6.
+CRUNCH_PLACEHOLDER_RE = re.compile(r"[@%_,^]")
 MAX_TOTAL_BYTES = 1024 * 1024
 # I5/I6: pipes are read as bytes, in chunks, and capped in bytes.
 READ_CHUNK_BYTES = 8192
@@ -36,11 +51,11 @@ READER_JOIN_SECONDS = 2
 
 RECON = frozenset({"nmap", "whatweb", "dig", "host", "whois", "curl",
                    "openssl", "searchsploit", "ping", "traceroute",
-                   "arp-scan", "httpx"})
+                   "arp-scan", "httpx", "crunch"})
 INTRUSIVE = frozenset({"ffuf", "gobuster", "feroxbuster", "nuclei",
                        "nikto", "masscan", "nc", "dirsearch", "wfuzz",
                        "wpscan", "sslyze"})
-LOCAL_SAFE = frozenset({"searchsploit", "openssl"})
+LOCAL_SAFE = frozenset({"searchsploit", "openssl", "crunch"})
 # Credential-tier work is the one place where a successful step means someone
 # else's authentication failed, so it is also the tier that asks you twice.
 CREDENTIAL = frozenset({"hydra", "sqlmap"})
@@ -148,6 +163,8 @@ TARGET_LIST_FLAGS = {
     "httpx": ("-l", "--list"),
     "dirsearch": ("-l", "--list"),
     "sslyze": ("--targets_in",),
+    # `-f` makes crunch read a file of words instead of generating them.
+    "crunch": ("-f", "--crunch-stderr"),
 }
 OUTPUT_ROOT = Path("/tmp/kestrel")
 # R2: the only directories a known read flag may open besides OUTPUT_ROOT.
@@ -263,6 +280,7 @@ VALUE_FLAGS = {
     "wpscan": ("--url", "-e", "--enumerate", "--request-timeout", "--threads",
                "--output", "--format", "--wordlist", "--max-id"),
     "sslyze": ("--retries", "--json_out", "--conn_retries", "--timeout"),
+    "crunch": ("-t", "-o", "-b", "-s", "-u"),
     "sqlmap": ("-u", "--url", "--data", "--data-ascii", "--data-binary",
                "--data-urlencode", "--method", "--cookie", "--user-agent",
                "--auth", "--auth-type", "--headers", "-p", "--dbms",
@@ -316,6 +334,7 @@ PATH_FLAGS = {
     "wfuzz": ("--output-file", "-o"),
     "wpscan": ("--output", "--log"),
     "sslyze": ("--json_out",),
+    "crunch": ("-o",),
     "sqlmap": ("--output-dir",),
 }
 # R10: these flags carry the destination itself. Their values must always
@@ -470,6 +489,7 @@ NON_DESTINATION_VALUES = {
                "--format": "word", "--max-id": "number"},
     "sslyze": {"--retries": "number", "--conn_retries": "number",
                "--timeout": "number"},
+    "crunch": {"-t": "text", "-b": "number", "-s": "number", "-u": "number"},
     # hydra: `-e` is the empty/salt guess spec (ns, n or s), so a word and never
     # a path; `-s` is a port; the rest are counts. Credentials use the existing
     # class, which already refuses `/` and `@`.
@@ -574,7 +594,7 @@ NO_VALUE_FLAGS = {
 # entry below is a flag whose meaning and value class are known.
 STRICT_BINARIES = frozenset({"hydra", "sqlmap", "masscan", "ping",
                               "traceroute", "arp-scan", "httpx", "dirsearch",
-                              "wfuzz", "wpscan", "sslyze"})
+                              "wfuzz", "wpscan", "sslyze", "crunch"})
 BOOLEAN_FLAGS = {
     "hydra": ("-q", "-f", "-F", "-u", "-I", "-v", "-4", "-6", "-h", "-V"),
     # `--level`/`--risk`/`--threads` are values, not booleans, and `-v` takes a
@@ -608,6 +628,9 @@ BOOLEAN_FLAGS = {
     "sslyze": ("--regular", "--slow_target", "--offline",
                "--print_out_json", "--print_out_txt", "-h", "--help",
                "--version"),
+    # crunch's -p (permutations, size! lines) and -r (resume) stay undeclared
+    # because neither has arithmetic this wrapper would trust.
+    "crunch": ("-e", "-i", "-t", "-h", "--help", "-v", "--version"),
 }
 # `-h`/`--version` are the only flags that may stand in place of a target: an
 # argv that is nothing but a report request asks the installed version what it
@@ -624,7 +647,9 @@ def PERMITTED_FLAGS(binary):
     return frozenset(permitted)
 # Positional arguments that are not targets: searchsploit takes search terms,
 # gobuster takes a mode word, nc takes a port number after the host.
-FREE_POSITIONALS = frozenset({"searchsploit"})
+# crunch takes its lengths and its charset as positionals; none of them is
+# a destination, and the arithmetic below reads them.
+FREE_POSITIONALS = frozenset({"searchsploit", "crunch"})
 SUBCOMMAND_WORDS = {
     "gobuster": frozenset({"dir", "dns", "fuzz", "vhost", "s3", "tftp"}),
     # hydra names the service as a positional word after the target. Only the
@@ -1350,6 +1375,43 @@ def _check_output_root():
             raise PolicyError("output root %s must be mode 0700" % root)
 
 
+def _crunch_line_count(argv):
+    """Upper bound on the lines crunch will emit, or None if it cannot be told.
+
+    Refusing on None is the point: a request whose arithmetic the wrapper cannot
+    work out is a request it cannot bound, and guessing is not a licence.
+    """
+    items = list(_iter_items(argv))
+    positionals = [name for kind, name, _ in items if kind == "bare"]
+    if len(positionals) < 2:
+        return None
+    try:
+        low, high = int(positionals[0]), int(positionals[1])
+    except ValueError:
+        return None
+    if low < 1 or high < low or high > 64:
+        return None
+    charset = next((token for token in positionals[2:] if not token.isdigit()),
+                   None)
+    size = CRUNCH_DEFAULT_CHARSET_SIZE
+    if charset is not None:
+        size = CRUNCH_CHARSET_SIZES.get(charset.lower(), len(set(charset)))
+        if not size:
+            return None
+    template = next((value for kind, name, value in items
+                     if kind == "value" and name == "-t"), None)
+    if template is None:
+        total = 0
+        for length in range(low, high + 1):
+            total += size ** length
+            if total > MAX_GENERATED_LINES:
+                return total
+        return total
+    if not low <= len(template) <= high:
+        return None
+    return size ** len(CRUNCH_PLACEHOLDER_RE.findall(template))
+
+
 def classify(argv):
     _check_control_characters(argv)
     binary = argv[0]
@@ -1387,6 +1449,17 @@ def classify(argv):
         if flag in flags:
             raise PolicyError(
                 "flag %s is not allowed; write targets directly" % flag)
+
+    if binary == "crunch":
+        lines = _crunch_line_count(argv)
+        if lines is None:
+            raise PolicyError(
+                "crunch request cannot be measured: it needs two lengths, and"
+                " a -t template whose own length is between them")
+        if lines > MAX_GENERATED_LINES:
+            raise PolicyError(
+                "crunch would generate %d lines, over the limit of %d"
+                % (lines, MAX_GENERATED_LINES))
 
     if binary in STRICT_BINARIES:
         # The tables above name escapes that have been found. This one is the
@@ -1519,6 +1592,27 @@ def _stop_process(process):
         pass                     # already gone; the bounded wait below decides
 
 
+def _child_limits():
+    """Cap the size of any file the child may write, whatever its flags do.
+
+    `crunch -p`, a gzip pass, or a flag added in a release this host has not
+    audited are all unreachable as disk hazards by arithmetic, but they cannot
+    outrun an rlimit the kernel enforces for them.
+    """
+    try:
+        import resource
+    except ImportError:
+        return None                      # the host runs the test suite; the
+    except Exception:                    # VM is the only place this executes
+        return None
+
+    def apply():
+        resource.setrlimit(resource.RLIMIT_FSIZE,
+                           (MAX_CHILD_FILE_BYTES, MAX_CHILD_FILE_BYTES))
+
+    return apply
+
+
 def run_step(argv, timeout):
     started = time.monotonic()
     _check_output_root()
@@ -1535,6 +1629,9 @@ def run_step(argv, timeout):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            # Only safe because the wrapper is single-threaded until this call
+            # returns; preexec_fn runs between fork and exec in the child.
+            preexec_fn=_child_limits(),
         )
     except OSError as exc:
         raise PolicyError("could not start %s: %s" % (argv[0], exc)) from exc

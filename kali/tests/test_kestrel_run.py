@@ -2293,3 +2293,132 @@ class IntrusiveAdditionsTests(TempOutputRoot):
         ):
             with self.subTest(argv=" ".join(argv)):
                 self.denied(argv)
+
+
+class CrunchTests(TempOutputRoot):
+    """Wordlist generation is bounded arithmetically before the child runs.
+
+    The hazard is not escape, it is disk: `crunch 6 12 -t user%%` emits billions
+    of lines, and the 600 s step cap kills the process only after the output has
+    filled the VM. So the wrapper computes an upper bound and refuses first.
+    Where the bound cannot be worked out at all, the request is refused too --
+    guessing the arithmetic is not a licence to run it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.scope = kr.load_scope(write_scope(self.temp.name))
+
+    def validate(self, argv):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], self.scope)
+
+    def denied(self, argv):
+        with self.assertRaises(kr.PolicyError) as caught:
+            self.validate(argv)
+        return str(caught.exception)
+
+    def test_crunch_is_permitted_locally_at_recon_tier(self):
+        self.assertEqual(kr.classify(["crunch", "2", "2", "digits"]), "recon")
+
+    def test_it_needs_no_target(self):
+        risk, targets = self.validate(["crunch", "4", "4", "digits",
+                                       "-o", "w.txt"])
+        self.assertEqual(risk, "recon")
+        self.assertEqual(targets, [])
+
+    def test_a_small_generation_passes(self):
+        for argv in (
+            ["crunch", "4", "4", "digits"],
+            ["crunch", "6", "6", "digits"],
+            ["crunch", "1", "3", "lowercase"],
+            ["crunch", "8", "8", "-t", "passwo%%"],
+        ):
+            with self.subTest(argv=" ".join(argv)):
+                self.validate(argv)
+
+    def test_a_generation_that_would_fill_the_disk_is_refused_with_numbers(self):
+        for argv in (
+            ["crunch", "6", "12"],
+            ["crunch", "8", "8"],
+            ["crunch", "5", "5", "lowercase"],
+        ):
+            with self.subTest(argv=" ".join(argv)):
+                reason = self.denied(argv)
+                self.assertIn("crunch", reason)
+                self.assertIn(str(kr.MAX_GENERATED_LINES), reason)
+
+    def test_the_template_counted_is_placeholders_not_length(self):
+        # A six-character template with two placeholder positions is 95^2, not
+        # 95^6 -- refusing this would refuse every realistic targeted list.
+        self.validate(["crunch", "6", "6", "-t", "user%%"])
+        self.assertIn("crunch", self.denied(
+            ["crunch", "8", "8", "-t", "%%%%%%%%"]))
+
+    def test_a_template_length_outside_the_requested_range_is_refused(self):
+        # crunch only accepts a template whose length lies within min..max; an
+        # argument set it would reject cannot be measured, so it is refused.
+        self.assertIn("crunch", self.denied(
+            ["crunch", "6", "6", "-t", "user%%secret%%word"]))
+
+    def test_an_alpha_placeholder_is_refused_by_the_host_shape_rule(self):
+        # crunch's `@` is its alphanumeric placeholder, and a template that
+        # fullmatches the host-shaped pattern with an `@` in it is refused
+        # because `text` is deliberately outside STRUCTURED_CLASSES: the loosest
+        # licence cannot vouch for something that reads as a hostname. The
+        # other three placeholders work, so this costs a spelling, not a tool.
+        self.assertIn("looks like a host", self.denied(
+            ["crunch", "6", "6", "-t", "user@@"]))
+        # Each template is six characters, because crunch requires the
+        # template's own length to fall inside the requested range.
+        for template in ("user%%", "user__", "user^^", "pa%%_d"):
+            with self.subTest(template=template):
+                self.validate(["crunch", "6", "6", "-t", template])
+
+    def test_an_unbounded_or_unreadable_request_is_refused(self):
+        for argv in (
+            ["crunch"],
+            ["crunch", "abc", "def"],
+            ["crunch", "12", "6"],
+        ):
+            with self.subTest(argv=" ".join(argv) or "(bare)"):
+                self.assertIn("crunch", self.denied(argv))
+
+    def test_output_is_confined_and_file_input_is_refused(self):
+        base = ["crunch", "4", "4", "digits"]
+        self.validate(base + ["-o", "words.txt"])
+        # The confinement message names the path, not the flag: what an
+        # operator needs is the location that was refused.
+        self.assertIn("/etc/cron.d/x",
+                      self.denied(base + ["-o", "/etc/cron.d/x"]))
+        self.assertIn("-f is not allowed",
+                      self.denied(base + ["-f", "/etc/passwd"]))
+        # `-p` emits size! lines and has no arithmetic the wrapper would trust,
+        # so it stays undeclared and the refusal names it.
+        self.assertIn("-p is not permitted", self.denied(base + ["-p"]))
+        self.assertIn("control characters",
+                      self.denied(["crunch", "4", "4", "abc;id"]))
+
+
+class ChildFileLimitTests(unittest.TestCase):
+    """The disk guard that does not have to understand any tool's flags."""
+
+    @unittest.skipUnless(__import__("os").name == "posix",
+                         "RLIMIT_FSIZE does not exist on the Windows host; the "
+                         "child that gets it is only ever started in the VM")
+    def test_the_applied_limit_is_the_configured_one(self):
+        import resource
+        apply = kr._child_limits()
+        self.assertIsNotNone(apply)
+        apply()
+        self.assertEqual(
+            resource.getrlimit(resource.RLIMIT_FSIZE),
+            (kr.MAX_CHILD_FILE_BYTES, kr.MAX_CHILD_FILE_BYTES))
+
+    def test_the_spawn_passes_the_limit(self):
+        # Asserted from the source, the way the installer and README assets are
+        # asserted: the child this line governs only ever exists in the VM, and
+        # stubbing Popen just to read one kwarg back would test the stub.
+        source = Path(__file__).resolve().parents[1] / "kestrel_run.py"
+        body = source.read_text(encoding="utf-8").split("def run_step(")[1]
+        run_step = body.split("\ndef ")[0]
+        self.assertIn("preexec_fn=_child_limits(),", run_step)
