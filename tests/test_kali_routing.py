@@ -82,6 +82,31 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("kali_task", agent.TOOL_DESCRIPTIONS)
         self.assertLess(len(prompt) / 4, 4100)
 
+    def test_security_turn_states_kali_task_is_the_shell(self):
+        """The model must not claim it has no shell for security work.
+
+        "Run an nmap scan on 127.0.0.1" once drew "no shell tool for it this
+        turn" while kali_task was exposed and policy-allowed: the tool list was
+        never the blocker, the wording was. The rule names the binaries so the
+        mapping from a tool request to kali_task is not left to inference.
+        """
+        with mock.patch.object(
+                agent.memory, "get_user_model_block", return_value=""):
+            prompt = agent._build_plan_prompt(
+                "run nmap on 192.168.56.10", "")
+        self.assertIn("MUST use kali_task", prompt)
+        self.assertIn("never say you lack a shell tool", prompt)
+        for binary in ("nmap", "masscan", "ffuf", "gobuster", "sqlmap"):
+            self.assertIn(binary, prompt)
+
+    def test_normal_turn_never_mentions_the_kali_shell(self):
+        """The mandate belongs to the security route, not the static prompt."""
+        with mock.patch.object(
+                agent.memory, "get_user_model_block", return_value=""):
+            prompt = agent._build_plan_prompt("hello there", "")
+        self.assertNotIn("MUST use kali_task", prompt)
+        self.assertNotIn("lack a shell tool", prompt)
+
     def test_security_prompt_mentions_the_task_tool(self):
         with mock.patch.object(
                 agent.memory, "get_user_model_block", return_value=""):

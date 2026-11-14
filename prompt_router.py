@@ -41,9 +41,15 @@ RULES = {
     ),
     "security": (
         "Security lab: use kali_scope to read the allowed targets and "
-        "kali_task to run an approved sequence. Load the core_tools manual "
-        "first. Never target anything outside the returned scope; never use "
-        "a shell string."
+        "kali_task to run an approved sequence. When the user asks for "
+        "security tooling -- nmap, masscan, whatweb, nikto, nuclei, ffuf, "
+        "gobuster, feroxbuster, sqlmap, hydra or any other Kali binary -- "
+        "you MUST use kali_task: it is the shell into the Kali VM, so never "
+        "say you lack a shell tool and never offer a local substitute. Load "
+        "the core_tools manual first. A refusal comes from the wrapper's "
+        "scope check or the human's approval, not from your tool list. Never "
+        "target anything outside the returned scope; never pass a shell "
+        "string such as bash -c."
     ),
 }
 
