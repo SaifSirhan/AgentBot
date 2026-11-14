@@ -932,6 +932,13 @@ class AgentWorker(QObject):
         self._thread.start()
 
     def _run(self):
+        arm_turn_watchdog()
+        try:
+            self._run_turn()
+        finally:
+            end_turn_watchdog()
+
+    def _run_turn(self):
         log_capture = io.StringIO()
         try:
             agent = get_agent()
@@ -7142,6 +7149,38 @@ def _append_crash_log(text: str) -> None:
             handle.flush()
     except Exception:
         pass
+
+
+# A turn still running after this much wall time earns a stack snapshot. It is
+# a threshold, not a hang detector: a legitimate turn can reach
+# MAX_STEPS_PER_TURN (30) provider calls of up to LLM_TIMEOUT (120 s) each, so
+# no budget is both useful and impossible to cross honestly. The dump costs one
+# all-thread snapshot in crash.log, which is also the answer to "why is this
+# 10-minute turn taking ten minutes".
+TURN_WATCHDOG_SECONDS = 600.0
+
+
+def arm_turn_watchdog(timeout=TURN_WATCHDOG_SECONDS):
+    """Dump every thread's stack to the crash log if the turn never returns.
+
+    `dump_traceback_later` takes no `all_threads` argument because it always
+    dumps all of them, which is the whole point: the thread that is stuck is
+    never the one doing the dumping. The dump goes to the crash log, not
+    stderr, because a windowed `pythonw` process has no stderr anyone reads --
+    that is exactly why the hang this covers left no evidence behind. `repeat`
+    stays off so a long turn costs the log one snapshot, not one per interval.
+    Each snapshot is headed `Timeout (<budget>!)` followed by one stack per
+    thread, which is how to tell it apart from a fatal-signal dump below it.
+    """
+    handle = _crash_log_handle
+    if handle is None:
+        return
+    faulthandler.dump_traceback_later(timeout, repeat=False, file=handle)
+
+
+def end_turn_watchdog():
+    """Disarm the per-turn dump so an idle app never writes one."""
+    faulthandler.cancel_dump_traceback_later()
 
 
 def install_crash_logging() -> Path | None:
