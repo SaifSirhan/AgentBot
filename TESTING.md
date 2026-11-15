@@ -40,9 +40,25 @@ project modules under test become importable.
 
 | | |
 |---|---|
-| Tests | **1471** |
-| Duration | ~85 s |
-| Outcome | `Ran 1471 tests in ...` then `OK`, exit code 0 |
+| Tests | **1753** |
+| Duration | ~85 s warm, ~160 s cold |
+| Outcome | `Ran 1753 tests in ...` then `OK`, exit code 0 |
+
+The Kali side is a second, separate suite (it tests the wrapper that runs on the
+VM, and imports nothing from `agent.py`):
+
+```
+python -m unittest discover -s kali/tests
+```
+
+| | |
+|---|---|
+| Tests | **229**, 3 skipped |
+| Duration | ~6 s |
+| Outcome | `Ran 229 tests in ...` then `OK (skipped=3)`, exit code 0 |
+
+The three skips are cases that need the live VM, and one that needs POSIX
+`resource(3)` for the child file-size limit; they run in the VM, not on Windows.
 
 The voice/wake/TTS modules open real microphones and audio devices, so the run
 prints non-fatal lines such as `[voice] mic open failed (1/2): device busy` and

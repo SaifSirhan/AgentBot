@@ -6105,8 +6105,12 @@ def _build_tool_registry():
             description=(
                 "Run an approved security task in the Kali lab. Input is an "
                 "object with objective and steps[] (up to %d steps, each "
-                "argv[], optional timeout %ds)." % (KALI_MAX_STEPS,
-                                                    KALI_MAX_STEP_TIMEOUT)),
+                "argv[], optional timeout %ds, %ds for the whole task). The "
+                "wrapper refuses targets outside the scope and flags it has "
+                "not declared; intrusive and credential work asks the human "
+                "twice."
+                % (KALI_MAX_STEPS, KALI_MAX_STEP_TIMEOUT,
+                   KALI_MAX_TOTAL_TIMEOUT)),
             input_schema={
                 "type": "object",
                 "properties": {

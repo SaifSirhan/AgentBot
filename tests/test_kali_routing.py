@@ -176,12 +176,45 @@ class PromptToolDriftTests(unittest.TestCase):
                          prompt_catalog.DESCRIPTIONS["kali_task"]))
         found = []
         for run in re.findall(
-                r"([a-z][a-z0-9_-]+(?:\s*,\s*[a-z][a-z0-9_-]+){2,})"
+                r"([A-Za-z][A-Za-z0-9_-]*(?:\s*,\s*[A-Za-z][A-Za-z0-9_-]*){2,})"
                 r"\s+or any other Kali binary", text):
             found.extend(token.strip() for token in run.split(","))
         self.assertGreaterEqual(len(found), 8,
                                 "the security rule no longer enumerates tools")
         return found
+
+    def test_every_permitted_binary_is_advertised(self):
+        # The other direction from the drift guard: a binary the wrapper starts
+        # permitting is invisible to the model until the rule names it, and an
+        # invisible tool is a tool the model will say it does not have.
+        wrapper = self.load_wrapper()
+        advertised = set(self.advertised_binaries(wrapper))
+        missing = (wrapper.RECON | wrapper.INTRUSIVE | wrapper.CREDENTIAL
+                   | wrapper.LOCAL_SAFE) - advertised
+        self.assertEqual(missing, set(),
+                         "the security rule never names %s" % sorted(missing))
+
+    def test_the_security_rule_states_the_tier_approval_facts(self):
+        """Recon asks once, intrusive and credential ask twice -- in the rule.
+
+        Asserted on the rule text itself, not on the rendered prompt: a security
+        turn also carries the tool descriptions, and a fact checked against the
+        merged text can be satisfied by either carrier. That is how an earlier
+        version of this test survived deleting the sentence from the rule.
+        """
+        rule = prompt_router.RULES["security"]
+        self.assertIn("recon asks the human to approve once", rule)
+        self.assertIn("intrusive and credential ask twice", rule)
+        self.assertIn("never promise", rule)
+
+    def test_kali_task_states_the_caps_the_schema_enforces(self):
+        # The nested maxItems is a wire detail; the prose is where the model
+        # learns how long a plan may be, and every cap it is told about is one
+        # it would otherwise exceed and get refused for.
+        description = agent.TOOL_REGISTRY.get("kali_task").description
+        for constant in (agent.KALI_MAX_STEPS, agent.KALI_MAX_STEP_TIMEOUT,
+                         agent.KALI_MAX_TOTAL_TIMEOUT):
+            self.assertIn(str(constant), description)
 
     def test_every_advertised_binary_is_permitted_not_denied(self):
         wrapper = self.load_wrapper()

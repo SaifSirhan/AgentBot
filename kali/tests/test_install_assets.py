@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import egress_rules  # noqa: E402
+import kestrel_run as kr  # noqa: E402
 
 # Task 1 shipped these paths as constants; the installer must create exactly
 # them, with the owner and mode the wrapper's own checks demand.
@@ -622,6 +623,51 @@ class EgressRuleTests(unittest.TestCase):
 
         text = egress_rules.ruleset(scope, uid=1002, resolver=resolver)
         self.assertIn("elements = { 10.0.0.3, 10.0.0.20 }", text)
+
+
+class ReadmeTierTableTests(unittest.TestCase):
+    """The operator guide lists what the wrapper permits, by tier -- or it lies.
+
+    The table is parsed out of section 1 and compared against the wrapper's own
+    frozensets, because the failure this guards is the one already caught twice:
+    prose that names a tool policy has never heard of, or a tool that shipped
+    without the prose ever mentioning it.
+    """
+
+    TIERS = ("recon", "intrusive", "credential")
+
+    def table(self):
+        """`{tier} (approval wording): name, name, ...` -> tier -> (head, tail)."""
+        rows = {}
+        for line in read("README.md").splitlines():
+            head, separator, tail = line.strip().partition(": ")
+            if not separator:
+                continue
+            match = re.match(r"^- (recon|intrusive|credential)\b", head)
+            if match:
+                rows[match.group(1)] = (head, tail)
+        self.assertEqual(sorted(rows), sorted(self.TIERS),
+                         "section 1 lost a tier row")
+        return rows
+
+    def names(self, tier):
+        return set(re.findall(r"[A-Za-z][A-Za-z0-9_-]*", self.table()[tier][1]))
+
+    def test_each_tier_row_is_exactly_the_wrappers_table(self):
+        self.assertEqual(self.names("recon"), set(kr.RECON))
+        self.assertEqual(self.names("intrusive"), set(kr.INTRUSIVE))
+        self.assertEqual(self.names("credential"), set(kr.CREDENTIAL))
+
+    def test_the_rows_say_which_tiers_ask_twice(self):
+        rows = self.table()
+        self.assertIn("once", rows["recon"][0])
+        for tier in ("intrusive", "credential"):
+            self.assertIn("twice", rows[tier][0])
+
+    def test_the_table_points_at_inventory_for_presence(self):
+        # A tool that is permitted but not installed is a refusal the operator
+        # would otherwise debug by reading this table.
+        self.assertIn("inventory", prose(section(1)))
 
 
 if __name__ == "__main__":

@@ -85,6 +85,24 @@ Masscan needs raw sockets; `install_kestrel_run.sh` grants only `cap_net_raw`,
 not `cap_net_admin`. Nmap runs unprivileged, so phase 1 uses `-sT`/`-sV`;
 `-sS` and `-O` pass policy but fail without root.
 
+The wrapper permits these binaries, by tier. The tier sets the approval dialog,
+not the tool's ambition: recon is approved once, intrusive and credential are
+approved twice, and credential is the tier where a successful step means a lab
+service accepted a guessed password.
+
+- recon (approved once): nmap, whatweb, dig, host, whois, curl, openssl, searchsploit, ping, traceroute, arp-scan, httpx, crunch
+- intrusive (approved twice): masscan, ffuf, gobuster, feroxbuster, nuclei, nikto, nc, dirsearch, wfuzz, wpscan, sslyze
+- credential (approved twice; success means a lab login worked): hydra, sqlmap, theHarvester
+
+Two things that table cannot say. A permitted binary that is not installed on
+the VM is a refusal rather than a bug, and only the VM knows what is installed:
+`kali_scope` includes the answer of the wrapper's `inventory` mode (step 2 and
+step 7), so presence comes from there and policy from this list. And the tier
+above is the *floor*: some flags promote a step -- `curl` with a request body,
+`nmap --script` -- and any flag the wrapper has not declared for a binary is
+refused before the child starts, so a newly released option is a refusal here
+rather than a surprise later.
+
 ## 2. Install the wrapper
 
 Copy the whole `kali/` directory from the Kestrel checkout to the VM — the
@@ -353,6 +371,9 @@ step 4 first:
   `getcap "$(command -v masscan)"` and re-run the installer; only `cap_net_raw`
   is granted, so a masscan build that also needs `cap_net_admin` will fail here.
 - Try `nmap -sV 8.8.8.8` and `bash -c "id"`; both are refused before execution.
+- Those three approvals cover every tier the wrapper can reach: `nmap` is recon
+  (one dialog), `masscan` is intrusive (two), `theHarvester` is credential (two,
+  and gated on the egress rule). No permitted step classifies as exploitation.
 - Verify the egress rule from the VM console: `nft list table inet kestrel_egress`
   prints the sets the scope produced, and `su kestrel -s /bin/sh -c
   'curl -m 5 -so /dev/null https://example.com'; echo $?` must fail (7 could not
