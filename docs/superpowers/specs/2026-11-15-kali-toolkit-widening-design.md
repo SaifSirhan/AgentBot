@@ -99,10 +99,10 @@ widen what any other binary may do.
 | Binary | Tier | Purpose | Specific refusals |
 |---|---|---|---|
 | `httpx` | 0 recon | probe/listen for HTTP services, tech detect | `-l` list input (target smuggling), `-listener` (binds a socket), `-proxy`, `-res-x` |
-| `arp-scan` | 0 recon | own-LAN host discovery | `-r` retry-forever, `-t` read timeout, file flags |
+| `arp-scan` | 0 recon | own-LAN host discovery | `-l`/`--localnet` (the interface chooses the segment), `-b`/`--BRIDGE`, `-O`; `-t`/`-r` are declared as numbers, so a `device:file` spelling cannot pass them |
 | `traceroute`, `ping` | 0 recon | reachability inside scope | `-g`/`-F` loose source route, `-f` fragmentation flood |
 | `dirb` | 1 intrusive | wordlist dir brute force | no `-o` outside `OUTPUT_ROOT` |
-| `dirsearch` | 1 intrusive | content discovery | `--proxy`, `-r` recursive-reload, `--clear-screen` |
+| `dirsearch` | 1 intrusive | content discovery | `--proxy`, `--clear-screen`. `-r` is **permitted**, contrary to the first draft of this row: in dirsearch it recurses into directories the approved target itself serves, so it cannot widen the destination set, and the step timeout bounds the depth |
 | `wfuzz` | 1 intrusive | generic fuzzer | `--cmd`/`--follow`/`-p` proxy/`--pickle`/`--file` write paths |
 | `wpscan` | 1 intrusive | CMS enumeration | `--proxy`, `--random-useragent` |
 | `sslyze` | 1 intrusive | TLS posture of lab endpoints | `--hashir`/`--starttls`/file writes |

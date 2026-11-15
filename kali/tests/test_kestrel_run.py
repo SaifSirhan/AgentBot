@@ -1955,11 +1955,17 @@ class StrictPermitTests(TempOutputRoot):
 
     def test_module_loading_flags_are_refused_as_exec(self):
         # Both of these make the tool import Python code from disk: an exec
-        # primitive wearing a scanning flag.
-        self.denied(["sqlmap", "-u", "http://app.lab.local/i.php?id=1",
-                     "--tamper", "space2comment"])
-        self.denied(["sqlmap", "-u", "http://app.lab.local/i.php?id=1",
-                     "--preprocessor", "x.py"])
+        # primitive wearing a scanning flag. Asserted as the deny table's own
+        # refusal, because sqlmap is strict and absence would refuse them too --
+        # a test that accepted either message would keep passing after someone
+        # deleted the entry that says *why* these are never coming back.
+        for flag in ("--tamper", "--preprocessor"):
+            with self.subTest(flag=flag):
+                reason = self.denied(["sqlmap", "-u",
+                                      "http://app.lab.local/i.php?id=1",
+                                      flag, "space2comment"])
+                self.assertIn("%s is not allowed" % flag, reason)
+                self.assertNotIn("not permitted", reason)
 
     def test_a_search_engine_is_not_a_target_source(self):
         self.denied(["sqlmap", "-g", "inurl:items.php?id="])
@@ -2228,6 +2234,25 @@ class IntrusiveAdditionsTests(TempOutputRoot):
                                       "http://app.lab.local/"])
                 self.assertIn("--flag-nobody-declared", reason)
                 self.assertIn(binary, reason)
+
+    def test_dirsearch_recursion_is_permitted_though_the_spec_listed_it_as_refused(self):
+        # Spec 6 named `-r` a refusal. It is not one in dirsearch: `-r` recurses
+        # into directories *this approved target* serves, so it cannot widen the
+        # destination set, and the step timeout bounds the depth. The options the
+        # spec was reaching for stay undeclared. The spec is corrected alongside
+        # this test rather than left disagreeing with the code.
+        self.validate(["dirsearch", "-u", "http://app.lab.local/", "-r"])
+        # Which table answers is pinned on purpose. `--proxy` is refused by name
+        # from the deny table and `--clear-screen` only by absence from the permit
+        # list; under the permit list the first refusal would survive deleting the
+        # deny entry with a different message, so asserting the message is what
+        # keeps the entry from silently becoming dead config.
+        reason = self.denied(["dirsearch", "-u", "http://app.lab.local/",
+                              "--proxy", "http://192.168.56.1:8080"])
+        self.assertIn("--proxy is not allowed", reason)
+        reason = self.denied(["dirsearch", "-u", "http://app.lab.local/",
+                              "--clear-screen"])
+        self.assertIn("--clear-screen is not permitted for dirsearch", reason)
 
     def test_a_wordlist_scanner_is_refused_because_paths_hide_in_its_value(self):
         # `wfuzz -z file,/etc/shadow` reads a path through a value the walker
