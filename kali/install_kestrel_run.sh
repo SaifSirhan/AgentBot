@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Every step below applies root-owned attributes, so a half-privileged run cannot
+# be "mostly fine": it would install a wrapper the account cannot execute and
+# leave the marker files that mean enforcement pointing at nothing.
+if [ "$(id -u)" -ne 0 ]; then
+  echo "refusing: this installer must run as root" >&2
+  exit 1
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 install -o root -g root -m 0755 "$HERE/kestrel_run.py" /usr/local/bin/kestrel-run
@@ -9,6 +17,25 @@ install -d -o root -g root -m 0755 /etc/kestrel
 if [ ! -e /etc/kestrel/scope.json ]; then
   install -o root -g root -m 0644 "$HERE/scope.example.json" /etc/kestrel/scope.json
 fi
+
+# T8: an egress rule is the only control that can confine a child which dials
+# hosts argv never names (theHarvester queries its providers itself), so the
+# wrapper refuses those binaries until /etc/kestrel/egress.conf exists. The rule
+# is generated from the scope file, resolved now, and loaded now: writing the
+# marker without loading the rule would claim a control that is not in place.
+if ! command -v nft >/dev/null 2>&1; then
+  echo "refusing: nft is required to confine the kestrel account's egress" >&2
+  exit 1
+fi
+if [ -L /etc/kestrel/egress.conf ]; then
+  echo "refusing: /etc/kestrel/egress.conf is a symlink" >&2
+  exit 1
+fi
+python3 "$HERE/egress_rules.py" /etc/kestrel/scope.json \
+  "$(id -u kestrel)" > /etc/kestrel/egress.conf.tmp
+mv /etc/kestrel/egress.conf.tmp /etc/kestrel/egress.conf
+chmod 0644 /etc/kestrel/egress.conf
+nft -f /etc/kestrel/egress.conf
 
 install -d -o kestrel -g kestrel -m 0700 /var/log/kestrel
 # T2-R1: touch, chown and chmod all follow a symlink, so a planted link would
@@ -62,6 +89,7 @@ fi
 install -o root -g root -m 0644 "$HERE/logrotate.kestrel" \
   /etc/logrotate.d/kestrel
 
-echo "Installed /usr/local/bin/kestrel-run"
-echo "Edit /etc/kestrel/scope.json, then install the forced command in"
+echo "Installed /usr/local/bin/kestrel-run and loaded /etc/kestrel/egress.conf"
+echo "Edit /etc/kestrel/scope.json, then re-run this installer to apply an"
+echo "edited egress list, and install the forced command in"
 echo "~kestrel/.ssh/authorized_keys. See kali/README.md."

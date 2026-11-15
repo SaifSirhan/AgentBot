@@ -33,6 +33,11 @@ MAX_STREAM_BYTES = 256 * 1024
 # part that does not have to, which is why both exist.
 MAX_CHILD_FILE_BYTES = 32 * 1024 * 1024
 MAX_GENERATED_LINES = 5_000_000
+# theHarvester's `-l 0` means "page until the provider runs out", which is not a
+# limit at all, so the wrapper puts one on it. 5,000 records per source is far
+# past what a lab enumeration reads, and the cap is what keeps an approval for
+# one domain from turning into an hour of requests to a third party.
+MAX_HARVEST_RESULTS = 5000
 CRUNCH_DEFAULT_CHARSET_SIZE = 95
 CRUNCH_CHARSET_SIZES = {"digits": 10, "lowercase": 26, "lalpha": 26,
                         "uppercase": 26, "ualpha": 26, "letters": 52,
@@ -58,7 +63,14 @@ INTRUSIVE = frozenset({"ffuf", "gobuster", "feroxbuster", "nuclei",
 LOCAL_SAFE = frozenset({"searchsploit", "openssl", "crunch"})
 # Credential-tier work is the one place where a successful step means someone
 # else's authentication failed, so it is also the tier that asks you twice.
-CREDENTIAL = frozenset({"hydra", "sqlmap"})
+# theHarvester joins it for a different reason: it is OSINT, but it dials
+# third-party providers the scope cannot see, so it needs both the higher gate
+# and the egress rule below.
+CREDENTIAL = frozenset({"hydra", "sqlmap", "theHarvester"})
+# Binaries whose child contacts destinations argv never names. They are refused
+# until the installer's egress rule exists, because short of that rule the only
+# thing confining them would be a human reading a flag list.
+EGRESS_GATED = frozenset({"theHarvester"})
 DENIED_BINARIES = frozenset({"bash", "sh", "zsh", "dash", "python3", "python",
                              "perl", "ruby", "rm", "dd", "mkfs", "mount",
                              "systemctl", "crontab"})
@@ -281,6 +293,11 @@ VALUE_FLAGS = {
                "--output", "--format", "--wordlist", "--max-id"),
     "sslyze": ("--retries", "--json_out", "--conn_retries", "--timeout"),
     "crunch": ("-t", "-o", "-b", "-s", "-u"),
+    # A destination flag still has to be declared here (`-d`), and so does the
+    # output name (`-f`): the permit list is built from these tables.
+    "theHarvester": ("-d", "--domain", "-b", "--source", "-l", "--limit",
+                     "-S", "--start", "-j", "--source-workers",
+                     "-f", "--filename"),
     "sqlmap": ("-u", "--url", "--data", "--data-ascii", "--data-binary",
                "--data-urlencode", "--method", "--cookie", "--user-agent",
                "--auth", "--auth-type", "--headers", "-p", "--dbms",
@@ -336,6 +353,9 @@ PATH_FLAGS = {
     "sslyze": ("--json_out",),
     "crunch": ("-o",),
     "sqlmap": ("--output-dir",),
+    # theHarvester writes NAME.json, NAME.xml and NAME.jsonl from one value, so
+    # the name is a path and gets confined like any other output.
+    "theHarvester": ("-f", "--filename"),
 }
 # R10: these flags carry the destination itself. Their values must always
 # parse as a target and be scope-checked; they can never be licensed as a
@@ -352,6 +372,10 @@ DESTINATION_FLAGS = {
     "dirsearch": ("-u", "--url"),
     "wfuzz": ("-u", "--url"),
     "wpscan": ("--url",),
+    # theHarvester's `-d` is the target of the search, so it is scope-governed
+    # like any other destination. What it is *not* is the whole set of hosts the
+    # child will contact -- see EGRESS_GATED.
+    "theHarvester": ("-d", "--domain"),
 }
 # R4: these values are script names / script arguments, so they are not
 # parsed as targets; classify checks the names and target_tokens checks the
@@ -490,6 +514,13 @@ NON_DESTINATION_VALUES = {
     "sslyze": {"--retries": "number", "--conn_retries": "number",
                "--timeout": "number"},
     "crunch": {"-t": "text", "-b": "number", "-s": "number", "-u": "number"},
+    # Source names are identifiers (`crtsh`, `bing`), never hosts: a value that
+    # parses as a destination is scope-checked instead of licensed, so `-b
+    # crt.sh` cannot point the child at a host the scope never approved.
+    "theHarvester": {"-b": "wordset", "--source": "wordset",
+                     "-l": "number", "--limit": "number",
+                     "-S": "number", "--start": "number",
+                     "-j": "number", "--source-workers": "number"},
     # hydra: `-e` is the empty/salt guess spec (ns, n or s), so a word and never
     # a path; `-s` is a port; the rest are counts. Credentials use the existing
     # class, which already refuses `/` and `@`.
@@ -594,7 +625,8 @@ NO_VALUE_FLAGS = {
 # entry below is a flag whose meaning and value class are known.
 STRICT_BINARIES = frozenset({"hydra", "sqlmap", "masscan", "ping",
                               "traceroute", "arp-scan", "httpx", "dirsearch",
-                              "wfuzz", "wpscan", "sslyze", "crunch"})
+                              "wfuzz", "wpscan", "sslyze", "crunch",
+                              "theHarvester"})
 BOOLEAN_FLAGS = {
     "hydra": ("-q", "-f", "-F", "-u", "-I", "-v", "-4", "-6", "-h", "-V"),
     # `--level`/`--risk`/`--threads` are values, not booleans, and `-v` takes a
@@ -631,6 +663,13 @@ BOOLEAN_FLAGS = {
     # crunch's -p (permutations, size! lines) and -r (resume) stay undeclared
     # because neither has arithmetic this wrapper would trust.
     "crunch": ("-e", "-i", "-t", "-h", "--help", "-v", "--version"),
+    # Everything else theHarvester accepts is refused by absence, which is what
+    # the permit list is for: `-p` routes the run through a proxy, `-s` and
+    # `--routeviews` call keyed third-party APIs, `-r` and `--dns-resolvers` take
+    # resolver addresses out of argv, and `-a`, `-t`, `-c`, `-n`, `--screenshot`
+    # and the `--vhost*` family send requests to whatever the run happened to
+    # harvest -- a host nothing in argv ever named.
+    "theHarvester": ("-q", "--quiet", "-v", "--verbose"),
 }
 # `-h`/`--version` are the only flags that may stand in place of a target: an
 # argv that is nothing but a report request asks the installed version what it
@@ -696,6 +735,9 @@ class Scope:
     allow_public: bool
     networks: tuple
     domains: tuple
+    # The hosts a confined child may dial on its own. Empty for every binary but
+    # the EGRESS_GATED ones, whose destinations argv never names.
+    egress: tuple = ()
 
     def as_dict(self):
         return {
@@ -704,7 +746,16 @@ class Scope:
             "allow_public": self.allow_public,
             "networks": [str(network) for network in self.networks],
             "domains": list(self.domains),
+            "egress": list(self.egress),
         }
+
+
+# A scope `egress` entry is one bare hostname: no scheme, no path, no port, no
+# wildcard. The installer resolves these into an nftables set, so an entry that
+# means something else would make the firewall enforce something other than what
+# the operator wrote.
+EGRESS_HOSTNAME_RE = re.compile(
+    r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)(?:\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+")
 
 
 def load_scope(path):
@@ -736,11 +787,24 @@ def load_scope(path):
         )
     except ValueError as exc:
         raise PolicyError("scope contains an invalid network") from exc
+    egress = data.get("egress", [])
+    if not isinstance(egress, list):
+        raise PolicyError("scope egress must be a list of hostnames")
+    parsed_egress = []
+    for item in egress:
+        host = str(item).lower().rstrip(".")
+        if not EGRESS_HOSTNAME_RE.fullmatch(host):
+            raise PolicyError(
+                "scope egress entry %r is not a bare hostname, and the"
+                " installer builds the firewall rule straight from it" % item)
+        if host not in parsed_egress:
+            parsed_egress.append(host)
     return Scope(
         expires=expires,
         allow_public=data.get("allow_public") is True,
         networks=parsed_networks,
         domains=tuple(str(item).lower().rstrip(".") for item in domains),
+        egress=tuple(parsed_egress),
     )
 
 
@@ -1412,6 +1476,21 @@ def _crunch_line_count(argv):
     return size ** len(CRUNCH_PLACEHOLDER_RE.findall(template))
 
 
+def _check_harvest_limit(value):
+    """theHarvester's own "no limit" is not a limit the wrapper will honour.
+
+    Only a digit value is decided here. Anything else is still a flag value, and
+    the licence on `-l` sends it through the ordinary rules -- so `-l
+    192.168.56.9` surfaces an address in the target list a human approves
+    instead of being waved through as a count.
+    """
+    if value.isdigit() and not 1 <= int(value) <= MAX_HARVEST_RESULTS:
+        raise PolicyError(
+            "theHarvester -l must be a count between 1 and %d; %r asks a third"
+            " party for as much as it is willing to give"
+            % (MAX_HARVEST_RESULTS, value))
+
+
 def classify(argv):
     _check_control_characters(argv)
     binary = argv[0]
@@ -1460,6 +1539,21 @@ def classify(argv):
             raise PolicyError(
                 "crunch would generate %d lines, over the limit of %d"
                 % (lines, MAX_GENERATED_LINES))
+
+    if binary in EGRESS_GATED and not os.path.isfile(EGRESS_RULE):
+        # The scope confines the destinations argv names, and these children
+        # invent others. Until the VM itself confines the account there is no
+        # control to lean on, so the binary waits for the rule rather than
+        # running on the strength of a human approving a tier-2 step.
+        raise PolicyError(
+            "binary %s dials lookup providers that never appear in argv; it is"
+            " refused until the egress rule exists at %s"
+            % (binary, EGRESS_RULE))
+
+    if binary == "theHarvester":
+        for kind, name, value in items:
+            if kind == "value" and name in ("-l", "--limit"):
+                _check_harvest_limit(value)
 
     if binary in STRICT_BINARIES:
         # The tables above name escapes that have been found. This one is the

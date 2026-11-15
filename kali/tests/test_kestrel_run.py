@@ -2422,3 +2422,149 @@ class ChildFileLimitTests(unittest.TestCase):
         body = source.read_text(encoding="utf-8").split("def run_step(")[1]
         run_step = body.split("\ndef ")[0]
         self.assertIn("preexec_fn=_child_limits(),", run_step)
+
+
+class ScopeEgressTests(unittest.TestCase):
+    """`egress` is the list the VM firewall is built from, so it must be exact.
+
+    The installer turns these names into an nftables set. A URL, a CIDR or a
+    wildcard in that list would make the generated rule mean something other
+    than "this hostname", so the wrapper refuses the scope file rather than let
+    the ambiguity reach a firewall it cannot re-read.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
+    def load(self, **overrides):
+        return kr.load_scope(write_scope(self.temp.name, **overrides))
+
+    def test_the_list_defaults_to_empty(self):
+        self.assertEqual(self.load().egress, ())
+
+    def test_names_are_kept_bare_and_lowercase(self):
+        scope = self.load(egress=["Crt.SH", "api.hackertarget.com"])
+        self.assertEqual(scope.egress, ("crt.sh", "api.hackertarget.com"))
+
+    def test_a_url_address_wildcard_or_blank_is_refused(self):
+        for value in ("https://crt.sh/", "192.168.56.0/24", "*.crt.sh",
+                      "crt.sh:443", "", "crt.sh/collect"):
+            with self.subTest(value=value):
+                with self.assertRaises(kr.PolicyError) as caught:
+                    self.load(egress=[value])
+                self.assertIn("egress", str(caught.exception))
+
+    def test_egress_must_be_a_list(self):
+        with self.assertRaises(kr.PolicyError):
+            self.load(egress="crt.sh")
+
+    def test_the_scope_report_carries_the_list(self):
+        scope = self.load(egress=["crt.sh"])
+        self.assertEqual(scope.as_dict()["egress"], ["crt.sh"])
+
+
+class HarvesterTests(TempOutputRoot):
+    """theHarvester runs only where the VM confines what it dials.
+
+    argv names one domain, but the child queries the lookup providers itself and
+    those destinations never appear in argv, so the scope layer cannot see them,
+    let alone confine them. The control that can is the installer's egress rule,
+    and until that rule exists the binary is refused outright rather than run on
+    the strength of a human approving a tier-2 step.
+    """
+
+    BASE = ["theHarvester", "-d", "lab.local", "-b", "crtsh"]
+
+    def setUp(self):
+        super().setUp()
+        self.scope = kr.load_scope(write_scope(self.temp.name))
+        self.egress = Path(self.temp.name) / "egress.conf"
+        self.egress.write_text("table inet kestrel_egress\n", encoding="utf-8")
+        saved = kr.EGRESS_RULE
+        kr.EGRESS_RULE = str(self.egress)
+        self.addCleanup(setattr, kr, "EGRESS_RULE", saved)
+
+    def validate(self, argv):
+        return kr.validate_steps([{"argv": argv, "timeout": 5}], self.scope)
+
+    def denied(self, argv):
+        with self.assertRaises(kr.PolicyError) as caught:
+            self.validate(argv)
+        return str(caught.exception)
+
+    def test_it_is_credential_tier_and_asks_twice(self):
+        self.assertEqual(kr.classify(self.BASE), "credential")
+        risk, targets = self.validate(self.BASE)
+        self.assertEqual(risk, "credential")
+        # The wrapper states the tier; the second dialog is kali_bus's rule about
+        # tiers >= 1, which tests/test_kali_flow.py proves through the real bus.
+        self.assertGreaterEqual(kr.TIERS[risk], 1)
+        self.assertEqual(targets, ["lab.local"])
+
+    def test_the_domain_it_searches_is_scope_checked(self):
+        self.assertIn("outside scope", self.denied(
+            ["theHarvester", "-d", "someone-elses-corp.com", "-b", "crtsh"]))
+
+    def test_it_refuses_until_the_egress_rule_is_installed(self):
+        self.egress.unlink()
+        reason = self.denied(self.BASE)
+        self.assertIn("egress", reason)
+        self.assertIn(str(self.egress), reason)
+        # The gate is on the binary that dials unseen, not on the whole toolkit.
+        self.validate(["nmap", "-Pn", "192.168.56.9"])
+
+    def test_a_source_name_cannot_be_a_host(self):
+        self.validate(["theHarvester", "-d", "lab.local", "-b", "crtsh,bing"])
+        for value in ("crt.sh", "api.hackertarget.com"):
+            with self.subTest(value=value):
+                self.assertIn("outside scope", self.denied(
+                    ["theHarvester", "-d", "lab.local", "-b", value]))
+
+    def test_the_result_limit_is_bounded_before_the_run(self):
+        # Literal numbers, both sides of the cap: a test that asks for
+        # `MAX_HARVEST_RESULTS + 1` keeps passing when someone raises the cap to
+        # a billion, which is the mutation that matters here.
+        self.validate(self.BASE + ["-l", "5000"])
+        for value in ("0", "5001", "999999"):
+            with self.subTest(value=value):
+                reason = self.denied(self.BASE + ["-l", value])
+                self.assertIn("-l", reason)
+                self.assertIn("between 1 and", reason)
+
+    def test_a_count_flag_cannot_licence_an_unparseable_value(self):
+        # `-l 192.168.56.9` is not licensed away as a number: a destination
+        # inside a licensed value still lands in the target list the human
+        # approves, and one outside the scope is a refusal.
+        risk, targets = self.validate(self.BASE + ["-l", "192.168.56.9"])
+        self.assertIn("192.168.56.9", targets)
+        self.assertIn("outside scope", self.denied(
+            self.BASE + ["-l", "203.0.113.9"]))
+        self.assertIn("-l", self.denied(self.BASE + ["-l", "abc"]))
+
+    def test_output_names_are_confined_to_the_output_root(self):
+        self.validate(self.BASE + ["-f", "lab-harvest"])
+        self.assertIn("/etc/cron.d/x",
+                      self.denied(self.BASE + ["-f", "/etc/cron.d/x"]))
+
+    def test_every_flag_that_dials_something_argv_never_names_is_refused(self):
+        # Each of these sends the child somewhere the egress list would have to
+        # vouch for: a proxy, a keyed third-party API, direct requests to
+        # harvested hosts, or resolver addresses taken from argv.
+        for flag in ("-p", "--proxies", "-s", "--shodan", "--routeviews",
+                     "--screenshot", "-a", "--api-scan", "--vhost",
+                     "-r", "--dns-resolvers", "-w", "-t", "-c", "-n",
+                     "--no-hosts", "--dns-recursive-depth", "--vhost-insecure"):
+            with self.subTest(flag=flag):
+                self.assertIn("%s is not permitted for theHarvester" % flag,
+                              self.denied(self.BASE + [flag]))
+
+    def test_inventory_lists_it_at_the_credential_tier(self):
+        bindir = Path(self.temp.name) / "bin"
+        bindir.mkdir()
+        (bindir / "theHarvester").write_text("", encoding="utf-8")
+        with mock.patch.object(kr, "SAFE_PATH", str(bindir)):
+            inventory = kr.build_inventory()
+        self.assertIn("theHarvester", inventory["credential"])
+        self.assertIn("theHarvester", inventory["strict"])
+        self.assertTrue(inventory["egress_enforced"])

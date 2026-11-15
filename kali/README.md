@@ -60,7 +60,7 @@ wrapper refuses every target that is not in `/etc/kestrel/scope.json`.
 sudo apt update
 sudo apt install -y openssh-server nmap whatweb dnsutils whois curl \
   ffuf gobuster feroxbuster nuclei nikto masscan netcat-traditional \
-  exploitdb libcap2-bin seclists wordlists
+  exploitdb libcap2-bin seclists wordlists nftables theharvester
 sudo useradd -m -s /bin/bash kestrel
 # No usable password, without depending on UsePAM: `passwd -l` locks the
 # account in a way sshd rejects even for public-key auth when `UsePAM no`.
@@ -88,9 +88,10 @@ not `cap_net_admin`. Nmap runs unprivileged, so phase 1 uses `-sT`/`-sV`;
 ## 2. Install the wrapper
 
 Copy the whole `kali/` directory from the Kestrel checkout to the VM — the
-three files the installer uses (`kestrel_run.py`, `scope.example.json`,
-`logrotate.kestrel`) sit beside it, so copying only the script fails. A host
-folder shared into the VM works; so does `scp -r kali kestrel@<vm-ip>:~`, but
+four files the installer uses (`kestrel_run.py`, `egress_rules.py`,
+`scope.example.json`, `logrotate.kestrel`) sit beside it, so copying only the
+script fails. A host folder shared into the VM works; so does
+`scp -r kali kestrel@<vm-ip>:~`, but
 Kestrel's key carries a forced command, so use an ordinary login key or the
 VM console for that copy. If the copy came through a Windows editor or a
 `shared folder` that rewrites line endings, the script arrives with CRLF and
@@ -189,6 +190,45 @@ boundary between your lab and the internet, and `nmap -sV 8.8.8.8` is refused
 by design. When a target you own is refused, add that target's own network to
 `networks` — nothing else. The wrapper re-reads the file on the next request,
 so there is no restart step.
+
+### The `egress` list
+
+`domains` and `networks` confine the destinations a command *names*. A child
+that opens its own connections is outside their reach: `theHarvester` is given
+`-d lab.local` and then queries `crt.sh`, `api.hackertarget.com`, Bing, Google
+and LinkedIn from inside its own code, and none of those hosts ever appear in
+argv. For that case the control is the firewall, and the installer builds it
+from the `egress` array above:
+
+```json
+"egress": ["crt.sh", "api.hackertarget.com", "www.bing.com", "www.google.com",
+           "www.linkedin.com"]
+```
+
+`/etc/kestrel/egress.conf` is generated at install time from those names plus
+`networks`, and loaded with `nft -f`. It binds only the `kestrel` uid, so the
+VM's own traffic and your shell on the console are untouched: the account may
+reach the lab on any port, resolve any name, and reach the listed providers on
+80/443 — everything else it sends is dropped.
+
+Two facts about that rule are worth knowing before you rely on it:
+
+- **DNS is deliberately not confined.** Every permitted binary resolves targets
+  (`dig`, `whois`, `nmap`, and theHarvester's own lookups), so pinning the
+  resolver would break the toolkit to close a channel it does not otherwise
+  use. A name is not a destination here: the connection a name leads to is
+  still decided by the rules above.
+- **The list is read at install time, not at request time.** Provider hostnames
+  are resolved to addresses when the installer runs, so editing `egress` (or
+  letting a provider's addresses rotate) does nothing until you re-run the
+  installer. The wrapper reports `egress_enforced` as the presence of the rule
+  file, which is that it was installed — not that it matches the current
+  contents of `scope.json`.
+
+The wrapper refuses `theHarvester` entirely while `/etc/kestrel/egress.conf` is
+absent, and it is credential tier, so it asks you twice even with the rule in
+place. If `nft` is missing, the installer refuses to run rather than write a
+marker file that would claim enforcement.
 
 ## 5. Record and verify the host key on Windows
 
@@ -313,5 +353,14 @@ step 4 first:
   `getcap "$(command -v masscan)"` and re-run the installer; only `cap_net_raw`
   is granted, so a masscan build that also needs `cap_net_admin` will fail here.
 - Try `nmap -sV 8.8.8.8` and `bash -c "id"`; both are refused before execution.
+- Verify the egress rule from the VM console: `nft list table inet kestrel_egress`
+  prints the sets the scope produced, and `su kestrel -s /bin/sh -c
+  'curl -m 5 -so /dev/null https://example.com'; echo $?` must fail (7 could not
+  connect, 28 timed out) while the same command as your own account succeeds. That
+  is the difference between a rule in a file and a rule in the kernel.
+- `kali_task` with `theHarvester -d lab.local -b crtsh` is the credential-tier
+  case that needs the rule above: it is refused with the path of
+  `/etc/kestrel/egress.conf` named until the installer has loaded it, and it
+  asks you twice after that.
 - If every target is refused as outside scope, that is step 4, not a broken
   bridge: the transport working and the scope being wrong are independent.

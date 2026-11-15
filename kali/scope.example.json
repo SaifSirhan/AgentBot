@@ -3,5 +3,12 @@
   "expires": "2027-12-31T23:59:59Z",
   "allow_public": false,
   "networks": ["192.168.56.0/24"],
-  "domains": ["lab.local", "*.lab.local"]
+  "domains": ["lab.local", "*.lab.local"],
+  "egress": [
+    "crt.sh",
+    "api.hackertarget.com",
+    "www.bing.com",
+    "www.google.com",
+    "www.linkedin.com"
+  ]
 }

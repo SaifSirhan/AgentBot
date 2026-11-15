@@ -5,25 +5,37 @@ so they assert content that matters -- exact owners, modes, restriction options
 and the ordering of the symlink guards -- never mere file existence.
 
 Pure text/JSON assertions: no subprocess, no POSIX-only call, no network and no
-tool execution, so the suite runs unchanged on Windows.
+tool execution, so the suite runs unchanged on Windows. The egress generator is
+imported and called directly -- with its resolver injected, it is as pure as the
+text it produces, and asserting on generated ruleset text beats grepping the
+generator for fragments it may legitimately reformat.
 """
 
 import json
 import re
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+import egress_rules  # noqa: E402
 
 # Task 1 shipped these paths as constants; the installer must create exactly
 # them, with the owner and mode the wrapper's own checks demand.
+# Task 8: the wrapper refuses theHarvester until /etc/kestrel/egress.conf
+# exists, so that path is a contract between the installer's generator and the
+# wrapper's check, like the output root and the audit log already are.
+EGRESS_CONF = "/etc/kestrel/egress.conf"
 WRAPPER_CONSTANTS = (
     'DEFAULT_SCOPE = Path("/etc/kestrel/scope.json")',
     'DEFAULT_AUDIT = Path("/var/log/kestrel/audit.jsonl")',
     'OUTPUT_ROOT = Path("/tmp/kestrel")',
+    'EGRESS_RULE = "/etc/kestrel/egress.conf"',
 )
 WRAPPER_PATHS = ("/etc/kestrel/scope.json", "/var/log/kestrel/audit.jsonl",
-                 "/tmp/kestrel")
+                 "/tmp/kestrel", EGRESS_CONF)
 
 INSTALLED_WRAPPER = ('install -o root -g root -m 0755 "$HERE/kestrel_run.py" '
                      "/usr/local/bin/kestrel-run")
@@ -38,6 +50,16 @@ AUDIT_TOUCH = "touch /var/log/kestrel/audit.jsonl"
 AUDIT_CHOWN = "chown kestrel:kestrel /var/log/kestrel/audit.jsonl"
 AUDIT_CHMOD = "chmod 0600 /var/log/kestrel/audit.jsonl"
 MASSCAN_SETCAP = 'setcap cap_net_raw+ep "$(command -v masscan)"'
+EGRESS_TMP = EGRESS_CONF + ".tmp"
+EGRESS_GENERATE = 'python3 "$HERE/egress_rules.py" /etc/kestrel/scope.json ' \
+                  '"$(id -u kestrel)" > %s' % EGRESS_TMP
+EGRESS_MOVE = "mv %s %s" % (EGRESS_TMP, EGRESS_CONF)
+EGRESS_APPLY = "nft -f %s" % EGRESS_CONF
+NON_ROOT_GUARD = 'if [ "$(id -u)" -ne 0 ]; then'
+NFT_GUARD = "if ! command -v nft >/dev/null 2>&1; then"
+# The lookup providers theHarvester dials from inside the child (spec 6.4).
+HARVEST_SOURCES = ("crt.sh", "api.hackertarget.com", "www.bing.com",
+                   "www.google.com", "www.linkedin.com")
 
 FORCED_COMMAND = 'command="/usr/local/bin/kestrel-run"'
 KEY_RESTRICTIONS = ("no-port-forwarding", "no-agent-forwarding", "no-pty",
@@ -114,7 +136,8 @@ def position(items, needle):
 class InstallAssetTests(unittest.TestCase):
     def test_assets_exist(self):
         for name in ("kestrel_run.py", "install_kestrel_run.sh",
-                     "scope.example.json", "logrotate.kestrel", "README.md"):
+                     "scope.example.json", "logrotate.kestrel", "README.md",
+                     "egress_rules.py"):
             self.assertTrue((ROOT / name).is_file(), name)
 
     # -- T2-R2: the installer must create the wrapper's boundary exactly -----
@@ -348,12 +371,13 @@ class InstallAssetTests(unittest.TestCase):
         self.assertIn("`sudo rm /var/log/kestrel/audit.jsonl`", text)
 
     def test_readme_documents_how_kali_reaches_the_vm(self):
-        # The installer reads three files beside itself, so "copy kali/" is the
+        # The installer reads four files beside itself, so "copy kali/" is the
         # only correct instruction; and a copy made through Windows can arrive
         # with CRLF, which bash rejects only at run time.
         body = prose(section(2))
         self.assertIn("copy the whole `kali/` directory", body.lower())
         self.assertIn("kestrel_run.py", body)
+        self.assertIn("egress_rules.py", body)
         self.assertIn("bash -n kali/install_kestrel_run.sh", body)
         self.assertIn("CRLF", body)
         self.assertIn("sed -i 's/\\r$//' kali/*.sh", body)
@@ -442,6 +466,162 @@ class InstallAssetTests(unittest.TestCase):
         self.assertIn("192.168.56.0/24", data["networks"])
         self.assertIn("*.lab.local", data["domains"])
         self.assertIn("192.168.56.0/24", section(4))
+
+    def test_scope_example_names_every_lookup_source_the_rule_must_open(self):
+        # The list is what the generated firewall rule is built from, so a
+        # provider theHarvester actually queries had better be in it: the
+        # alternative is a scan that silently returns nothing.
+        data = json.loads(read("scope.example.json"))
+        for host in HARVEST_SOURCES:
+            self.assertIn(host, data["egress"])
+
+    # -- T8: the rule that confines what argv never names is installed, or else
+    # nothing is. `egress_enforced` is how the wrapper tells Kestrel the control
+    # is in place, so the installer must not create that marker unless the rule
+    # it names is actually loaded into the kernel.
+
+    def test_installer_refuses_to_run_as_non_root(self):
+        lines = commands("install_kestrel_run.sh")
+        start = position(lines, NON_ROOT_GUARD)
+        body = lines[start:start + 5]
+        self.assertIn('echo "refusing: this installer must run as root" >&2',
+                      body)
+        self.assertIn("exit 1", body)
+        # Before the first root-owned write, so a non-root run cannot leave a
+        # half-installed wrapper behind it.
+        self.assertLess(start, position(lines, INSTALLED_WRAPPER))
+
+    def test_installer_generates_the_rule_then_moves_it_into_place(self):
+        lines = commands("install_kestrel_run.sh")
+        generated = position(lines, EGRESS_GENERATE)
+        self.assertLess(generated, position(lines, EGRESS_MOVE))
+        self.assertLess(position(lines, EGRESS_MOVE),
+                        position(lines, "chmod 0644 %s" % EGRESS_CONF))
+        # The wrapper treats existence as enforcement, so a partially written
+        # ruleset must never be the thing that appears at the marker path.
+        self.assertNotIn(">> %s" % EGRESS_CONF, lines)
+        self.assert_guard_before(EGRESS_CONF, EGRESS_MOVE)
+
+    def test_installer_loads_the_rule_and_refuses_without_nft(self):
+        lines = commands("install_kestrel_run.sh")
+        start = position(lines, NFT_GUARD)
+        body = lines[start:start + 5]
+        self.assertIn("exit 1", body)
+        self.assertIn("refusing:", " ".join(body))
+        self.assertLess(start, position(lines, EGRESS_GENERATE))
+        self.assertIn(EGRESS_APPLY, lines)
+        # Applied after the file is in place: `nft -f` reads the path itself.
+        self.assertLess(position(lines, EGRESS_MOVE),
+                        position(lines, EGRESS_APPLY))
+
+    def test_readme_documents_the_egress_rule_and_what_it_gates(self):
+        body = prose(section(4))
+        self.assertIn(EGRESS_CONF, body)
+        self.assertIn("theHarvester", body)
+        self.assertIn("nft", body)
+        # The two facts an operator would otherwise be surprised by: the list is
+        # only read at install time, and DNS is deliberately not confined.
+        self.assertIn("re-run the installer", body)
+        self.assertIn("DNS", body)
+        checks = prose(section(7))
+        self.assertIn("nft list table inet kestrel_egress", checks)
+
+    def test_readme_installs_the_packages_the_rule_and_the_binary_need(self):
+        # `nft` is refused by the installer when it is absent, and the wrapper
+        # refuses theHarvester while it is not installed, so the tool list is
+        # part of the control rather than a shopping preference.
+        setup = prose(section(1))
+        self.assertIn("nftables", setup)
+        self.assertIn("theharvester", setup)
+
+
+class EgressRuleTests(unittest.TestCase):
+    """The generated ruleset, asserted as generated text rather than as source."""
+
+    SCOPE = {"networks": ["192.168.56.0/24"], "egress": ["crt.sh"]}
+    RESOLVER = staticmethod(lambda host: ["203.0.113.7"])
+
+    def generated(self, scope=None):
+        return egress_rules.ruleset(scope or self.SCOPE, uid=1002,
+                                    resolver=self.RESOLVER)
+
+    def test_only_the_kestrel_account_is_confined(self):
+        text = self.generated()
+        self.assertIn("table inet kestrel_egress", text)
+        self.assertIn("type filter hook output priority filter;"
+                      " policy accept;", text)
+        self.assertIn("meta skuid != 1002 accept", text)
+        self.assertIn("meta skuid 1002 drop", text)
+        # Nothing may cage the whole VM: every terminating rule names the uid.
+        for line in text.splitlines():
+            if line.strip().startswith(("drop", "reject")):
+                self.fail("a bare drop would confine every account: %s" % line)
+
+    def test_the_ways_out_are_dns_the_lab_and_the_named_providers(self):
+        text = self.generated()
+        self.assertIn('oifname "lo" accept', text)
+        self.assertIn("ct state established,related accept", text)
+        self.assertIn("meta skuid 1002 udp dport 53 accept", text)
+        self.assertIn("meta skuid 1002 ip daddr @lab accept", text)
+        self.assertIn("meta skuid 1002 tcp dport { 80, 443 }"
+                      " ip daddr @providers accept", text)
+        self.assertIn("elements = { 192.168.56.0/24 }", text)
+        self.assertIn("elements = { 203.0.113.7 }", text)
+
+    def test_the_drop_is_the_last_rule_in_the_chain(self):
+        lines = [line.strip() for line in self.generated().splitlines()
+                 if line.strip() and not line.strip().startswith("#")]
+        chain = lines[lines.index("chain egress {"):]
+        rules = [line for line in chain[:-1] if not line.endswith(("{", "}"))]
+        self.assertTrue(rules[-1].endswith("drop"), rules[-1])
+
+    def test_no_wildcard_grants_a_destination(self):
+        text = self.generated()
+        self.assertNotIn("0.0.0.0/0", text)
+        self.assertNotIn("ip6 daddr", text)
+        # inet covers IPv6 too, and only v4 addresses are granted, so a v6
+        # destination falls through to the drop rather than escaping the table.
+        self.assertIn("table inet", text)
+
+    def test_a_provider_is_resolved_only_for_http_and_https(self):
+        # The provider set is referenced by exactly one rule, and that rule names
+        # its ports: a host the child dials is never a general licence to reach
+        # whatever address it happens to resolve to.
+        text = self.generated()
+        self.assertEqual(text.count("@providers"), 1)
+        rule = [line for line in text.splitlines() if "@providers" in line]
+        self.assertEqual(len(rule), 1)
+        self.assertIn("tcp dport { 80, 443 }", rule[0])
+
+    def test_a_source_that_does_not_resolve_refuses_to_write_a_rule(self):
+        def missing(host):
+            raise OSError("Name or service not known")
+
+        with self.assertRaises(SystemExit) as caught:
+            egress_rules.ruleset(self.SCOPE, uid=1002, resolver=missing)
+        self.assertIn("crt.sh", str(caught.exception))
+
+    def test_an_empty_egress_list_still_confines_the_account(self):
+        text = self.generated({"networks": ["192.168.56.0/24"], "egress": []})
+        self.assertIn("meta skuid 1002 ip daddr @lab accept", text)
+        self.assertIn("meta skuid 1002 drop", text)
+        self.assertNotIn("@providers accept", text)
+
+    def test_the_scope_needs_a_network_to_scan(self):
+        with self.assertRaises(SystemExit):
+            egress_rules.ruleset({"networks": [], "egress": []}, uid=1002,
+                                 resolver=self.RESOLVER)
+
+    def test_deduplicated_providers_are_sorted_as_addresses(self):
+        scope = {"networks": ["192.168.56.0/24"],
+                 "egress": ["b.test", "a.test"]}
+
+        def resolver(host):
+            return {"a.test": ["10.0.0.20", "10.0.0.20"],
+                    "b.test": ["10.0.0.3"]}[host]
+
+        text = egress_rules.ruleset(scope, uid=1002, resolver=resolver)
+        self.assertIn("elements = { 10.0.0.3, 10.0.0.20 }", text)
 
 
 if __name__ == "__main__":
