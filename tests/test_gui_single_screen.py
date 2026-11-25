@@ -51,12 +51,13 @@ class SingleScreenTests(unittest.TestCase):
                 self.assertIsNotNone(getattr(self.window, name, None))
                 self.assertTrue(getattr(self.window, name).isVisible())
 
-    def test_navigation_has_the_six_approved_destinations(self):
+    def test_navigation_has_the_seven_approved_destinations(self):
         rail = getattr(self.window, "nav_rail", None)
         self.assertIsNotNone(rail)
         self.assertEqual(
             list(rail.buttons),
-            ["Kestrel", "Tasks", "Files", "Voice", "Memory", "Settings"],
+            ["Kestrel", "Tasks", "Files", "Voice", "Memory", "Copilot",
+             "Settings"],
         )
         for label, button in rail.buttons.items():
             with self.subTest(label=label):

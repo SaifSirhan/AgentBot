@@ -89,6 +89,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpacerItem,
     QSplitter,
+    QStackedWidget,
     QSystemTrayIcon,
     QTabWidget,
     QTextEdit,
@@ -109,6 +110,7 @@ except Exception:
 
 import memory
 import kali_bus
+import screen_copilot
 import sprite_bus
 from hud_core import PetWidget, ReactorHud
 from window_chrome import FramelessChrome
@@ -247,6 +249,8 @@ _ICON_SVGS = {
               'M5 14v4.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V14"/>',
     "chat": '<path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7'
             'A2.5 2.5 0 0 1 17.5 16H10l-4.5 4v-4A2.5 2.5 0 0 1 4 13.5z"/>',
+    "target": '<circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="2.5"/>'
+              '<path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/>',
     "plus": '<path d="M12 5v14M5 12h14"/>',
     # header
     "menu": '<path d="M4 7h16M4 12h16M4 17h16"/>',
@@ -1995,6 +1999,393 @@ class BrowserApprovalBridge(QObject):
         return future
 
 
+class CopilotView(QFrame):
+    refresh_requested = Signal()
+    run_requested = Signal(int, str)
+    stop_requested = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("copilotView")
+        self.setStyleSheet(
+            f"QFrame#copilotView {{ background: {COLOR_BG}; }}"
+            f"QLabel {{ background: transparent; }}"
+        )
+        outer = zero_layout(QVBoxLayout(self))
+        outer.setContentsMargins(16, 14, 16, 14)
+        scroll = QScrollArea()
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        col = zero_layout(QVBoxLayout(content))
+        col.setContentsMargins(0, 0, 4, 0)
+        col.setSpacing(10)
+
+        title = QLabel("SCREEN COPILOT // APPROVED ADAPTIVE PLAN")
+        title.setWordWrap(True)
+        title.setStyleSheet(
+            f"color: {COLOR_ACCENT}; font-family: '{FONT_MONO}'; "
+            "font-size: 12px; font-weight: bold;")
+        col.addWidget(title)
+        privacy = QLabel(
+            "Safe UIA labels and your approved goal go to the configured text "
+            "model. Text-box values are never read. If vision is approved and "
+            "used, only the selected window is sent to the configured vision "
+            "model and its temporary PNG is deleted after the call."
+        )
+        privacy.setWordWrap(True)
+        privacy.setTextFormat(Qt.TextFormat.PlainText)
+        privacy.setStyleSheet(
+            f"color: {COLOR_TEXT_MID}; font-family: '{FONT_UI}'; font-size: 11px;")
+        col.addWidget(privacy)
+
+        target_row = QHBoxLayout()
+        target_row.setSpacing(8)
+        self.refresh_btn = QPushButton("Refresh windows")
+        self.target_combo = QComboBox()
+        self.target_combo.setMinimumWidth(220)
+        self.target_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        target_row.addWidget(self.refresh_btn)
+        target_row.addWidget(self.target_combo, 1)
+        col.addLayout(target_row)
+
+        goal_label = QLabel("GOAL // typed text must come from this exact goal")
+        goal_label.setStyleSheet(
+            f"color: {COLOR_TEXT_MID}; font-family: '{FONT_MONO}'; font-size: 9px;")
+        col.addWidget(goal_label)
+        self.goal_input = QPlainTextEdit()
+        self.goal_input.setFixedHeight(76)
+        self.goal_input.setPlaceholderText(
+            "Example: Search for Dune in Stremio and open the movie")
+        self.goal_input.textChanged.connect(self._cap_goal)
+        col.addWidget(self.goal_input)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.run_btn = QPushButton("Run plan")
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setEnabled(False)
+        actions.addWidget(self.run_btn)
+        actions.addWidget(self.stop_btn)
+        actions.addStretch(1)
+        col.addLayout(actions)
+
+        self.status_label = QLabel("Select one window and enter a short goal.")
+        self.status_label.setWordWrap(True)
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.status_label.setStyleSheet(
+            f"color: {COLOR_TEXT_USER}; font-family: '{FONT_MONO}'; font-size: 11px;")
+        col.addWidget(self.status_label)
+
+        self.approval_area = QWidget()
+        self.approval_layout = zero_layout(QVBoxLayout(self.approval_area))
+        self.approval_layout.setContentsMargins(0, 0, 0, 0)
+        col.addWidget(self.approval_area)
+        col.addStretch(1)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+        for button in (
+            self.refresh_btn, self.target_combo, self.run_btn, self.stop_btn,
+            self.goal_input,
+        ):
+            button.setStyleSheet(
+                f"QPushButton, QComboBox, QPlainTextEdit {{"
+                f" background: {COLOR_CODE_BG}; color: {COLOR_TEXT_USER};"
+                f" border: 1px solid {COLOR_BORDER}; border-radius: 8px;"
+                f" padding: 6px; font-family: '{FONT_UI}'; font-size: 11px; }}"
+                f"QPushButton:hover {{ border-color: {COLOR_ACCENT}; }}"
+                f"QPushButton:disabled {{ color: {COLOR_TEXT_LOW}; }}"
+            )
+        self.run_btn.setStyleSheet(
+            f"QPushButton {{ background: {COLOR_ACCENT_DIM};"
+            f" color: {COLOR_TEXT_USER}; border: 1px solid {COLOR_ACCENT};"
+            f" border-radius: 8px; padding: 7px 14px;"
+            f" font-family: '{FONT_UI}'; font-size: 11px; font-weight: bold; }}"
+            f"QPushButton:hover {{ background: {COLOR_SELECTED}; }}"
+            f"QPushButton:disabled {{ color: {COLOR_TEXT_LOW}; }}"
+        )
+        self.refresh_btn.clicked.connect(self.refresh_requested.emit)
+        self.run_btn.clicked.connect(self._emit_run)
+        self.stop_btn.clicked.connect(self.stop_requested.emit)
+
+    def _cap_goal(self):
+        text = self.goal_input.toPlainText()
+        if len(text) <= screen_copilot.MAX_GOAL_CHARS:
+            return
+        cursor = self.goal_input.textCursor()
+        position = cursor.position()
+        self.goal_input.blockSignals(True)
+        self.goal_input.setPlainText(text[:screen_copilot.MAX_GOAL_CHARS])
+        cursor = self.goal_input.textCursor()
+        cursor.setPosition(min(position, screen_copilot.MAX_GOAL_CHARS))
+        self.goal_input.setTextCursor(cursor)
+        self.goal_input.blockSignals(False)
+
+    def _emit_run(self):
+        hwnd = self.target_combo.currentData()
+        goal = self.goal_input.toPlainText().strip()
+        if hwnd is None or not goal:
+            self.status_label.setText("Select a window and enter a goal first.")
+            return
+        self.run_requested.emit(int(hwnd), goal)
+
+    def set_running(self, running: bool):
+        self.refresh_btn.setEnabled(not running)
+        self.target_combo.setEnabled(not running)
+        self.goal_input.setEnabled(not running)
+        self.run_btn.setEnabled(not running)
+        self.stop_btn.setEnabled(running)
+
+
+class CopilotApprovalCard(QFrame):
+    resolved = Signal(bool)
+
+    def __init__(self, payload: dict):
+        super().__init__()
+        self.setObjectName("copilotApproval")
+        self._payload = payload
+        self._future = payload.get("future")
+        self._resolved = False
+        self.setStyleSheet(
+            f"QFrame#copilotApproval {{ background: {COLOR_CODE_BG};"
+            f" border: 1px solid {COLOR_ACCENT}; border-radius: 8px; }}"
+            f"QLabel {{ background: transparent; }}"
+        )
+        col = zero_layout(QVBoxLayout(self))
+        col.setContentsMargins(12, 10, 12, 10)
+        col.setSpacing(5)
+        header = QLabel("APPROVE PLAN // ONE DECISION FOR UP TO FIVE ACTIONS")
+        header.setWordWrap(True)
+        header.setStyleSheet(
+            f"color: {COLOR_ACCENT}; font-family: '{FONT_MONO}';"
+            "font-size: 10px; font-weight: bold;")
+        col.addWidget(header)
+        target = payload.get("target")
+        if not isinstance(target, dict):
+            target = {}
+        actions = payload.get("allowed_actions")
+        action_text = ", ".join(str(item) for item in actions) if isinstance(
+            actions, (list, tuple, set, frozenset)) else str(actions or "")
+        for text in (
+            f"Goal: {payload.get('goal', '')}",
+            f"Target: {target.get('title', '')} — "
+            f"{target.get('process', '')} (PID {target.get('pid', '')}, "
+            f"HWND {target.get('hwnd', '')})",
+            f"Actions: {action_text}; maximum {payload.get('max_steps', 5)}",
+            str(payload.get("typing_rule", "")),
+            str(payload.get("screenshot_disclosure", "")),
+            str(payload.get("denial_or_timeout",
+                            "Denial or timeout executes nothing.")),
+        ):
+            label = QLabel(text)
+            label.setWordWrap(True)
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setStyleSheet(
+                f"color: {COLOR_TEXT_USER}; font-family: '{FONT_UI}';"
+                "font-size: 10px;")
+            col.addWidget(label)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet(
+            f"color: {COLOR_TEXT_MID}; font-family: '{FONT_MONO}'; font-size: 10px;")
+        col.addWidget(self.status_label)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.approve_btn = QPushButton("Approve Plan")
+        self.deny_btn = QPushButton("Deny")
+        for button in (self.approve_btn, self.deny_btn):
+            button.setFixedHeight(28)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.installEventFilter(self)
+            button.setStyleSheet(
+                f"QPushButton {{ background: {COLOR_HOVER};"
+                f" color: {COLOR_TEXT_USER}; border: 1px solid {COLOR_BORDER};"
+                f" border-radius: 6px; padding: 4px 12px;"
+                f" font-family: '{FONT_UI}'; font-size: 10px; }}"
+                f"QPushButton:hover {{ border-color: {COLOR_ACCENT}; }}"
+            )
+        self.approve_btn.setStyleSheet(
+            f"QPushButton {{ background: {COLOR_ACCENT_DIM};"
+            f" color: {COLOR_TEXT_USER}; border: 1px solid {COLOR_ACCENT};"
+            f" border-radius: 6px; padding: 4px 12px;"
+            f" font-family: '{FONT_UI}'; font-size: 10px; font-weight: bold; }}"
+        )
+        self.approve_btn.clicked.connect(lambda: self.resolve(True))
+        self.deny_btn.clicked.connect(lambda: self.resolve(False))
+        row.addWidget(self.approve_btn)
+        row.addWidget(self.deny_btn)
+        row.addStretch(1)
+        col.addLayout(row)
+
+        try:
+            timeout_ms = max(
+                1, int(float(payload.get("timeout_seconds", 60)) * 1000))
+        except (TypeError, ValueError):
+            timeout_ms = 60_000
+        self._remaining_ms = timeout_ms
+        self._timer = QTimer(self)
+        self._timer.setInterval(min(1000, timeout_ms))
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+        self._update_countdown()
+
+    def _update_countdown(self):
+        seconds = max(1, (self._remaining_ms + 999) // 1000)
+        self.status_label.setText(
+            f"Waiting for your decision… {seconds}s. Enter does not approve.")
+
+    def _tick(self):
+        if self._resolved:
+            return
+        self._remaining_ms -= self._timer.interval()
+        if self._remaining_ms <= 0:
+            self._expire()
+            return
+        self._update_countdown()
+
+    def _expire(self):
+        self.resolve(False)
+
+    def resolve(self, approved: bool):
+        if self._resolved:
+            return
+        self._resolved = True
+        self._timer.stop()
+        self.approve_btn.setEnabled(False)
+        self.deny_btn.setEnabled(False)
+        if self._future is not None and not self._future.done():
+            with contextlib.suppress(Exception):
+                self._future.set_result(bool(approved))
+        self.status_label.setText(
+            "Approved." if approved else "Denied — no action will start.")
+        self.resolved.emit(bool(approved))
+        QTimer.singleShot(0, self._remove)
+
+    def _remove(self):
+        layout = self.approval_layout if hasattr(self, "approval_layout") else None
+        if layout is None:
+            layout = self.parentWidget().layout() if self.parentWidget() else None
+        if layout is not None:
+            layout.removeWidget(self)
+        self.setParent(None)
+        self.deleteLater()
+
+    def eventFilter(self, watched, event):
+        if (event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+            return True
+        return super().eventFilter(watched, event)
+
+
+class CopilotApprovalBridge(QObject):
+    requested = Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lock = threading.Lock()
+        self._pending = {}
+
+    def __call__(self, request: dict):
+        future = concurrent.futures.Future()
+        request_id = str(request.get("request_id") or "")
+        with self._lock:
+            self._pending[request_id] = future
+        payload = dict(request)
+        payload["future"] = future
+        self.requested.emit(payload)
+
+        def cleanup(_):
+            with self._lock:
+                self._pending.pop(request_id, None)
+
+        future.add_done_callback(cleanup)
+        return future
+
+    def resolve(self, payload, approved: bool):
+        request_id = str(payload.get("request_id") or "")
+        with self._lock:
+            future = self._pending.get(request_id)
+        if future is not None and not future.done():
+            with contextlib.suppress(Exception):
+                future.set_result(bool(approved))
+
+    def resolve_all(self, approved: bool):
+        with self._lock:
+            futures = list(self._pending.values())
+        for future in futures:
+            if not future.done():
+                with contextlib.suppress(Exception):
+                    future.set_result(bool(approved))
+
+
+class CopilotWorker(QObject):
+    targets_ready = Signal(object)
+    progress = Signal(object)
+    status = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, mode="list", hwnd=0, goal="", stop_event=None,
+                 approval_handler=None):
+        super().__init__(QApplication.instance())
+        self.mode = mode
+        self.hwnd = hwnd
+        self.goal = goal
+        self.stop_event = stop_event or threading.Event()
+        self.approval_handler = approval_handler
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+
+    def _run(self):
+        try:
+            if self.mode == "list":
+                self.status.emit("Scanning eligible windows…")
+                try:
+                    targets = screen_copilot.list_copilot_targets(
+                        stop_event=self.stop_event)
+                except Exception:
+                    self.failed.emit("Window scan failed.")
+                    return
+                self.targets_ready.emit(targets)
+                return
+
+            self.status.emit("Copilot running…")
+
+            def planner(prompt):
+                return get_agent()._call_deepseek(
+                    prompt, force_json=True, max_tokens=768)
+
+            try:
+                result = screen_copilot.run_copilot_task(
+                    goal=self.goal,
+                    hwnd=self.hwnd,
+                    planner=planner,
+                    approval_handler=self.approval_handler,
+                    vision_locator=screen_copilot.deepseek_vision_locator,
+                    stop_event=self.stop_event,
+                    progress_handler=self.progress.emit,
+                )
+            except screen_copilot.CopilotBusy:
+                self.failed.emit("Another copilot task is already active.")
+                return
+            except Exception:
+                self.failed.emit("Copilot task failed.")
+                return
+            self.finished.emit(result)
+        finally:
+            self.deleteLater()
+
+
 # ----------------------------------------------------------------------
 # Chat view with scroll-lock
 # ----------------------------------------------------------------------
@@ -2602,6 +2993,7 @@ class NavRail(QFrame):
         ("Files", "export"),
         ("Voice", "pulse"),
         ("Memory", "clipboard"),
+        ("Copilot", "target"),
         ("Settings", "settings"),
     )
 
@@ -3843,6 +4235,14 @@ class AgentWindow(QMainWindow):
         self._event_bus = None
         # Section 4 — browser approval bridge (created after the chat view).
         self._browser_bridge = None
+        self._copilot_bridge = None
+        self._copilot_active = False
+        self._copilot_stop_event = None
+        self._copilot_worker = None
+        self._copilot_target_worker = None
+        self._copilot_workers = []
+        self._copilot_quit_pending = False
+        self._copilot_progress = []
         # Option 2 — OS control (hide/show bridge and kill switch).
         self._os_control = None
         self._gui_was_visible = True
@@ -3931,6 +4331,7 @@ class AgentWindow(QMainWindow):
         self._sync_hud_state()
 
         self._setup_browser_bridge()
+        self._setup_copilot_bridge()
         self._setup_os_control()
 
     def _build_workspace(self) -> QWidget:
@@ -3982,8 +4383,12 @@ class AgentWindow(QMainWindow):
         conversation_layout = zero_layout(QVBoxLayout(self.conversation_column))
         conversation_layout.setSpacing(12)
         self.chat = ChatView()
+        self.copilot_view = CopilotView()
+        self.page_stack = QStackedWidget()
+        self.page_stack.addWidget(self.chat)
+        self.page_stack.addWidget(self.copilot_view)
         self.task_workspace = TaskWorkspace()
-        conversation_layout.addWidget(self.chat, 1)
+        conversation_layout.addWidget(self.page_stack, 1)
         conversation_layout.addWidget(self.task_workspace)
         self._main_col_layout = conversation_layout
         body.addWidget(self.conversation_column)
@@ -4000,13 +4405,30 @@ class AgentWindow(QMainWindow):
 
     def _wire_navigation(self):
         buttons = self.nav_rail.buttons
-        buttons["Kestrel"].clicked.connect(
-            lambda: self.input_field.setFocus())
+        buttons["Kestrel"].clicked.connect(self._show_chat_page)
         buttons["Tasks"].clicked.connect(self.open_schedule_dialog)
         buttons["Files"].clicked.connect(self._choose_attachments)
         buttons["Voice"].clicked.connect(self._toggle_voice)
         buttons["Memory"].clicked.connect(self.open_memory_manager)
+        buttons["Copilot"].clicked.connect(self._show_copilot_page)
         buttons["Settings"].clicked.connect(self.open_settings)
+
+    def _show_chat_page(self):
+        self.page_stack.setCurrentWidget(self.chat)
+        self.composer.show()
+        if not self._copilot_active and not self._processing:
+            self.set_status("Ready", busy=False)
+        self.input_field.setFocus()
+
+    def _show_copilot_page(self):
+        self.page_stack.setCurrentWidget(self.copilot_view)
+        self.composer.hide()
+        self.set_status(
+            "Copilot running\u2026" if self._copilot_active else "Copilot ready",
+            busy=self._copilot_active)
+        if not self.copilot_view.target_combo.count() and not self._copilot_active:
+            self._refresh_copilot_targets()
+        self.copilot_view.goal_input.setFocus()
 
     def _choose_attachments(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -4274,6 +4696,9 @@ class AgentWindow(QMainWindow):
                 and self._settings_overlay is not None):
             self._close_settings()
             return
+        if event.key() == Qt.Key.Key_Escape and self._copilot_active:
+            self._cancel_copilot()
+            return
         if event.key() == Qt.Key.Key_Escape and self._processing:
             self._request_stop()
             return
@@ -4400,7 +4825,10 @@ class AgentWindow(QMainWindow):
         self._autogrow_input()
 
     def _request_stop(self):
-        """Ask the running agent turn to abort; it exits at its next boundary."""
+        """Ask the running agent turn or copilot to abort at its next boundary."""
+        if self._copilot_active:
+            self._cancel_copilot()
+            return
         if not (self._processing and self._turn_cancellable):
             return
         if self._stop_requested:
@@ -4592,10 +5020,14 @@ class AgentWindow(QMainWindow):
         if _tts_is_speaking():
             return "SPEAKING"
         title = self.windowTitle().lower()
-        busy = getattr(self, "_processing", False) or any(
-            word in title for word in (
-                "thinking", "working", "reading", "verifying",
-                "transcribing", "browsing", "stopping"))
+        busy = (
+            getattr(self, "_processing", False)
+            or getattr(self, "_copilot_active", False)
+            or any(
+                word in title for word in (
+                    "thinking", "working", "reading", "verifying",
+                    "transcribing", "browsing", "stopping"))
+        )
         return "THINKING" if busy else "IDLE"
 
     def nativeEvent(self, event_type, message):
@@ -5772,6 +6204,9 @@ class AgentWindow(QMainWindow):
     # ------------------------------------------------------------------
     def new_chat(self):
         """Clear the on-screen chat and the saved conversation."""
+        if self._copilot_active or self.copilot_view.approval_layout.count():
+            self._cancel_copilot()
+        self._show_chat_page()
         self.conversation_history.clear()
         try:
             get_agent().save_conversation_history(self.conversation_history)
@@ -6108,6 +6543,267 @@ class AgentWindow(QMainWindow):
             self.set_status("Browsing\u2026", busy=True)
 
     # ------------------------------------------------------------------
+    # Screen copilot
+    # ------------------------------------------------------------------
+    def _setup_copilot_bridge(self):
+        self._copilot_bridge = CopilotApprovalBridge(self)
+        self._copilot_bridge.requested.connect(
+            self._show_copilot_approval)
+        self.copilot_view.refresh_requested.connect(
+            self._refresh_copilot_targets)
+        self.copilot_view.run_requested.connect(self._start_copilot_run)
+        self.copilot_view.stop_requested.connect(self._cancel_copilot)
+
+    def _track_copilot_worker(self, worker):
+        self._copilot_workers.append(worker)
+        worker.destroyed.connect(self._on_copilot_worker_destroyed)
+        return worker
+
+    def _on_copilot_worker_destroyed(self, _obj):
+        worker = self.sender()
+        if worker is not None:
+            with contextlib.suppress(ValueError):
+                self._copilot_workers.remove(worker)
+
+    def _live_copilot_workers(self):
+        return [
+            worker for worker in self._copilot_workers
+            if getattr(worker, "_thread", None) is not None
+            and worker._thread.is_alive()
+        ]
+
+    def _stop_copilot_workers(self):
+        for worker in self._live_copilot_workers():
+            worker.stop()
+
+    def _quit_when_copilot_workers_stop(self):
+        if self._live_copilot_workers():
+            if not self._copilot_quit_pending:
+                self._copilot_quit_pending = True
+                QTimer.singleShot(
+                    50, self._quit_when_copilot_workers_stop)
+            return
+        self._copilot_quit_pending = False
+        QApplication.instance().quit()
+
+    def _refresh_copilot_targets(self):
+        if self._shutting_down:
+            return
+        if self._copilot_active:
+            self.copilot_view.status_label.setText(
+                "Stop the current task before refreshing windows.")
+            return
+        worker = self._copilot_target_worker
+        thread = getattr(worker, "_thread", None)
+        if worker is not None and thread is not None and thread.is_alive():
+            return
+        worker = self._track_copilot_worker(CopilotWorker(mode="list"))
+        self._copilot_target_worker = worker
+        worker.targets_ready.connect(self._on_copilot_targets)
+        worker.status.connect(self._on_copilot_status)
+        worker.failed.connect(self._on_copilot_targets_failed)
+        worker.start()
+
+    def _on_copilot_status(self, text):
+        worker = self.sender()
+        if worker is not None:
+            if self._copilot_active:
+                if worker is not self._copilot_worker:
+                    return
+            elif worker is not self._copilot_target_worker:
+                return
+        if text in ("Scanning eligible windows\u2026", "Copilot running\u2026"):
+            self.copilot_view.status_label.setText(text)
+
+    def _on_copilot_targets_failed(self, _message):
+        worker = self.sender()
+        if worker is not None and worker is not self._copilot_target_worker:
+            return
+        self._copilot_target_worker = None
+        if self._copilot_active:
+            return
+        self.copilot_view.status_label.setText("Window scan failed.")
+
+    def _on_copilot_targets(self, targets):
+        worker = self.sender()
+        if worker is not None and worker is not self._copilot_target_worker:
+            return
+        self._copilot_target_worker = None
+        if self._copilot_active:
+            return
+        combo = self.copilot_view.target_combo
+        combo.clear()
+        for target in targets:
+            process = os.path.basename(target.process.executable)
+            title = target.title or "Untitled window"
+            combo.addItem(f"{title} — {process}", target.hwnd)
+        self.copilot_view.status_label.setText(
+            f"{len(targets)} eligible window(s). Select one target."
+            if targets else "No eligible windows found.")
+
+    def _start_copilot_run(self, hwnd, goal):
+        if self._shutting_down:
+            return
+        if self._copilot_active:
+            self.copilot_view.status_label.setText(
+                "A copilot task is already running.")
+            return
+        goal = str(goal or "").strip()
+        if not hwnd or not goal:
+            self.copilot_view.status_label.setText(
+                "Select a window and enter a goal first.")
+            return
+        if len(goal) > screen_copilot.MAX_GOAL_CHARS:
+            self.copilot_view.status_label.setText(
+                "The goal exceeds the 500-character limit.")
+            return
+        self._clear_copilot_approval()
+        self._copilot_progress = []
+        self._copilot_stop_event = threading.Event()
+        worker = self._track_copilot_worker(CopilotWorker(
+            mode="run",
+            hwnd=int(hwnd),
+            goal=goal,
+            stop_event=self._copilot_stop_event,
+            approval_handler=self._copilot_bridge,
+        ))
+        self._copilot_worker = worker
+        worker.progress.connect(self._update_copilot_progress)
+        worker.status.connect(self._on_copilot_status)
+        worker.finished.connect(self._on_copilot_finished)
+        worker.failed.connect(self._on_copilot_failed)
+        self._copilot_active = True
+        self.copilot_view.set_running(True)
+        self.copilot_view.status_label.setText("Observing the selected window\u2026")
+        self.task_workspace.set_task_title("Screen copilot")
+        self.task_workspace.set_activity(["Observing the selected window\u2026"])
+        self.set_status("Copilot running\u2026", busy=True)
+        self._copilot_worker.start()
+
+    def _show_copilot_approval(self, payload):
+        bridge = self._copilot_bridge
+        if bridge is None:
+            future = payload.get("future")
+            if future is not None and not future.done():
+                with contextlib.suppress(Exception):
+                    future.set_result(False)
+            return
+        stop_event = self._copilot_stop_event
+        if (self._shutting_down
+                or (stop_event is not None and stop_event.is_set())):
+            bridge.resolve(payload, False)
+            return
+        self._clear_copilot_approval()
+        if (self._copilot_active
+                and self.page_stack.currentWidget() is not self.copilot_view):
+            bridge.resolve(payload, False)
+            self.set_status(
+                "Copilot stopped \u2014 approval was off-screen", busy=True)
+            return
+        card = CopilotApprovalCard(payload)
+        self.copilot_view.approval_layout.addWidget(card)
+        card.resolved.connect(
+            lambda approved, request=payload:
+                bridge.resolve(request, approved))
+        self.copilot_view.status_label.setText(
+            "Review the plan. Nothing runs until you approve it.")
+
+    def _clear_copilot_approval(self):
+        layout = self.copilot_view.approval_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            card = item.widget()
+            if isinstance(card, CopilotApprovalCard):
+                card.resolve(False)
+            elif card is not None:
+                card.setParent(None)
+                card.deleteLater()
+
+    def _cancel_copilot(self):
+        if self._copilot_stop_event is not None:
+            self._copilot_stop_event.set()
+        if self._copilot_worker is not None:
+            self._copilot_worker.stop()
+        bridge = self._copilot_bridge
+        if bridge is not None:
+            bridge.resolve_all(False)
+        screen_copilot.cancel_current_task()
+        self._clear_copilot_approval()
+        self.copilot_view.status_label.setText("Stopping copilot\u2026")
+        if self._copilot_active:
+            self.set_status("Stopping copilot\u2026", busy=True)
+
+    def _detach_copilot_bridge(self):
+        bridge = self._copilot_bridge
+        if bridge is not None:
+            bridge.resolve_all(False)
+            self._copilot_bridge = None
+        self._clear_copilot_approval()
+
+    def _update_copilot_progress(self, event):
+        if not isinstance(event, dict):
+            return
+        event_name = event.get("event")
+        action = event.get("action")
+        status = event.get("status")
+        step = event.get("step")
+        events = {
+            "planning", "observation", "proposal", "approval", "action",
+            "step_outcome", "outcome",
+        }
+        actions = {"click", "type_text", "vision_click", "done"}
+        statuses = {"started", "ready", "blocked", "completed", "failed"}
+        if event_name not in events:
+            event_name = "progress"
+        if action not in actions:
+            action = ""
+        if status not in statuses:
+            status = "started"
+        if not isinstance(step, int) or not 1 <= step <= screen_copilot.MAX_STEPS:
+            step_text = "\u2014"
+        else:
+            step_text = str(step)
+        if action:
+            label = f"Step {step_text}: {action} ({status})"
+        elif event_name != "progress":
+            label = f"{event_name.replace('_', ' ').title()}: step {step_text}"
+        else:
+            label = "Copilot progress"
+        self._copilot_progress.append(label)
+        self._copilot_progress = self._copilot_progress[-5:]
+        self.copilot_view.status_label.setText(label)
+        self.task_workspace.set_activity(self._copilot_progress[-4:])
+
+    def _on_copilot_finished(self, result):
+        self._copilot_active = False
+        self._copilot_worker = None
+        self._clear_copilot_approval()
+        self.copilot_view.set_running(False)
+        status = str(getattr(result, "status", "failed"))
+        summary = getattr(result, "summary", None)
+        if not isinstance(summary, str) or not summary:
+            summary = f"Copilot finished with status: {status}."
+        steps = getattr(result, "steps", 0)
+        changed = getattr(result, "changed", None)
+        activity = [f"Result: {status}", f"Actions completed: {steps}"]
+        if changed is not None:
+            activity.append("Screen changed." if changed else "No screen change detected.")
+        self.task_workspace.set_activity(activity)
+        self.copilot_view.status_label.setText(summary)
+        complete = status == "completed"
+        self.set_status(
+            "Copilot complete" if complete else "Copilot stopped", busy=False)
+
+    def _on_copilot_failed(self, _message):
+        self._copilot_active = False
+        self._copilot_worker = None
+        self._clear_copilot_approval()
+        self.copilot_view.set_running(False)
+        self.copilot_view.status_label.setText("Copilot task failed.")
+        self.task_workspace.set_activity(["Result: task failed"])
+        self.set_status("Copilot stopped", busy=False)
+
+    # ------------------------------------------------------------------
     # Option 2 — OS control (hide/show + kill switch)
     # ------------------------------------------------------------------
     def _setup_os_control(self):
@@ -6126,6 +6822,7 @@ class AgentWindow(QMainWindow):
                     browser_agent.cancel_current_task)
             except Exception:
                 pass
+            os_control.add_kill_callback(screen_copilot.cancel_current_task)
             self._os_control = os_control
         except Exception as e:
             print(f"[os] OS control unavailable: {e}")
@@ -6787,6 +7484,11 @@ class AgentWindow(QMainWindow):
 
     def _on_about_to_quit(self):
         self._shutting_down = True
+        if self._copilot_stop_event is not None:
+            self._copilot_stop_event.set()
+        self._stop_copilot_workers()
+        self._detach_copilot_bridge()
+        screen_copilot.shutdown()
         self._stop_event_bus()
 
     def _stop_event_bus(self):
@@ -6975,7 +7677,14 @@ class AgentWindow(QMainWindow):
         self.activateWindow()
 
     def quit_app(self):
+        if self._shutting_down:
+            return
         self._shutting_down = True
+        if self._copilot_stop_event is not None:
+            self._copilot_stop_event.set()
+        self._stop_copilot_workers()
+        self._detach_copilot_bridge()
+        screen_copilot.shutdown()
         self._stop_event_bus()
         try:
             get_agent().save_conversation_history(self.conversation_history)
@@ -7050,7 +7759,7 @@ class AgentWindow(QMainWindow):
         except Exception:
             pass
         self._browser_bridge = None
-        QApplication.instance().quit()
+        self._quit_when_copilot_workers_stop()
 
     def closeEvent(self, event):
         # Match the old GUI: closing the window hides to tray, it does not exit.
