@@ -1621,12 +1621,8 @@ class PetBehaviourTests(unittest.TestCase):
             hud.deleteLater()
 
 
-class PetLayerTests(unittest.TestCase):
-    """P4: the pet comes over the text only while the cursor is close.
-
-    One window for the class — building an AgentWindow is the expensive part, and
-    each test puts the pet back behind the body before it starts.
-    """
+class PetStageTests(unittest.TestCase):
+    """The owl has its own stage and never paints over conversation text."""
 
     @classmethod
     def setUpClass(cls):
@@ -1634,6 +1630,10 @@ class PetLayerTests(unittest.TestCase):
 
         cls.app = QApplication.instance() or QApplication([])
         cls.window = gui.AgentWindow()
+        cls.window.resize(1480, 820)
+        cls.window.show()
+        for _ in range(10):
+            cls.app.processEvents()
 
     @classmethod
     def tearDownClass(cls):
@@ -1642,57 +1642,27 @@ class PetLayerTests(unittest.TestCase):
         cls.app.processEvents()
 
     def setUp(self):
-        chat = self.window.chat
-        self.chat = chat
-        self.pet = chat.pet
-        self.body = chat._body
-        self.viewport = chat.viewport()
-        chat._apply_pet_layer(False)
+        self.pet = self.window.owl_stage.pet
         self.pet._cursor = _far_cursor
-        # The proximity latch lives on the widget and outlives a test, so it is
-        # cleared here or the next test starts already raised.
         self.pet._near = False
         self.pet._near_time = 0.0
         self.pet.set_state("idle")
 
-    def tearDown(self):
-        self.pet._cursor = _far_cursor
-        self.pet._near = False
-        self.pet._near_time = 0.0
-        self.chat._apply_pet_layer(False)
+    def test_the_pet_is_parented_to_the_stage_not_the_chat(self):
+        self.assertIs(self.pet.parentWidget(), self.window.owl_stage)
+        self.assertIsNot(self.pet.parentWidget(), self.window.chat.viewport())
+        self.assertIs(
+            self.window.owl_stage.hud.pet, self.pet)
+
+    def test_stage_resize_keeps_the_pet_inside_its_own_surface(self):
+        before = self.pet.geometry()
+        self.window.owl_stage.resize(
+            self.window.owl_stage.width() + 40,
+            self.window.owl_stage.height() + 20)
         self.app.processEvents()
-
-    def top(self):
-        """Whichever of the two siblings is stacked last, which Qt draws on top."""
-        order = [w for w in self.viewport.children()
-                 if w is self.pet or w is self.body]
-        return order[-1] if order else None
-
-    def test_the_pet_drops_back_behind_the_text(self):
-        self.chat._apply_pet_layer(True)
-        self.assertIs(self.top(), self.pet)
-        self.chat._apply_pet_layer(False)
-        self.assertIs(self.top(), self.body)
-
-    def test_proximity_raises_and_release_lowers_the_pet(self):
-        self.assertIs(self.top(), self.body)
-        self.pet._cursor = lambda: self.pet._sprite_rect().center()
-        self.pet.advance(0.1)
-        self.assertTrue(self.pet.wants_front)
-        self.assertIs(self.top(), self.pet, "the pet did not come to the front")
-        self.pet._cursor = _far_cursor
-        self.pet.advance(PET_PROXIMITY_RELEASE_S + 0.2)
-        self.assertFalse(self.pet.wants_front)
-        self.assertIs(self.top(), self.body, "the pet did not drop back")
-
-    def test_a_viewport_resize_keeps_the_pet_in_front_when_it_wants_to_be(self):
-        self.pet._cursor = lambda: self.pet._sprite_rect().center()
-        self.pet.advance(0.1)
-        self.assertTrue(self.pet.wants_front)
-        self.chat.resize(self.chat.width() + 40, self.chat.height() + 20)
-        self.app.processEvents()
-        self.assertIs(self.top(), self.pet,
-                      "resizeEvent demoted a pet that should be in front")
+        self.assertEqual(
+            self.pet.geometry(), self.window.owl_stage.rect())
+        self.assertNotEqual(before, self.pet.geometry())
 
 
 class CoreCardIntegrationTests(unittest.TestCase):
@@ -1700,51 +1670,46 @@ class CoreCardIntegrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_right_panel_keeps_core_first_without_an_inline_hud(self):
-        import agent_gui_qt as gui
-
-        panel = gui.RightPanel()
-        try:
-            self.assertEqual(panel.CARD_TITLES[0], "CORE")
-            self.assertIn("CORE", panel.cards)
-            self.assertFalse(panel.cards["CORE"].findChildren(ReactorHud))
-            self.assertGreaterEqual(panel.minimumWidth(), 250)
-            for card in panel.cards.values():
-                self.assertEqual(
-                    card.sizePolicy().horizontalPolicy(),
-                    QSizePolicy.Policy.Ignored)
-        finally:
-            panel.deleteLater()
-            self.app.processEvents()
-
-    def test_chat_has_a_centered_large_translucent_background_hud(self):
+    def test_single_screen_has_no_utility_panel(self):
         import agent_gui_qt as gui
 
         window = gui.AgentWindow()
         try:
-            hud = window.chat.background_hud
-            self.assertIsInstance(hud, ReactorHud)
-            self.assertEqual((hud.width(), hud.height()), (800, 800))
-            self.assertIsNone(hud.graphicsEffect())
-            self.assertAlmostEqual(hud.opacity, 0.15, places=3)
-            self.assertGreaterEqual(
-                window.right_panel.minimumWidth(), 250)
+            self.assertFalse(window.findChildren(gui.RightPanel))
+            self.assertFalse(hasattr(window, "right_panel"))
+            self.assertIsInstance(window.owl_stage.hud, ReactorHud)
         finally:
             window.close()
             window.deleteLater()
             self.app.processEvents()
 
-    def test_pet_is_attached_to_the_chat_viewport_and_to_the_hud(self):
+    def test_owl_stage_has_a_large_opaque_hud(self):
         import agent_gui_qt as gui
 
         window = gui.AgentWindow()
         try:
-            pet = window.chat.pet
-            hud = window.chat.background_hud
+            hud = window.owl_stage.hud
+            self.assertIsInstance(hud, ReactorHud)
+            self.assertGreaterEqual(hud.width(), 300)
+            self.assertEqual(hud.width(), hud.height())
+            self.assertIsNone(hud.graphicsEffect())
+            self.assertAlmostEqual(hud.opacity, 0.92, places=3)
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_pet_is_attached_to_the_owl_stage_and_to_the_hud(self):
+        import agent_gui_qt as gui
+
+        window = gui.AgentWindow()
+        try:
+            pet = window.owl_stage.pet
+            hud = window.owl_stage.hud
             self.assertIsInstance(pet, PetWidget)
             self.assertIs(hud.pet, pet)
-            self.assertIs(pet.parentWidget(), window.chat.viewport())
-            self.assertEqual(pet.geometry(), window.chat.viewport().rect())
+            self.assertIs(pet.parentWidget(), window.owl_stage)
+            self.assertEqual(pet.geometry(), window.owl_stage.rect())
             self.assertTrue(pet.testAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents))
         finally:
@@ -1753,16 +1718,12 @@ class CoreCardIntegrationTests(unittest.TestCase):
             self.app.processEvents()
 
     def test_the_pet_tracks_the_agent_status_through_one_hook(self):
-        """Thinking while busy, speaking over TTS, awake again when the turn
-        ends — all from _sync_hud_state, which set_status already calls, so no
-        per-call-site pet code is needed. The mic's "sleeping" timeout is quiet,
-        not asleep: only the pet's own activity clock puts it to bed."""
         import agent_gui_qt as gui
 
         window = gui.AgentWindow()
         try:
-            pet = window.chat.pet
-            hud = window.chat.background_hud
+            pet = window.owl_stage.pet
+            hud = window.owl_stage.hud
             window._recording = False
             window._continuous_listening = False
             window._live_steps = []
@@ -1774,7 +1735,6 @@ class CoreCardIntegrationTests(unittest.TestCase):
                 self.assertEqual(pet.pet_state, "thinking")
                 self.assertEqual(hud.state, "THINKING")
 
-                # With no tool reported yet, every busy status is the laptop.
                 for status in ("Working…", "Browsing…", "Transcribing…",
                                "Verifying…"):
                     with self.subTest(status=status):
@@ -1783,8 +1743,7 @@ class CoreCardIntegrationTests(unittest.TestCase):
 
                 window.set_status(
                     "Mic sleeping. Press F9 to talk.", busy=False)
-                self.assertEqual(pet.pet_state, "idle",
-                                 "the mic timeout must leave the pet awake")
+                self.assertEqual(pet.pet_state, "idle")
                 self.assertEqual(hud.state, "IDLE")
 
                 window._processing = True
@@ -1794,7 +1753,6 @@ class CoreCardIntegrationTests(unittest.TestCase):
                 self.assertEqual(pet.pet_state, "idle")
                 self.assertTrue(window.input_field.isEnabled())
 
-                window.set_status("Ready", busy=False)
                 with mock.patch.object(gui, "_tts_is_speaking",
                                        return_value=True):
                     window.set_status("Speaking…", busy=False)
@@ -1802,8 +1760,6 @@ class CoreCardIntegrationTests(unittest.TestCase):
                     self.assertEqual(pet.pet_state, "speaking")
                     self.assertEqual(hud.state, "SPEAKING")
 
-                # Listening and error have no sprite, so the pet stays plainly
-                # awake while the reactor shows them.
                 window._recording = True
                 window.set_status("Listening…", busy=True)
                 self.assertEqual(pet.pet_state, "idle")
@@ -1818,8 +1774,7 @@ class CoreCardIntegrationTests(unittest.TestCase):
 
         window = gui.AgentWindow()
         try:
-            hud = window.chat.background_hud
-
+            hud = window.owl_stage.hud
             window.set_status("Thinking…", busy=True)
             self.assertEqual(hud.state, "THINKING")
 
@@ -1862,7 +1817,7 @@ class CoreCardIntegrationTests(unittest.TestCase):
 
         window = gui.AgentWindow()
         try:
-            hud = window.chat.background_hud
+            hud = window.owl_stage.hud
             window._recording = True
             window._continuous_listening = True
             window.set_status("Listening (Continuous)…", busy=True)
@@ -1908,7 +1863,7 @@ class PetToolPoseTests(unittest.TestCase):
     def setUp(self):
         gui = self.gui
         window = self.window
-        self.pet = window.chat.pet
+        self.pet = window.owl_stage.pet
         window._recording = False
         window._continuous_listening = False
         window._hud_error_until = 0.0

@@ -12,7 +12,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
@@ -44,39 +44,31 @@ class TerminalChromeTests(unittest.TestCase):
         self.window.deleteLater()
         self.app.processEvents()
 
-    def test_prompt_row_carries_no_buttons(self):
-        self.assertFalse(hasattr(self.window, "send_button"),
-                         "the send button must be gone")
-        self.assertFalse(hasattr(self.window, "settings_button"),
-                         "settings moves to the /settings command")
-        self.assertFalse(
-            self.window.input_pill.findChildren(QPushButton),
-            "no control may sit in the prompt row")
+    def test_prompt_row_carries_send_and_voice_controls(self):
+        self.assertIs(self.window.send_button, self.window.input_pill.findChild(
+            QPushButton, "sendButton"))
+        self.assertIs(self.window.voice_button, self.window.input_pill.findChild(
+            QPushButton, "voiceButton"))
+        self.assertEqual(self.window.send_button.text(), "Send")
+        self.assertEqual(self.window.voice_button.text(), "F9 push-to-talk")
 
     def test_title_bar_has_no_settings_button(self):
         self.assertFalse(hasattr(self.window._title_bar, "settings_button"))
         for name in ("min_button", "max_button", "close_button"):
             self.assertTrue(hasattr(self.window._title_bar, name), name)
 
-    def test_prompt_row_is_flat_not_a_pill(self):
-        body = rule_body("QFrame#promptRow")
+    def test_prompt_row_is_a_rounded_composer_card(self):
+        body = self.window.input_pill.styleSheet()
         radius = re.search(r"border-radius:\s*([^;]+)", body)
-        self.assertIsNotNone(body, "promptRow still has a rule")
-        self.assertEqual(
-            (radius.group(1).strip() if radius else "0"), "0px",
-            "the rounded pill must be flattened")
+        self.assertIsNotNone(radius)
+        self.assertEqual(radius.group(1).strip(), "12px")
+        self.assertIn(g.COLOR_CODE_BG, body)
 
-    def test_prompt_row_has_no_divider(self):
-        body = rule_body("QFrame#promptRow")
+    def test_prompt_row_has_a_subtle_border_not_a_divider(self):
+        body = self.window.input_pill.styleSheet()
         self.assertNotRegex(body, r"\bborder-top\s*:")
         self.assertNotRegex(body, r"\boutline\s*:")
-        self.assertIn("border: none", body)
-        self.assertIn("background-color: transparent", body,
-                      "the prompt must blend into the canvas")
-        self.assertEqual(rule_body("QFrame#promptRow:focus"), "",
-                         "focus must not reintroduce a top border")
-        self.assertEqual(rule_body("QFrame#promptRow:hover"), "",
-                         "hover must not reintroduce a top border")
+        self.assertIn("border: 1px solid", body)
 
     def test_canvas_is_matte_black(self):
         self.assertEqual(g.COLOR_BG.upper(), "#0B0E13")
@@ -174,6 +166,17 @@ class CopyNoticeTests(unittest.TestCase):
     def test_clipboard_still_receives_the_chat(self):
         self.window.copy_all()
         self.assertIn("hello", QApplication.clipboard().text())
+
+    def test_notice_timer_is_harmless_after_chat_is_cleared(self):
+        with mock.patch.object(g.QTimer, "singleShot") as schedule:
+            self.window.show_notice("transient")
+            dismiss = schedule.call_args.args[1]
+            self.window.chat.clear()
+            self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+        dismiss()
+        self.assertEqual(self.window.chat.chat_log, [])
+        self.assertEqual(self._notices(), [])
 
 
 if __name__ == "__main__":

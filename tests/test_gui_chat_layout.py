@@ -33,7 +33,7 @@ class MessageColumnTests(unittest.TestCase):
 
     def setUp(self):
         self.window = g.AgentWindow()
-        self.window.resize(1200, 760)
+        self.window.resize(1480, 820)
         self.window.show()
         for _ in range(10):
             self.app.processEvents()
@@ -96,21 +96,22 @@ class MessageColumnTests(unittest.TestCase):
         # measured against a narrow column, then widened without re-laying out.
         message = self._add(g.AssistantMessage(LONG_TEXT))[0]
         height_at_add = message.height()
-        self.window.resize(1201, 761)
+        self.window.resize(1481, 821)
         self.app.processEvents()
-        self.window.resize(1200, 760)
+        self.window.resize(1480, 820)
         self.app.processEvents()
         self.assertEqual(message.height(), height_at_add,
                          "height changed only after a resize, so the initial "
                          "wrap was measured against the wrong column width")
 
-    def test_columns_follow_a_narrower_viewport(self):
+    def test_conversation_column_stays_fixed_when_the_window_narrows(self):
         messages = self._add(
             g.UserMessage("short"),
             g.AssistantMessage(LONG_TEXT),
         )
-        self.window.resize(900, 700)
+        self.window.resize(1440, 780)
         self.app.processEvents()
+        self.assertEqual(self.window.conversation_column.width(), 920)
         viewport = self.window.chat.viewport().width()
         for message in messages:
             with self.subTest(kind=type(message).__name__):

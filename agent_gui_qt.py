@@ -92,6 +92,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -180,6 +181,10 @@ RIGHT_PANEL_W = 320
 MIN_RIGHT_PANEL_W = 250
 HIDE_PANEL_BELOW = 1100
 SHOW_PANEL_AT = 1180
+TEXT_COLUMN_BASELINE_W = 900
+TEXT_COLUMN_W = TEXT_COLUMN_BASELINE_W + 20
+NAV_RAIL_W = 104
+TASK_WORKSPACE_H = 184
 CARD_PAD = 10
 CARD_SPACING = 16
 
@@ -2422,23 +2427,10 @@ class ChatView(QScrollArea):
             "QScrollArea#chatScroll, QWidget#chatViewport, QWidget#chatContent, "
             "QWidget#chatContent QWidget, QWidget#chatContent QLabel "
             "{ background: transparent; }")
-        self.background_hud = ReactorHud(
-            parent=self.viewport(), opacity=0.15)
-        self.background_hud.setFixedSize(800, 800)
         self.scanlines = ScanlineLayer(self.viewport())
         self.scanlines.setGeometry(
             0, 0, self.viewport().width(), self.viewport().height())
         self.scanlines.lower()
-        self.pet = PetWidget(parent=self.viewport())
-        self.pet.sync_to_parent()
-        self.pet.layer_changed.connect(self._apply_pet_layer)
-        # The assistant's `sprite_control` tool reaches this pet through
-        # sprite_bus; the relay is what hops from the tool thread to the GUI.
-        self._sprite_relay = _SpriteRelay(self)
-        self._sprite_relay.command.connect(self.pet.play)
-        forward = self._sprite_relay.forward
-        sprite_bus.register(forward)
-        self.destroyed.connect(lambda *_: sprite_bus.unregister(forward))
         # Kali execution asks for consent through kali_bus; this relay is the
         # only path to the dialog, so tearing it down means "deny".
         self._kali_relay = _KaliRelay(self)
@@ -2446,9 +2438,7 @@ class ChatView(QScrollArea):
         kali_request = self._kali_relay.request
         kali_bus.register(kali_request)
         self.destroyed.connect(lambda *_: kali_bus.unregister(kali_request))
-        self.background_hud.set_pet_widget(self.pet)
         self._body.raise_()
-        self._center_background_hud()
 
         self._pinned = True  # follow new content while at the bottom
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
@@ -2456,41 +2446,11 @@ class ChatView(QScrollArea):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._center_background_hud()
         layer = getattr(self, "scanlines", None)
         if layer is not None:
             layer.resize(self.viewport().size())
             layer.lower()
             self._body.raise_()
-        pet = getattr(self, "pet", None)
-        if pet is not None:
-            # The pet anchors itself inside its own rect, so it follows the
-            # viewport instead of being re-moved per state like a sized widget.
-            pet.sync_to_parent()
-            # The raise above would demote a pet that is meant to be in front,
-            # so the layer the pet has asked for is re-asserted after the resize.
-            self._apply_pet_layer(pet.wants_front)
-
-    def _apply_pet_layer(self, front: bool) -> None:
-        """Stack the pet over the message body only while the cursor is near it."""
-        pet = getattr(self, "pet", None)
-        body = getattr(self, "_body", None)
-        if pet is None or body is None:
-            return
-        if front:
-            pet.raise_()
-        else:
-            body.raise_()
-
-    def _center_background_hud(self):
-        hud = getattr(self, "background_hud", None)
-        if hud is None:
-            return
-        viewport = self.viewport()
-        hud.move(
-            (viewport.width() - hud.width()) // 2,
-            (viewport.height() - hud.height()) // 2,
-        )
 
     # -- scroll-lock ----------------------------------------------------
     def _at_bottom(self) -> bool:
@@ -2581,9 +2541,16 @@ class ChatView(QScrollArea):
             widget._fade_anim = None
 
     def remove_message(self, widget: QWidget):
-        """Drop a transient widget (e.g. the [SYSTEM] Thinking… line)."""
+        """Remove a message widget and its transcript entry."""
         if widget is None:
             return
+        raw = getattr(widget, "raw_text", None)
+        if raw is not None:
+            kind = "user" if isinstance(widget, UserMessage) else "agent"
+            try:
+                self.chat_log.remove((kind, raw))
+            except ValueError:
+                pass
         gap = self._gap_items.pop(id(widget), None)
         if gap is not None:
             self._layout.removeItem(gap)
@@ -2626,6 +2593,251 @@ class ChatView(QScrollArea):
             finish(False)
             return
         finish(reply == QMessageBox.StandardButton.Yes)
+
+
+class NavRail(QFrame):
+    DESTINATIONS = (
+        ("Kestrel", "chat"),
+        ("Tasks", "tasks"),
+        ("Files", "export"),
+        ("Voice", "pulse"),
+        ("Memory", "clipboard"),
+        ("Settings", "settings"),
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("navRail")
+        self.setFixedWidth(NAV_RAIL_W)
+        self.setStyleSheet(
+            f"QFrame#navRail {{ background: {COLOR_BG_ALT}; "
+            f"border-right: 1px solid {COLOR_BORDER}; }}")
+        layout = zero_layout(QVBoxLayout(self))
+        layout.setContentsMargins(8, 14, 8, 12)
+        layout.setSpacing(6)
+
+        brand = QLabel("◈")
+        brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        brand.setStyleSheet(
+            f"color: {COLOR_ACCENT}; font-size: 25px; "
+            f"font-family: \"{FONT_UI}\"; background: transparent;")
+        layout.addWidget(brand)
+        layout.addSpacing(12)
+
+        self.buttons = {}
+        for label, icon in self.DESTINATIONS:
+            button = QToolButton()
+            button.setText(label)
+            button.setIcon(_svg_icon(icon, 20, COLOR_TEXT_MID))
+            button.setIconSize(QSize(20, 20))
+            button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFixedHeight(58)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.setStyleSheet(
+                f"""
+                QToolButton {{
+                    background: transparent; border: none; border-radius: 10px;
+                    color: {COLOR_TEXT_MID}; font-family: "{FONT_UI}";
+                    font-size: 10px; padding: 5px 0;
+                }}
+                QToolButton:hover {{ background: {COLOR_HOVER}; color: {COLOR_ACCENT}; }}
+                QToolButton:pressed {{ background: {COLOR_SELECTED}; color: {COLOR_ACCENT}; }}
+                """
+            )
+            layout.addWidget(button)
+            self.buttons[label] = button
+        layout.addStretch(1)
+
+        version = QLabel("VEX // 01")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version.setStyleSheet(
+            f"color: {COLOR_TEXT_LOW}; font-family: \"{FONT_MONO}\"; "
+            f"font-size: 8px; background: transparent;")
+        layout.addWidget(version)
+
+
+class TaskWorkspace(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("taskWorkspace")
+        self.setFixedHeight(TASK_WORKSPACE_H)
+        self.setStyleSheet(
+            f"""
+            QFrame#taskWorkspace {{
+                background: {COLOR_CODE_BG}; border: 1px solid {COLOR_BORDER};
+                border-radius: 12px;
+            }}
+            QFrame#taskWorkspace QLabel {{ background: transparent; }}
+            """
+        )
+        layout = zero_layout(QVBoxLayout(self))
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
+
+        heading = QLabel("CURRENT TASK")
+        heading.setStyleSheet(
+            f"color: {COLOR_TEXT_MID}; font-family: \"{FONT_MONO}\"; "
+            f"font-size: 9px; font-weight: bold;")
+        layout.addWidget(heading)
+
+        self.task_label = QLabel("No active task")
+        self.task_label.setWordWrap(True)
+        self.task_label.setStyleSheet(
+            f"color: {COLOR_TEXT_USER}; font-family: \"{FONT_UI}\"; "
+            f"font-size: 14px; font-weight: bold;")
+        layout.addWidget(self.task_label)
+
+        self.steps_label = QLabel("Activity will appear here while Kestrel works.")
+        self.steps_label.setWordWrap(True)
+        self.steps_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.steps_label.setStyleSheet(
+            f"color: {COLOR_TEXT_MID}; font-family: \"{FONT_MONO}\"; "
+            f"font-size: 10px;")
+        layout.addWidget(self.steps_label, 1)
+
+    def set_task_title(self, title):
+        text = " ".join(str(title or "").split())
+        self.task_label.setText(text or "No active task")
+
+    def set_activity(self, steps):
+        lines = [" ".join(str(line).split()) for line in (steps or [])
+                 if str(line).strip()]
+        self.steps_label.setText("\n".join(lines[-4:]) or "Waiting for the next step…")
+
+    def set_activity_idle(self):
+        self.task_label.setText("No active task")
+        self.steps_label.setText("Activity will appear here while Kestrel works.")
+
+    def steps_text(self):
+        return self.steps_label.text()
+
+
+class StateBar(QFrame):
+    STATES = ("IDLE", "LISTENING", "THINKING", "SPEAKING")
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("stateBar")
+        self.setFixedHeight(44)
+        self.setStyleSheet(
+            f"""
+            QFrame#stateBar {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {COLOR_ACCENT_DIM}, stop:0.18 {COLOR_BG_ALT});
+                border-top: 1px solid {COLOR_ACCENT};
+            }}
+            QFrame#stateBar QLabel {{
+                background: transparent; color: {COLOR_TEXT_LOW};
+                font-family: "{FONT_MONO}"; font-size: 10px;
+                font-weight: bold; padding: 4px 14px;
+            }}
+            """
+        )
+        row = QHBoxLayout(self)
+        row.setContentsMargins(18, 0, 18, 0)
+        row.setSpacing(4)
+        row.addStretch(1)
+        self.labels = {}
+        for state in self.STATES:
+            label = QLabel(state)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            row.addWidget(label)
+            self.labels[state] = label
+        row.addStretch(1)
+        self.state = "IDLE"
+        self.set_state("IDLE")
+
+    def set_state(self, state):
+        name = str(state or "IDLE").upper()
+        if name == "CONTINUOUS":
+            name = "LISTENING"
+        if name not in self.STATES:
+            name = "IDLE"
+        self.state = name
+        for label_state, label in self.labels.items():
+            active = label_state == name
+            label.setStyleSheet(
+                f"background: transparent; color: "
+                f"{COLOR_ACCENT if active else COLOR_TEXT_LOW}; "
+                f"font-family: \"{FONT_MONO}\"; font-size: 10px; "
+                f"font-weight: {'bold' if active else 'normal'}; "
+                f"padding: 4px 14px;")
+
+
+class OwlStage(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("owlStage")
+        self.setMinimumWidth(260)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setStyleSheet(
+            f"QFrame#owlStage {{ background: {COLOR_BG_ALT}; "
+            f"border: 1px solid {COLOR_BORDER}; border-radius: 16px; }}")
+
+        self.link_label = QLabel("HOLOGRAPHIC LINK // ONLINE", self)
+        self.link_label.setStyleSheet(
+            f"background: transparent; color: {COLOR_TEXT_MID}; "
+            f"font-family: \"{FONT_MONO}\"; font-size: 9px;")
+        self.link_label.setContentsMargins(16, 14, 16, 16)
+
+        self.hud = ReactorHud(parent=self, opacity=0.92)
+        self.pet = PetWidget(parent=self, opacity=1.0)
+        self.pet.set_position("bottom_right")
+        self.hud.set_pet_widget(self.pet)
+
+        self._sprite_relay = _SpriteRelay(self)
+        self._sprite_relay.command.connect(self.pet.play)
+        forward = self._sprite_relay.forward
+        sprite_bus.register(forward)
+        self.destroyed.connect(lambda *_: sprite_bus.unregister(forward))
+        self._fit_contents()
+
+    def set_state(self, state, pet_state="idle"):
+        self.hud.set_state(state)
+        self.hud.set_pet_state(pet_state)
+
+    def note_pet_activity(self):
+        self.hud.note_pet_activity()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_contents()
+
+    def _fit_contents(self):
+        self.pet.sync_to_parent()
+        side = max(220, min(self.width() - 32, self.height() - 120))
+        self.hud.setFixedSize(side, side)
+        self.hud.move(
+            (self.width() - side) // 2,
+            max(50, (self.height() - side) // 2 - 12),
+        )
+        self.pet.set_scale(max(1.6, min(2.3, self.width() / 210.0)))
+        self.link_label.raise_()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        if not painter.isActive():
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx = self.width() // 2
+        cy = int(self.height() * 0.80)
+        for radius, alpha, width in ((150, 18, 10), (116, 30, 5), (82, 55, 2)):
+            color = QColor(COLOR_ACCENT)
+            color.setAlpha(alpha)
+            painter.setPen(QPen(color, width))
+            painter.drawEllipse(
+                cx - radius, cy - radius // 4, radius * 2, radius // 2)
+        color = QColor(COLOR_ACCENT)
+        color.setAlpha(26)
+        painter.setPen(QPen(color, 1))
+        for offset in (-34, 0, 34):
+            painter.drawLine(cx - 130, cy + offset, cx + 130, cy + offset)
+        painter.end()
 
 
 # ----------------------------------------------------------------------
@@ -3566,8 +3778,9 @@ class AgentWindow(QMainWindow):
         self._chrome = FramelessChrome(self) if _FRAMELESS_SUPPORTED else None
         self._title_bar = None
         self.setWindowTitle("KESTREL")
-        self.resize(1380, 720)
-        self.setMinimumWidth(900)
+        self.resize(1480, 820)
+        self.setMinimumWidth(1360)
+        self.setMinimumHeight(720)
         self.setContentsMargins(0, 0, 0, 0)
 
         self._worker = None
@@ -3626,6 +3839,7 @@ class AgentWindow(QMainWindow):
         self._telegram_service = None
         self._telegram_results = None
         self._telegram_timer = None
+        self._telegram_messages = []
         self._event_bus = None
         # Section 4 — browser approval bridge (created after the chat view).
         self._browser_bridge = None
@@ -3703,87 +3917,118 @@ class AgentWindow(QMainWindow):
             self._title_bar = TitleBar(self)
             root.addWidget(self._title_bar)
 
-        # Chat and the info panel share a splitter; the chat keeps the stretch.
-        self.right_panel = self._build_right_panel()
-        self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._main_splitter.setObjectName("mainSplitter")
-        self._main_splitter.setHandleWidth(6)
-        self._main_splitter.setChildrenCollapsible(False)
-        self._main_splitter.setStyleSheet(
-            "QSplitter::handle:horizontal { background: transparent; }"
-            f"QSplitter::handle:horizontal:hover "
-            f"{{ background: {COLOR_ACCENT_DIM}; }}"
-        )
-        self._main_splitter.addWidget(self._build_main_column())
-        self._main_splitter.addWidget(self.right_panel)
-        self._main_splitter.setStretchFactor(0, 1)
-        self._main_splitter.setStretchFactor(1, 0)
-        self._main_splitter.setSizes([900, RIGHT_PANEL_W])
-        self._main_splitter.splitterMoved.connect(self._on_splitter_moved)
-        root.addWidget(self._main_splitter, 1)
+        shell = QWidget()
+        shell.setObjectName("appShell")
+        shell_row = zero_layout(QHBoxLayout(shell))
+        self.nav_rail = NavRail()
+        self.workspace = self._build_workspace()
+        shell_row.addWidget(self.nav_rail)
+        shell_row.addWidget(self.workspace, 1)
+        root.addWidget(shell, 1)
 
         self.setCentralWidget(central)
+        self._wire_navigation()
+        self._sync_hud_state()
 
         self._setup_browser_bridge()
         self._setup_os_control()
 
-    def _build_right_panel(self) -> QWidget:
-        self._right_panel_inner = RightPanel()
-        self._right_panel_inner.animations_enabled = self._animations_enabled
-        wrapper = QWidget()
-        wrapper.setMinimumWidth(MIN_RIGHT_PANEL_W)
-        wrapper.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        wrap_layout = zero_layout(QVBoxLayout(wrapper))
-        wrap_layout.addWidget(self._right_panel_inner)
-        return wrapper
+    def _build_workspace(self) -> QWidget:
+        workspace = QWidget()
+        workspace.setObjectName("workspace")
+        workspace.setStyleSheet(
+            f"QWidget#workspace {{ background: {COLOR_BG}; }}")
+        layout = zero_layout(QVBoxLayout(workspace))
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(12)
 
-    @property
-    def panel(self) -> "RightPanel":
-        """The cards' controller (the RightPanel inside the fixed wrapper)."""
-        return self._right_panel_inner
+        header = QFrame()
+        header.setObjectName("workspaceHeader")
+        header.setFixedHeight(48)
+        header.setStyleSheet(
+            f"QFrame#workspaceHeader {{ background: transparent; "
+            f"border-bottom: 1px solid {COLOR_BORDER}; }}")
+        header_row = QHBoxLayout(header)
+        header_row.setContentsMargins(20, 0, 20, 0)
+        title = QLabel("KESTREL")
+        title.setStyleSheet(
+            f"background: transparent; color: {COLOR_TEXT_USER}; "
+            f"font-family: \"{FONT_UI}\"; font-size: 19px; font-weight: bold;")
+        header_row.addWidget(title)
+        header_row.addSpacing(12)
+        self.header_status = QLabel("Ready")
+        self.header_status.setStyleSheet(
+            f"background: transparent; color: {COLOR_ACCENT}; "
+            f"font-family: \"{FONT_MONO}\"; font-size: 11px;")
+        header_row.addWidget(self.header_status)
+        header_row.addStretch(1)
+        new_chat = QToolButton()
+        new_chat.setIcon(_svg_icon("newchat", 18, COLOR_TEXT_MID))
+        new_chat.setToolTip("New chat")
+        new_chat.setCursor(Qt.CursorShape.PointingHandCursor)
+        new_chat.setStyleSheet(
+            f"QToolButton {{ background: transparent; border: none; padding: 6px; }}"
+            f"QToolButton:hover {{ background: {COLOR_HOVER}; }}")
+        new_chat.clicked.connect(self.new_chat)
+        header_row.addWidget(new_chat)
+        layout.addWidget(header)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(18, 0, 18, 0)
+        body.setSpacing(16)
+        self.conversation_column = QWidget()
+        self.conversation_column.setObjectName("conversationColumn")
+        self.conversation_column.setFixedWidth(TEXT_COLUMN_W)
+        conversation_layout = zero_layout(QVBoxLayout(self.conversation_column))
+        conversation_layout.setSpacing(12)
+        self.chat = ChatView()
+        self.task_workspace = TaskWorkspace()
+        conversation_layout.addWidget(self.chat, 1)
+        conversation_layout.addWidget(self.task_workspace)
+        self._main_col_layout = conversation_layout
+        body.addWidget(self.conversation_column)
+
+        self.owl_stage = OwlStage()
+        body.addWidget(self.owl_stage, 1)
+        layout.addLayout(body, 1)
+
+        self.composer = self._build_input_area()
+        layout.addWidget(self.composer)
+        self.state_bar = StateBar()
+        layout.addWidget(self.state_bar)
+        return workspace
+
+    def _wire_navigation(self):
+        buttons = self.nav_rail.buttons
+        buttons["Kestrel"].clicked.connect(
+            lambda: self.input_field.setFocus())
+        buttons["Tasks"].clicked.connect(self.open_schedule_dialog)
+        buttons["Files"].clicked.connect(self._choose_attachments)
+        buttons["Voice"].clicked.connect(self._toggle_voice)
+        buttons["Memory"].clicked.connect(self.open_memory_manager)
+        buttons["Settings"].clicked.connect(self.open_settings)
+
+    def _choose_attachments(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Attach files", "", "All files (*.*)")
+        for path in paths:
+            if path not in self.attachments:
+                self.attachments.append(path)
+        self._render_attachments()
+        self.input_field.setFocus()
+
+    def _toggle_voice(self):
+        if self._recording:
+            self._stop_recording()
+        elif self._voice_ready:
+            self._start_recording()
+        else:
+            self.set_status("Voice is not ready yet", busy=False)
 
     # ------------------------------------------------------------------
     # Phase 6b — panel data wiring (SYSTEM / WEATHER / NOW PLAYING)
     # ------------------------------------------------------------------
     def start_panel_timers(self):
-        """Start the panel polling timers. Called once the window is shown.
-
-        All timers are created here (main thread) — Phase 5a established that a
-        QTimer made on a worker thread never fires.
-        """
-        try:
-            psutil = get_psutil()
-            psutil.cpu_percent(interval=None)  # prime: first call returns 0.0
-            self._gpu_unavailable = not self._nvidia_available()
-        except Exception as e:
-            print(f"[system] psutil unavailable: {e}")
-            psutil = None
-        self._psutil = psutil
-
-        self._system_timer = QTimer(self)
-        self._system_timer.setInterval(SYSTEM_REFRESH_MS)
-        self._system_timer.timeout.connect(self._refresh_system)
-        self._system_timer.start()
-        self._refresh_system()  # paint immediately, don't wait 2s
-
-        self._weather_timer = QTimer(self)
-        self._weather_timer.setInterval(WEATHER_REFRESH_MS)
-        self._weather_timer.timeout.connect(self._refresh_weather)
-        self._weather_timer.start()
-        QTimer.singleShot(200, self._refresh_weather)  # first fetch soon after show
-
-        # Phase 6b follow-up — NOW PLAYING media poll (1s). The poll runs on a
-        # worker thread (winsdk calls are async); the timer just kicks it.
-        self.panel.set_media_command_callback(self._media_command)
-        self._media_poller = MediaPoller()
-        self._media_poller.result.connect(self._on_media_result)
-        self._media_timer = QTimer(self)
-        self._media_timer.setInterval(MEDIA_REFRESH_MS)
-        self._media_timer.timeout.connect(self._refresh_media)
-        self._media_timer.start()
-        self._refresh_media()
-
         self.start_lessons_timer()
 
     def start_lessons_timer(self):
@@ -3843,9 +4088,6 @@ class AgentWindow(QMainWindow):
             timer.start()
             self._hud_poll_timer = timer
         self._sync_hud_state()
-        # Card entrance: only when the panel is actually visible at launch.
-        if self._right_panel_visible:
-            QTimer.singleShot(0, self._animate_card_entrance)
 
     # ------------------------------------------------------------------
     # Phase 6c D — staggered card entrance
@@ -3949,117 +4191,6 @@ class AgentWindow(QMainWindow):
             self._drop_overlay.setGeometry(self._central_widget.rect())
             if self._drop_overlay.isVisible():
                 self._drop_overlay.raise_()
-        self._apply_panel_autohide()
-
-    def _apply_panel_autohide(self):
-        """Auto-hide the right panel below HIDE_PANEL_BELOW, re-show above
-        SHOW_PANEL_AT (hysteresis so a resize can't flap it).
-
-        Only acts while the panel is in auto mode — once the user toggles it by
-        hand, their choice wins until they toggle back.
-        """
-        if not self._right_panel_auto:
-            return
-        w = self.width()
-        # Autohide is a reactive resize response — do it instantly (animate=
-        # False) so the panel cannot lag behind a fast drag.
-        if self._right_panel_visible and w < HIDE_PANEL_BELOW:
-            self._set_right_panel_visible(False, animate=False)
-        elif not self._right_panel_visible and w >= SHOW_PANEL_AT:
-            self._set_right_panel_visible(True, animate=False)
-
-    def _on_splitter_moved(self, _pos, _index):
-        if self._right_panel_visible:
-            width = self.right_panel.width()
-            if width >= MIN_RIGHT_PANEL_W:
-                self._right_panel_last_width = width
-
-    def _restore_panel_width(self):
-        splitter = getattr(self, "_main_splitter", None)
-        if splitter is None or splitter.width() <= 0:
-            return
-        total = splitter.width()
-        target = max(MIN_RIGHT_PANEL_W, self._right_panel_last_width)
-        target = min(target, max(MIN_RIGHT_PANEL_W, total - 200))
-        splitter.setSizes([max(1, total - target), target])
-
-    def _set_right_panel_visible(self, visible: bool, animate: bool = True):
-        was_visible = self._right_panel_visible
-        if not visible and self.right_panel.width() >= MIN_RIGHT_PANEL_W:
-            self._right_panel_last_width = self.right_panel.width()
-
-        self._right_panel_visible = visible
-
-        # Slide the splitter pane between its remembered width and zero.
-        # Minimum width is relaxed during the animation and restored after.
-        self._stop_panel_anim()
-        if animate and self._animations_enabled:
-            self.right_panel.setMinimumWidth(0)
-            self.right_panel.setMaximumWidth(16777215)
-            self.right_panel.setVisible(True)
-            anim = QPropertyAnimation(self.right_panel, b"maximumWidth",
-                                      self.right_panel)
-            anim.setDuration(PANEL_SLIDE_MS)
-            anim.setStartValue(self.right_panel.width() if was_visible else 0)
-            anim.setEndValue(
-                max(MIN_RIGHT_PANEL_W, self._right_panel_last_width)
-                if visible else 0)
-            anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-            if visible:
-                anim.finished.connect(self._after_panel_shown)
-            else:
-                anim.finished.connect(self._after_panel_hidden)
-            anim.start()
-            self._panel_anim = anim
-        elif visible:
-            self.right_panel.setMinimumWidth(MIN_RIGHT_PANEL_W)
-            self.right_panel.setMaximumWidth(16777215)
-            self.right_panel.setVisible(True)
-            QTimer.singleShot(0, self._restore_panel_width)
-            QTimer.singleShot(0, self._animate_card_entrance)
-        else:
-            self.right_panel.setMinimumWidth(0)
-            self.right_panel.setMaximumWidth(0)
-            self.right_panel.setVisible(False)
-
-        # Guardrails: stop panel motion while hidden; entrance on re-show.
-        if not visible:
-            self._stop_card_anims()
-            for row in (self.panel.cpu_row, self.panel.ram_row,
-                        self.panel.gpu_row):
-                row.stop_ticker()
-
-    def _stop_panel_anim(self):
-        anim = getattr(self, "_panel_anim", None)
-        if anim is not None:
-            anim.stop()
-            self._panel_anim = None
-
-    def _after_panel_shown(self):
-        # Release the width caps and re-apply the remembered splitter size.
-        self._panel_anim = None
-        self.right_panel.setMaximumWidth(16777215)
-        self.right_panel.setMinimumWidth(MIN_RIGHT_PANEL_W)
-        self._restore_panel_width()
-        self._animate_card_entrance()
-
-    def _after_panel_hidden(self):
-        self._panel_anim = None
-        self.right_panel.setMinimumWidth(0)
-        self.right_panel.setMaximumWidth(0)
-        self.right_panel.setVisible(False)
-
-    def toggle_right_panel(self):
-        """Header chevron -> show/hide the right info panel (Phase 6a).
-
-        The first manual toggle switches the panel into manual mode; a manual
-        toggle that re-shows it at a very narrow width just flips back to auto
-        so a subsequent resize can still hide it (otherwise a stray click at
-        900px would pin an overlapping panel).
-        """
-        show = not self._right_panel_visible
-        self._set_right_panel_visible(show)
-        self._right_panel_auto = not (show and self.width() < HIDE_PANEL_BELOW)
 
     # ------------------------------------------------------------------
     # Drag & drop file input
@@ -4149,22 +4280,9 @@ class AgentWindow(QMainWindow):
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
-    def _build_main_column(self) -> QWidget:
-        col = QWidget()
-        col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout = zero_layout(QVBoxLayout(col))
-        # Exactly two terminal columns of breathing room off the left wall.
-        layout.setContentsMargins(
-            QFontMetrics(self.font()).horizontalAdvance("  "), 0, 0, 0)
-
-        self.chat = ChatView()
-        layout.addWidget(self.chat, 1)
-        layout.addWidget(self._build_input_area())
-        self._main_col_layout = layout
-        return col
-
     def _build_input_area(self) -> QWidget:
         outer = QWidget()
+        outer.setObjectName("composer")
         col = zero_layout(QVBoxLayout(outer))
 
         # Prompt fills the terminal width edge to edge.
@@ -4180,16 +4298,16 @@ class AgentWindow(QMainWindow):
         self.attach_strip.setVisible(False)
         self._input_col_layout.addWidget(self.attach_strip)
 
-        # One flat full-width prompt line: prefix, editor, nothing else. Enter
-        # submits, Ctrl+C interrupts, and /settings opens settings.
         self.input_pill = QFrame()
         self.input_pill.setObjectName("promptRow")
-        self.input_pill.setContentsMargins(0, 0, 0, 0)
+        self.input_pill.setStyleSheet(
+            f"QFrame#promptRow {{ background: {COLOR_CODE_BG}; "
+            f"border: 1px solid {COLOR_BORDER}; border-radius: 12px; }}")
         pill_row = QHBoxLayout(self.input_pill)
-        pill_row.setContentsMargins(0, 4, 0, 4)
-        pill_row.setSpacing(0)
+        pill_row.setContentsMargins(12, 8, 10, 8)
+        pill_row.setSpacing(8)
 
-        self.prompt_prefix = QLabel("root@vex:~# ")
+        self.prompt_prefix = QLabel("› ")
         self.prompt_prefix.setObjectName("promptPrefix")
         self.prompt_prefix.setMargin(0)
         self.prompt_prefix.setIndent(0)
@@ -4226,6 +4344,44 @@ class AgentWindow(QMainWindow):
         text_col.addLayout(text_row)
         text_col.addStretch(1)
         pill_row.addWidget(text_host, 1)
+
+        self.send_button = QPushButton("Send")
+        self.send_button.setObjectName("sendButton")
+        self.send_button.setIcon(_svg_icon("send", 16, COLOR_ACCENT))
+        self.send_button.setFixedSize(82, 38)
+        self.send_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {COLOR_ACCENT_DIM}; border: 1px solid {COLOR_ACCENT};
+                border-radius: 8px; color: {COLOR_TEXT_USER};
+                font-family: "{FONT_UI}"; font-size: 11px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {COLOR_SELECTED}; }}
+            QPushButton:pressed {{ background: {COLOR_HOVER}; }}
+            """
+        )
+        self.send_button.clicked.connect(self.send)
+        pill_row.addWidget(self.send_button)
+
+        self.voice_button = QPushButton("F9 push-to-talk")
+        self.voice_button.setObjectName("voiceButton")
+        self.voice_button.setIcon(_svg_icon("mic", 16, COLOR_TEXT_MID))
+        self.voice_button.setFixedSize(142, 38)
+        self.voice_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.voice_button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {COLOR_HOVER}; border: 1px solid {COLOR_BORDER};
+                border-radius: 8px; color: {COLOR_TEXT_MID};
+                font-family: "{FONT_UI}"; font-size: 10px;
+            }}
+            QPushButton:hover {{ color: {COLOR_ACCENT}; border-color: {COLOR_ACCENT}; }}
+            QPushButton:pressed {{ background: {COLOR_SELECTED}; }}
+            """
+        )
+        self.voice_button.clicked.connect(self._toggle_voice)
+        pill_row.addWidget(self.voice_button)
 
         self._input_col_layout.addWidget(self.input_pill)
         col.addWidget(holder)
@@ -4374,10 +4530,11 @@ class AgentWindow(QMainWindow):
     # Send / receive
     # ------------------------------------------------------------------
     def set_status(self, text, busy=False):
-        # The terminal canvas carries no status chrome; the window title is
-        # the only place a shell-like status belongs.
         label = " ".join((text or "").split())
         self.setWindowTitle(f"KESTREL — {label}" if label else "KESTREL")
+        header = getattr(self, "header_status", None)
+        if header is not None:
+            header.setText(label or "Ready")
         self._sync_hud_state()
 
     # The pet's sprite for each reactor state. States not listed — LISTENING,
@@ -4409,21 +4566,21 @@ class AgentWindow(QMainWindow):
         return self._PET_BY_STATE.get(name, "idle")
 
     def _sync_hud_state(self):
-        hud = getattr(getattr(self, "chat", None), "background_hud", None)
-        if hud is None:
+        stage = getattr(self, "owl_stage", None)
+        if stage is None:
             return
         name = self._resolve_hud_state()
-        hud.set_state(name)
-        # The mic's 60 s continuous-listening timeout means "quiet", not
-        # "asleep": only the pet's own activity clock puts it to bed, so that
-        # title leaves the pet awake and roaming like any other idle.
-        hud.set_pet_state(self._pet_state_for(name))
+        pet_state = self._pet_state_for(name)
+        stage.set_state(name, pet_state)
+        bar = getattr(self, "state_bar", None)
+        if bar is not None:
+            bar.set_state(name)
 
     def _note_pet_activity(self):
         """Tell the pet the user or the agent just did something."""
-        hud = getattr(getattr(self, "chat", None), "background_hud", None)
-        if hud is not None:
-            hud.note_pet_activity()
+        stage = getattr(self, "owl_stage", None)
+        if stage is not None:
+            stage.note_pet_activity()
 
     def _resolve_hud_state(self):
         if time.monotonic() < getattr(self, "_hud_error_until", 0.0):
@@ -4616,7 +4773,8 @@ class AgentWindow(QMainWindow):
         self.set_status("Reading attachments…" if attached_paths else "Thinking…",
                         busy=True)
         self._live_steps = []
-        self.panel.set_activity(["Thinking…"])
+        self.task_workspace.set_task_title(text)
+        self.task_workspace.set_activity(["Thinking…"])
         self._thinking_message = SystemMessage("Thinking…")
         self.chat.add_message(self._thinking_message, fade=False)
 
@@ -4635,7 +4793,7 @@ class AgentWindow(QMainWindow):
             return
         self._live_steps.append(text)
         self._live_steps = self._live_steps[-50:]
-        self.panel.set_activity(self._live_steps)
+        self.task_workspace.set_activity(self._live_steps)
         # The pet's pose depends on which tool just reported, and set_status
         # does not fire mid-turn, so each step has to re-sync it.
         self._note_pet_activity()
@@ -4675,9 +4833,7 @@ class AgentWindow(QMainWindow):
         self._last_step_log = step_log
         self._clear_thinking_message()
         self.chat.add_message(AssistantMessage(message, step_log=step_log))
-        # Keep the finished turn's steps on the ACTIVITY card until the next
-        # turn starts.
-        self.panel.set_activity(step_log)
+        self.task_workspace.set_activity(step_log)
         self._speak_reply(message)
         self._end_turn()
         self._schedule_continuous_listen()
@@ -4786,7 +4942,7 @@ class AgentWindow(QMainWindow):
             "/copy": self.copy_all,
             "/activity": self.toggle_log,
             "/log": self.toggle_log,
-            "/tg-clear": self.panel.clear_telegram,
+            "/tg-clear": self._clear_telegram_messages,
             "/clear": self.new_chat,
             "/new": self.new_chat,
         }
@@ -5622,10 +5778,11 @@ class AgentWindow(QMainWindow):
         except Exception:
             pass
         self.chat.clear()
+        self._telegram_messages.clear()
         self._last_step_log = None
         self._live_steps = []
         self._thinking_message = None
-        self.panel.set_activity_idle()
+        self.task_workspace.set_activity_idle()
         if self._log_panel is not None:
             self._refresh_log_panel()
         self.input_field.setFocus()
@@ -5660,7 +5817,11 @@ class AgentWindow(QMainWindow):
         self.chat.add_message(message, fade=False)
 
         def dismiss(widget=message):
-            if widget.parent() is not None:
+            try:
+                parent = widget.parent()
+            except RuntimeError:
+                return
+            if parent is not None:
                 self.chat.remove_message(widget)
 
         QTimer.singleShot(self.NOTICE_MS, dismiss)
@@ -6703,8 +6864,11 @@ class AgentWindow(QMainWindow):
         if kind == "summary":
             sender = str(meta.get("sender") or f"chat {chat_id}")
             file_name = str(meta.get("file_name") or f"msg {message_id}")
-            self.panel.add_telegram_summary(
-                sender, file_name, str(payload))
+            message = UntrustedTextMessage(
+                f"{sender} — {file_name}\n\n{payload}",
+                source="TELEGRAM DOCS")
+            self.chat.add_message(message)
+            self._telegram_messages.append(message)
         elif kind in ("rejected", "error"):
             self.chat.add_message(UntrustedTextMessage(
                 f"{kind}: {payload}", source="TELEGRAM DOCS"))
@@ -6712,6 +6876,11 @@ class AgentWindow(QMainWindow):
             self.chat.add_message(UntrustedTextMessage(
                 f"listener stopped: {payload}", source="TELEGRAM DOCS"))
             self._stop_telegram_doc_service()
+
+    def _clear_telegram_messages(self):
+        for message in self._telegram_messages:
+            self.chat.remove_message(message)
+        self._telegram_messages.clear()
 
     def _stop_telegram_doc_service(self):
         """Cooperative shutdown. Never joins the thread on the GUI thread."""
