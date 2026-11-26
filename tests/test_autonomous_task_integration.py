@@ -14,6 +14,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import artifact_store
+import python_sandbox
+
 PREFIX = "System: Autonomous task snapshot: "
 SUCCESS = "Execution and goal checks passed."
 SOURCE = "Universiti Malaya event: November 10; https://example.org/events/um?source=official"
@@ -35,15 +37,20 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.temp = Path(temp.name)
+        sandbox_local = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox_local.cleanup)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.dict(os.environ, {
-            "APPDATA": temp.name, "LOCALAPPDATA": temp.name,
+            "APPDATA": temp.name, "LOCALAPPDATA": sandbox_local.name,
             "AGENT_MEMORY_DIR": temp.name, "AGENTBOT_MOOD_FILE": "",
             "META_AI_API_KEY": "", "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_USER_ID": "",
         }))
         config = load_source("autonomous_task_test_config", "config.py")
-        config.load_config = lambda: {"AGENT_MEMORY_DIR": temp.name}
+        config.load_config = lambda: {
+            "AGENT_MEMORY_DIR": sandbox_local.name,
+            "PYTHON_SANDBOX_ROOTS": temp.name,
+        }
         config.save_config = mock.Mock(side_effect=AssertionError("config write"))
         names = (
             "requests winsound weather_news bs4 PIL PIL.ImageGrab selenium "
@@ -60,6 +67,11 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
         self.stack.enter_context(mock.patch.dict(sys.modules, modules))
         self.stack.enter_context(mock.patch.object(sys, "path", [str(ROOT)] + sys.path))
         self.a = load_source("autonomous_task_test_agent", "agent.py")
+        _, _, sandbox_state = python_sandbox._profile_identity()
+        self.stack.enter_context(mock.patch.object(
+            python_sandbox, "_profile_identity",
+            return_value=("Kestrel.PythonSandbox.Tests.AutonomousTask",
+                          "S-1-test", sandbox_state)))
         self.real_python = self.a.execute_python
         self.stack.enter_context(mock.patch.object(self.a, "note_tool_result"))
         self.stack.enter_context(mock.patch.object(self.a, "_run_agent_turn_impl", return_value=["normal"]))
@@ -496,7 +508,9 @@ class AutonomousTaskIntegrationTests(unittest.TestCase):
             '[{"tool":"request_tool","args":{"input":"screenshot_background"}},'
             '{"tool":"screenshot_background","args":{"input":""}}]',
             action("request_tool", "screenshot_background"), action("screenshot_background"), "DONE"])
-        self.assertIn("Cannot batch write/system_control tools", "\n".join(self.prompts))
+        self.assertIn(
+            "request_tool must be the only action in a response",
+            "\n".join(self.prompts))
         self.assertIn("screenshot_background", self.catalogs()[1])
         self.screen.assert_called_once()
 

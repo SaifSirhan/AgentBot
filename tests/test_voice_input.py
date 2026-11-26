@@ -4,6 +4,7 @@ No microphone or Whisper model is opened; sounddevice is faked.
 """
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import numpy as np  # noqa: E402
 import voice  # noqa: E402
 
 
@@ -211,7 +213,89 @@ class VoiceAutoStopCancellationTests(unittest.TestCase):
         self.assertIsNone(voice._stream)
 
 
+class VoiceTempFileTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="kestrel_voice_test_")
+        self.addCleanup(self.temp.cleanup)
+        self.saved = (
+            voice._is_recording,
+            voice._recording_chunks,
+            voice._stream,
+            voice._on_transcript,
+            voice._idle_timeout,
+        )
+        voice._is_recording = True
+        voice._recording_chunks = [
+            np.zeros((voice._SAMPLERATE, 1), dtype=np.int16)
+        ]
+        voice._stream = None
+        voice._on_transcript = None
+        voice._idle_timeout = None
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        (voice._is_recording, voice._recording_chunks, voice._stream,
+         voice._on_transcript, voice._idle_timeout) = self.saved
+
+    def test_successful_transcription_deletes_the_temporary_wav(self):
+        paths = []
+
+        def transcribe(path):
+            paths.append(Path(path))
+            self.assertTrue(paths[-1].exists())
+            return "hello"
+
+        with mock.patch.object(
+                voice.tempfile, "gettempdir", return_value=self.temp.name), \
+                mock.patch.object(voice, "transcribe", side_effect=transcribe):
+            self.assertEqual(voice.stop_and_transcribe(), "hello")
+
+        self.assertEqual(len(paths), 1)
+        self.assertFalse(paths[0].exists())
+
+    def test_failed_transcription_still_deletes_the_temporary_wav(self):
+        paths = []
+
+        def fail(path):
+            paths.append(Path(path))
+            raise RuntimeError("whisper failed")
+
+        with mock.patch.object(
+                voice.tempfile, "gettempdir", return_value=self.temp.name), \
+                mock.patch.object(voice, "transcribe", side_effect=fail):
+            with self.assertRaisesRegex(RuntimeError, "whisper failed"):
+                voice.stop_and_transcribe()
+
+        self.assertEqual(len(paths), 1)
+        self.assertFalse(paths[0].exists())
+
+    def test_temporary_wav_paths_do_not_collide(self):
+        audio = np.zeros((16, 1), dtype=np.int16)
+        with mock.patch.object(
+                voice.tempfile, "gettempdir", return_value=self.temp.name):
+            first = Path(voice._save_wav(audio, voice._SAMPLERATE))
+            second = Path(voice._save_wav(audio, voice._SAMPLERATE))
+        self.addCleanup(first.unlink, missing_ok=True)
+        self.addCleanup(second.unlink, missing_ok=True)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.exists())
+        self.assertTrue(second.exists())
+
+
 class WhisperLifecycleTests(unittest.TestCase):
+    def test_model_load_uses_only_the_existing_local_cache(self):
+        model = object()
+        with mock.patch.object(voice, "_whisper_model", None), \
+                mock.patch.object(
+                    voice, "WhisperModel", return_value=model) as constructor:
+            self.assertIs(voice.get_whisper_model(), model)
+        constructor.assert_called_once_with(
+            voice.WHISPER_MODEL_SIZE,
+            device="cpu",
+            compute_type="int8",
+            local_files_only=True,
+        )
+
     def test_warmup_loads_whisper_and_validates_the_microphone(self):
         model = object()
         with mock.patch.object(

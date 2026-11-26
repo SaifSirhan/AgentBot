@@ -1788,7 +1788,8 @@ class CoreCardIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 window.windowTitle(), "KESTREL — Listening (Continuous)…")
 
-            window._on_voice_event("continuous:idle:")
+            window._on_voice_event(
+                window._voice_generation, "continuous:idle:")
             self.assertEqual(
                 window.windowTitle(),
                 "KESTREL — Mic sleeping. Press F9 to talk.")

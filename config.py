@@ -21,6 +21,9 @@ DEFAULTS = {
     # Point it at a dedicated drive (e.g. D:\AgentBrain); the environment
     # variable of the same name overrides the file.
     "AGENT_MEMORY_DIR": "",
+    # Semicolon-separated execute_python writable roots. Empty uses the
+    # project, Downloads, Documents and Desktop directories.
+    "PYTHON_SANDBOX_ROOTS": "",
     # One client: deepseek-flash serves text, vision and search/fetch.
     "DEEPSEEK_API_KEY": "",
     "CRAWLBASE_KEY": "",

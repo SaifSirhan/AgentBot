@@ -593,29 +593,55 @@ def _trait_sort_key(record):
     return (int(record["confidence"]), record["last_updated"])
 
 
-def load_user_model():
-    """Read and validate user_model.json; never mutate the file."""
+def inspect_user_model():
+    """Return validated traits and safe file-state diagnostics without writes."""
     path = _user_model_file()
+    result = {
+        "status": "empty",
+        "path": path,
+        "traits": [],
+        "duplicate_count": 0,
+        "unsafe_count": 0,
+        "invalid_count": 0,
+    }
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
-        return _default_user_model()
+    except FileNotFoundError:
+        result["status"] = "missing"
+        return result
+    except OSError:
+        result["status"] = "unavailable"
+        return result
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        result["status"] = "malformed"
+        return result
 
     if isinstance(data, dict):
-        items = data.get("traits") or []
+        items = data.get("traits", [])
+        if items is None:
+            items = []
     elif isinstance(data, list):
         items = data
     else:
-        return _default_user_model()
+        result["status"] = "invalid"
+        return result
     if not isinstance(items, list):
-        return _default_user_model()
+        result["status"] = "invalid"
+        return result
 
     records = []
     for item in items:
         record = _coerce_trait(item)
         if record is not None:
             records.append(record)
+        elif (isinstance(item, dict)
+              and isinstance(item.get("trait"), str)
+              and any(pattern.search(item["trait"])
+                      for pattern in _UNSAFE_TRAIT_PATTERNS)):
+            result["unsafe_count"] += 1
+        else:
+            result["invalid_count"] += 1
     records.sort(key=_trait_sort_key, reverse=True)
 
     traits = []
@@ -623,10 +649,26 @@ def load_user_model():
     for record in records:
         key = _normalize(record["trait"])
         if key in seen:
+            result["duplicate_count"] += 1
             continue
         seen.add(key)
         traits.append(record)
-    return {"version": USER_MODEL_VERSION, "traits": traits}
+    result["traits"] = traits
+    if traits:
+        result["status"] = "valid"
+    elif result["unsafe_count"]:
+        result["status"] = "unsafe"
+    elif result["invalid_count"]:
+        result["status"] = "invalid"
+    return result
+
+
+def load_user_model():
+    """Read and validate user_model.json; never mutate the file."""
+    return {
+        "version": USER_MODEL_VERSION,
+        "traits": inspect_user_model()["traits"],
+    }
 
 
 def list_user_traits():

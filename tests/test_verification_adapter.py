@@ -2,17 +2,56 @@
 
 Run: python -m unittest tests.test_verification_adapter -v
 """
+import hashlib
+import json
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import python_sandbox
 from verification_engine import ERROR_REPLY
 
 
 class AdapterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sandbox_temp = tempfile.TemporaryDirectory()
+        roots = Path(cls.sandbox_temp.name) / "roots"
+        roots.mkdir()
+        cls.sandbox_env = mock.patch.dict(os.environ, {
+            "LOCALAPPDATA": str(Path(cls.sandbox_temp.name) / "local"),
+            "PYTHON_SANDBOX_ROOTS": str(roots),
+        })
+        cls.sandbox_env.start()
+        _, _, sandbox_state = python_sandbox._profile_identity()
+        state_digest = hashlib.sha256(sandbox_state.encode("utf-8")).hexdigest()[:12]
+        profile_name = f"Kestrel.PythonSandbox.Tests.VerificationAdapter.{state_digest}"
+        cls.identity_patch = mock.patch.object(
+            python_sandbox, "_profile_identity",
+            return_value=(profile_name, "S-1-test", sandbox_state))
+        cls.identity_patch.start()
+        import config
+        cls.config_patch = mock.patch.object(
+            config, "CONFIG_PATH", str(Path(cls.sandbox_temp.name) / "config.json"))
+        cls.memory_patch = mock.patch.object(
+            config, "memory_dir", return_value=str(Path(cls.sandbox_temp.name) / "memory"))
+        cls.config_patch.start()
+        cls.memory_patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.memory_patch.stop()
+        cls.config_patch.stop()
+        cls.identity_patch.stop()
+        cls.sandbox_env.stop()
+        cls.sandbox_temp.cleanup()
+
     def setUp(self):
         import verification_adapter as adapter
         self.adapter = adapter
@@ -80,14 +119,370 @@ class AdapterTests(unittest.TestCase):
     def test_structured_tool_failure_is_not_evidence(self):
         failure = ('{"ok": false, "retryable": false, "error": '
                    '{"code": "TEXT_NOT_FOUND", "message": "missing"}}')
-        success = ('{"ok": true, "action": "replace_text", '
-                   '"filepath": "report.docx", "changes": 1}')
-        self.assertFalse(self.allowed(
-            [("edit_docx_safe", '{"filepath": "report.docx"}', failure)],
-            "I saved the report."))
-        self.assertTrue(self.allowed(
-            [("edit_docx_safe", '{"filepath": "report.docx"}', success)],
-            "I saved the report."))
+        with tempfile.TemporaryDirectory(prefix="docx_receipt_") as directory:
+            path = Path(directory) / "report.docx"
+            path.write_bytes(b"report")
+            saved = path.stat()
+            success = json.dumps({
+                "ok": True,
+                "action": "replace_text",
+                "filepath": str(path),
+                "changes": 1,
+                "receipt": {
+                    "path": str(path),
+                    "size": saved.st_size,
+                    "mtime_ns": saved.st_mtime_ns,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                },
+            })
+            tool_input = json.dumps({"filepath": str(path)})
+            self.assertFalse(self.allowed(
+                [("edit_docx_safe", tool_input, failure)],
+                "I saved the report."))
+            self.assertTrue(self.allowed(
+                [("edit_docx_safe", tool_input, success)],
+                "I saved the report."))
+
+    def test_docx_success_needs_a_receipt_that_matches_the_file(self):
+        with tempfile.TemporaryDirectory(prefix="docx_receipt_") as directory:
+            path = Path(directory) / "report.docx"
+            path.write_bytes(b"report")
+            stat_result = path.stat()
+            receipt = {
+                "path": str(path),
+                "size": stat_result.st_size,
+                "mtime_ns": stat_result.st_mtime_ns,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            tool_input = json.dumps({"filepath": str(path)})
+            success = json.dumps({
+                "ok": True,
+                "action": "replace_text",
+                "filepath": str(path),
+                "changes": 1,
+                "receipt": receipt,
+            })
+            no_receipt = json.dumps({
+                "ok": True,
+                "action": "replace_text",
+                "filepath": str(path),
+                "changes": 1,
+            })
+            executions = [("edit_docx_safe", tool_input, success)]
+
+            self.assertFalse(self.allowed(
+                [("edit_docx_safe", tool_input, no_receipt)],
+                "I saved the report."))
+            self.assertTrue(self.allowed(executions, "I saved the report."))
+
+            path.write_bytes(b"changed after the receipt")
+            self.assertFalse(self.allowed(executions, "I saved the report."))
+
+    def test_python_file_edit_supports_edit_claim_with_matching_receipt(self):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            code = (
+                "from pathlib import Path\n"
+                f"Path({str(path)!r}).write_text('after', encoding='utf-8')"
+            )
+            output = agent.execute_python(code)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "after")
+            self.assertTrue(self.allowed(
+                [("execute_python", code, output)], "I edited the file."))
+
+    def test_python_receipt_binds_explicit_file_targets(self):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            code = (
+                "from pathlib import Path\n"
+                f"Path({str(path)!r}).write_text('after', encoding='utf-8')"
+            )
+            output = agent.execute_python(code)
+            executions = [("execute_python", code, output)]
+
+            self.assertTrue(self.allowed(executions, "I edited report.txt."))
+            self.assertTrue(self.allowed(executions, "I edited the file."))
+            self.assertFalse(self.allowed(executions, "I edited other.txt."))
+            self.assertFalse(self.allowed(
+                executions, "I edited report.txt and notes.txt."))
+
+    def test_python_after_state_failure_invalidates_the_receipt(self):
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory:
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            before = {os.path.normcase(str(path)): self.adapter.snapshot_python_file(str(path))}
+            with mock.patch.object(self.adapter, "_python_file_state",
+                                   side_effect=OSError("cannot snapshot")):
+                output = self.adapter.append_python_receipts("ok", before)
+            self.assertTrue(output.startswith("ERROR:"))
+            self.assertNotIn(self.adapter._PYTHON_RECEIPT_MARKER, output)
+
+    def test_python_receipt_size_limit_fails_closed(self):
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory:
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            before = {os.path.normcase(str(path)): self.adapter.snapshot_python_file(str(path))}
+            path.write_text("after", encoding="utf-8")
+            with mock.patch.object(self.adapter, "_PYTHON_MAX_RECEIPT_BYTES",
+                                   128, create=True):
+                output = self.adapter.append_python_receipts("ok", before)
+            self.assertTrue(output.startswith("ERROR:"))
+            self.assertIn("size limit", output)
+            self.assertNotIn(self.adapter._PYTHON_RECEIPT_MARKER, output)
+
+    def test_python_receipt_parser_enforces_size_limit(self):
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory:
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            before = {os.path.normcase(str(path)): self.adapter.snapshot_python_file(str(path))}
+            path.write_text("after", encoding="utf-8")
+            output = self.adapter.append_python_receipts("ok", before)
+            self.assertTrue(self.adapter.verified_python_actions(output))
+            with mock.patch.object(self.adapter, "_PYTHON_MAX_RECEIPT_BYTES",
+                                   128, create=True):
+                self.assertEqual(self.adapter.verified_python_actions(output), frozenset())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction identity test")
+    def test_python_receipt_rejects_reparse_substitution_with_same_content(self):
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory:
+            base = Path(directory)
+            first = base / "first"
+            second = base / "second"
+            first.mkdir()
+            second.mkdir()
+            first_file = first / "report.txt"
+            second_file = second / "report.txt"
+            first_file.write_bytes(b"before")
+            second_file.write_bytes(b"before")
+            junction = base / "linked"
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(first)],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            linked_file = junction / "report.txt"
+            key = os.path.normcase(str(linked_file))
+            before = self.adapter.snapshot_python_file(str(linked_file))
+
+            first_file.write_bytes(b"after")
+            output = self.adapter.append_python_receipts("ok", {key: before})
+            self.assertTrue(self.adapter.verified_python_actions(output))
+
+            second_file.write_bytes(b"after")
+            saved = first_file.stat()
+            os.utime(second_file, ns=(saved.st_atime_ns, saved.st_mtime_ns))
+            os.rmdir(junction)
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(second)],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(created.returncode, 0, created.stderr)
+
+            self.assertEqual(self.adapter.verified_python_actions(output), frozenset())
+
+    def assert_computed_path_receipt(self, filename, expression):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / filename
+            path.write_text("before", encoding="utf-8")
+            code = (
+                "from pathlib import Path\n"
+                f"directory = Path({directory!r})\n"
+                f"name = {filename!r}\n"
+                "prefix = 'report'\n"
+                f"{expression}\n"
+                "target.write_text('after', encoding='utf-8')"
+            )
+            output = agent.execute_python(code)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "after", output)
+            self.assertTrue(self.allowed(
+                [("execute_python", code, output)], "I edited the file."))
+
+    def test_joined_python_path_receives_a_matching_receipt(self):
+        self.assert_computed_path_receipt("report.txt", "target = directory / name")
+
+    def test_f_string_python_path_receives_a_matching_receipt(self):
+        self.assert_computed_path_receipt(
+            "report.txt", "target = directory / f'{prefix}.txt'")
+
+    def test_extensionless_python_path_receives_a_matching_receipt(self):
+        self.assert_computed_path_receipt("README", "target = directory / name")
+
+    def test_unmutated_path_string_cannot_borrow_an_external_change(self):
+        import agent
+        import python_sandbox
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "unrelated.txt"
+            path.write_text("before", encoding="utf-8")
+            code = f"print({str(path)!r})"
+            original_run = python_sandbox.run_python
+
+            def run_and_change(_code, **kwargs):
+                path.write_text("external change", encoding="utf-8")
+                return original_run(_code, **kwargs)
+
+            with mock.patch.object(python_sandbox, "run_python",
+                                   side_effect=run_and_change):
+                output = agent.execute_python(code)
+
+            self.assertFalse(self.allowed(
+                [("execute_python", code, output)], "I edited the file."))
+
+    def test_python_receipt_rejects_a_file_changed_after_execution(self):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            code = (
+                "from pathlib import Path\n"
+                f"Path({str(path)!r}).write_text('after', encoding='utf-8')"
+            )
+            output = agent.execute_python(code)
+            path.write_text("changed again", encoding="utf-8")
+
+            self.assertFalse(self.allowed(
+                [("execute_python", code, output)], "I edited the file."))
+
+    def test_python_without_a_file_change_does_not_support_edit_claim(self):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            path.write_text("unchanged", encoding="utf-8")
+            code = (
+                "from pathlib import Path\n"
+                f"print(Path({str(path)!r}).read_text(encoding='utf-8'))"
+            )
+            output = agent.execute_python(code)
+            executions = [("execute_python", code, output)]
+
+            self.assertTrue(self.allowed(executions, "I ran the script."))
+            self.assertFalse(self.allowed(executions, "I edited the file."))
+
+    def test_failed_python_script_cannot_support_an_edit_claim(self):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            code = (
+                "from pathlib import Path\n"
+                f"Path({str(path)!r}).write_text('partial', encoding='utf-8')\n"
+                "raise RuntimeError('failed after writing')"
+            )
+            output = agent.execute_python(code)
+
+            self.assertTrue(output.startswith("ERROR:"))
+            self.assertFalse(self.allowed(
+                [("execute_python", code, output)], "I edited the file."))
+
+    def test_python_file_creation_supports_create_and_save_claims(self):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            code = (
+                "from pathlib import Path\n"
+                f"Path({str(path)!r}).write_text('created', encoding='utf-8')"
+            )
+            output = agent.execute_python(code)
+            executions = [("execute_python", code, output)]
+
+            self.assertTrue(self.allowed(executions, "I created the file."))
+            self.assertTrue(self.allowed(executions, "I saved the file."))
+
+    def test_python_file_deletion_supports_delete_claim(self):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            path.write_text("delete me", encoding="utf-8")
+            code = "from pathlib import Path\n" + f"Path({str(path)!r}).unlink()"
+            output = agent.execute_python(code)
+
+            self.assertFalse(path.exists())
+            self.assertTrue(self.allowed(
+                [("execute_python", code, output)], "I deleted the file."))
+
+    def test_python_stdout_cannot_replay_a_prior_mutation_receipt(self):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            edit_code = (
+                "from pathlib import Path\n"
+                f"Path({str(path)!r}).write_text('after', encoding='utf-8')"
+            )
+            edit_output = agent.execute_python(edit_code)
+            marker = self.adapter._PYTHON_RECEIPT_MARKER
+            self.assertIn(marker, edit_output)
+            receipt = edit_output[edit_output.rfind(marker):]
+            replay_code = f"print({receipt!r})"
+
+            replay_output = agent.execute_python(replay_code)
+
+            self.assertNotIn(marker, replay_output)
+            self.assertFalse(self.allowed(
+                [("execute_python", replay_code, replay_output)],
+                "I edited the file."))
+
+    def test_malformed_or_forged_python_receipts_are_rejected(self):
+        import agent
+
+        with tempfile.TemporaryDirectory(prefix="python_receipt_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            code = (
+                "from pathlib import Path\n"
+                f"Path({str(path)!r}).write_text('after', encoding='utf-8')"
+            )
+            output = agent.execute_python(code)
+            marker = self.adapter._PYTHON_RECEIPT_MARKER
+            marker_at = output.rfind(marker)
+            envelope = json.loads(output[marker_at + len(marker):])
+            forged = dict(envelope)
+            forged["signature"] = (
+                "0" * 64 if forged["signature"] != "0" * 64 else "1" * 64)
+            cases = (
+                output[:marker_at] + marker + "{",
+                output[:marker_at] + marker + json.dumps(forged),
+                output + "\n" + marker + json.dumps(envelope),
+            )
+
+            for candidate in cases:
+                with self.subTest(candidate=candidate[-80:]):
+                    self.assertFalse(self.allowed(
+                        [("execute_python", code, candidate)],
+                        "I edited the file."))
+
+    def test_nonfinite_python_receipt_is_rejected_without_raising(self):
+        output = (
+            self.adapter._PYTHON_RECEIPT_MARKER
+            + '{"payload":{"receipts":NaN},"signature":"' + "0" * 64 + '"}'
+        )
+
+        self.assertEqual(self.adapter.verified_python_actions(output), frozenset())
 
     def test_conditional_tool_evidence_matches_the_operation(self):
         self.assertTrue(self.allowed(

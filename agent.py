@@ -1,6 +1,7 @@
 import subprocess
 import os
 import difflib
+import fnmatch
 import json
 import re
 import requests
@@ -36,9 +37,10 @@ import sprite_bus
 from tool_registry import (
     InputValidationError,
     MAX_BATCH_ACTIONS,
+    BATCH_PARALLEL,
     ToolRegistry,
     ToolSpec,
-    batch_rejection_error,
+    batch_execution_mode,
 )
 from uia_control import uia_click, uia_dump_tree, uia_type
 import screen
@@ -1559,6 +1561,7 @@ PY_DISABLED_MESSAGE = (
     "Ask the user for help."
 )
 _PY_FAILURES = {"count": 0}
+_PYTHON_EVIDENCE_LOCK = _threading.Lock()
 
 
 def reset_python_failures():
@@ -1583,24 +1586,11 @@ def execute_python(code):
     return result
 
 
-def _terminate_process(proc):
-    try:
-        proc.terminate()
-    except Exception:
-        pass
-    try:
-        proc.wait(timeout=2)
-        return
-    except Exception:
-        pass
-    try:
-        proc.kill()
-    except Exception:
-        pass
-    try:
-        proc.wait(timeout=2)
-    except Exception:
-        pass
+def _python_writable_roots():
+    configured = str(_cfg.get("PYTHON_SANDBOX_ROOTS", "") or "").strip()
+    if not configured:
+        return None
+    return [entry.strip() for entry in configured.split(os.pathsep) if entry.strip()]
 
 
 def _execute_python_once(code):
@@ -1609,41 +1599,58 @@ def _execute_python_once(code):
     stop = _current_stop_event()
     if stop is not None and stop.is_set():
         return CANCELLED_MESSAGE
-    env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, "-c", code],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-            cwd=os.path.dirname(os.path.abspath(__file__)), env=env,
-        )
-    except Exception as e:
-        return f"ERROR: cannot run Python: {e}"
-
-    deadline = time.monotonic() + PY_TIMEOUT
-    while True:
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    while not _PYTHON_EVIDENCE_LOCK.acquire(timeout=0.1):
         if stop is not None and stop.is_set():
-            _terminate_process(proc)
             return CANCELLED_MESSAGE
+    try:
+        if stop is not None and stop.is_set():
+            return CANCELLED_MESSAGE
+        before = {}
         try:
-            out, err = proc.communicate(timeout=0.2)
-            break
-        except subprocess.TimeoutExpired:
-            if time.monotonic() >= deadline:
-                _terminate_process(proc)
-                return (f"ERROR: the script ran longer than "
-                        f"{PY_TIMEOUT:g} seconds and was stopped.")
+            import python_sandbox
 
-    out = (out or "").strip()
-    err = (err or "").strip()
-    if len(out) > MAX_PYTHON_OUTPUT:
-        out = (out[:MAX_PYTHON_OUTPUT]
-               + f"\n[... truncated {len(out) - MAX_PYTHON_OUTPUT} chars]")
-    if proc.returncode != 0:
-        return f"ERROR: exit code {proc.returncode}\n{(err or out)[:MAX_PYTHON_OUTPUT]}"
-    if not out and err:
-        return f"OK (no stdout). stderr:\n{err[:MAX_PYTHON_OUTPUT]}"
-    return out or "OK (no output)"
+            result = python_sandbox.run_python(
+                code,
+                cwd=cwd,
+                writable_roots=_python_writable_roots(),
+                stop_event=stop,
+                timeout=PY_TIMEOUT,
+                max_output=MAX_PYTHON_OUTPUT,
+            )
+        except Exception as e:
+            output = f"ERROR: cannot run sandboxed Python: {e}"
+        else:
+            before = result.file_snapshots
+            if result.cancelled:
+                output = CANCELLED_MESSAGE
+            elif result.timed_out:
+                output = (f"ERROR: the script ran longer than "
+                          f"{PY_TIMEOUT:g} seconds and was stopped.")
+            elif result.error:
+                if result.error.startswith("ERROR:"):
+                    output = result.error
+                else:
+                    output = f"ERROR: cannot run sandboxed Python: {result.error}"
+            elif result.returncode is None:
+                output = "ERROR: sandboxed Python did not report an exit code."
+            else:
+                out = result.stdout.strip()
+                err = result.stderr.strip()
+                if result.stdout_truncated:
+                    out += "\n[... truncated]"
+                if result.stderr_truncated:
+                    err += "\n[... truncated]"
+                if result.returncode != 0:
+                    output = (f"ERROR: exit code {result.returncode}\n"
+                              f"{(err or out)[:MAX_PYTHON_OUTPUT]}")
+                elif not out and err:
+                    output = f"OK (no stdout). stderr:\n{err[:MAX_PYTHON_OUTPUT]}"
+                else:
+                    output = out or "OK (no output)"
+        return verification_adapter.append_python_receipts(output, before)
+    finally:
+        _PYTHON_EVIDENCE_LOCK.release()
 
 
 def _iter_folders(root, max_depth=2):
@@ -1760,6 +1767,13 @@ def _parse_patterns(pattern_field):
     return [p.strip().lower() for p in parts if p.strip()]
 
 
+def _name_matches(name, pattern):
+    """Glob when the pattern contains wildcards, substring otherwise."""
+    if any(char in pattern for char in "*?["):
+        return fnmatch.fnmatchcase(name, pattern)
+    return pattern in name
+
+
 def find_files(input_str):
     """Find files by NAME pattern. Format: 'folder|pat1,pat2' OR just 'pat1,pat2'."""
     user = os.environ.get("USERPROFILE", "")
@@ -1790,7 +1804,7 @@ def find_files(input_str):
     for root, dirs, files in os.walk(folder):
         for name in files:
             nl = name.lower()
-            if any(p in nl for p in patterns):
+            if any(_name_matches(nl, p) for p in patterns):
                 matches.append(os.path.join(root, name))
 
     if not matches:
@@ -5841,8 +5855,8 @@ def _build_tool_registry():
         ToolSpec(
             name="execute_python",
             description=(
-                "Run a Python script in a fresh interpreter and return "
-                "its output."),
+                "Run Python in a fresh, network-blocked sandbox; file writes "
+                "are limited to approved roots."),
             input_schema=_input_string(min_length=1),
             effect_class="system_control",
             timeout=120,
@@ -6382,25 +6396,34 @@ def execute_tool(action):
 
 
 def run_read_only_batch(actions):
-    """Run up to three registered read-only actions concurrently, in order.
+    """Run a batch in order: read-only actions concurrently, mixed sequentially.
 
-    Returns (ordered_results, rejection). The whole batch is rejected when any
-    action is not a verified read-only tool, so no write can ride along.
+    Returns (ordered_results, rejection). Unregistered tools and oversized
+    batches are rejected before anything runs.
     """
-    rejection = batch_rejection_error(
+    mode, rejection = batch_execution_mode(
         [action.get('tool') for action in actions], TOOL_REGISTRY)
     if rejection:
         return [], rejection
     results = []
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(execute_tool, action) for action in actions]
-        for future in futures:
-            try:
-                results.append(future.result())
-            except InterruptedError:
-                raise
-            except Exception as exc:
-                results.append(f"ERROR: {type(exc).__name__}: {exc}")
+    if mode == BATCH_PARALLEL:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(execute_tool, action) for action in actions]
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except InterruptedError:
+                    raise
+                except Exception as exc:
+                    results.append(f"ERROR: {type(exc).__name__}: {exc}")
+        return results, None
+    for action in actions:
+        try:
+            results.append(execute_tool(action))
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            results.append(f"ERROR: {type(exc).__name__}: {exc}")
     return results, None
 
 

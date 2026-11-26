@@ -16,7 +16,12 @@ from uuid import uuid4
 
 import artifact_store
 from loop_guard import GuardVerdict, LoopGuard
-from tool_registry import MAX_BATCH_ACTIONS, batch_rejection_error
+from verification_adapter import split_python_receipt
+from tool_registry import (
+    BATCH_PARALLEL,
+    MAX_BATCH_ACTIONS,
+    batch_execution_mode,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -223,6 +228,11 @@ class AutonomousLoop:
         if (tool_name in ("read_artifact", "scratchpad_read")
                 or len(observation) <= artifact_store.ARTIFACT_THRESHOLD_CHARS):
             return observation
+        if tool_name == "execute_python":
+            body, receipt = split_python_receipt(observation)
+            if receipt:
+                summary = AutonomousLoop._prepare_observation(tool_name, body)
+                return f"{summary}\n\n{receipt}"
         try:
             artifact_id = artifact_store.save_artifact(observation, tool_name)
         except OSError:
@@ -266,7 +276,8 @@ class AutonomousLoop:
         instructions = (
             'Choose exactly one next action: '
             '{"tool":"name","args":{...}}, '
-            "or a JSON array of up to 3 READ-ONLY actions to run concurrently, "
+            "or a JSON array of up to 3 actions; read-only batches run "
+            "concurrently and mixed batches run in order, "
             "or output exactly DONE when the goal is achieved. "
             "No prose or code fences. "
             "You do not need to expose private reasoning. "
@@ -554,7 +565,8 @@ class AutonomousLoop:
                 observe(
                     "Invalid action. Return exactly DONE, "
                     '{"tool":"allowed_name","args":{...}}, or a JSON array '
-                    f"of up to {MAX_BATCH_ACTIONS} read-only actions."
+                    f"of up to {MAX_BATCH_ACTIONS} actions; read-only batches "
+                    "run concurrently and mixed batches run in order."
                 )
                 continue
 
@@ -585,8 +597,9 @@ class AutonomousLoop:
                 observe(f"{error} Use request_tool to request '{unavailable}' first.")
                 continue
 
+            batch_mode = None
             if batch is not None:
-                rejection = batch_rejection_error(
+                batch_mode, rejection = batch_execution_mode(
                     [item["tool"] for item in batch], self.tool_registry)
                 if rejection:
                     observe(rejection)
@@ -662,18 +675,36 @@ class AutonomousLoop:
                 outcomes = []
                 interrupted = False
                 denied = None
-                with ThreadPoolExecutor(max_workers=3) as pool:
-                    futures = [
-                        (item, pool.submit(self._execute_batch_item, item))
-                        for item in batch
-                    ]
-                    for item, future in futures:
+                if batch_mode == BATCH_PARALLEL:
+                    with ThreadPoolExecutor(max_workers=3) as pool:
+                        futures = [
+                            (item, pool.submit(self._execute_batch_item, item))
+                            for item in batch
+                        ]
+                        for item, future in futures:
+                            try:
+                                outcomes.append(future.result())
+                            except InterruptedError:
+                                interrupted = True
+                            except PermissionError as exc:
+                                denied = str(exc)
+                            except Exception as exc:
+                                outcomes.append(ToolResult(
+                                    False,
+                                    f"Tool '{item['tool']}' failed: "
+                                    f"{type(exc).__name__}: {exc}; "
+                                    "state may be partial.",
+                                ))
+                else:
+                    for item in batch:
                         try:
-                            outcomes.append(future.result())
+                            outcomes.append(self._execute_batch_item(item))
                         except InterruptedError:
                             interrupted = True
+                            break
                         except PermissionError as exc:
                             denied = str(exc)
+                            break
                         except Exception as exc:
                             outcomes.append(ToolResult(
                                 False,

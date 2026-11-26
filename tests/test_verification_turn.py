@@ -2,7 +2,9 @@
 
 Run: python -m unittest tests.test_verification_turn -v
 """
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -10,6 +12,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import agent
+import python_sandbox
 
 
 def final_message(step_log):
@@ -23,6 +26,38 @@ def final_message(step_log):
 
 
 class VerificationTurnTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sandbox_temp = tempfile.TemporaryDirectory()
+        roots = Path(cls.sandbox_temp.name) / "roots"
+        roots.mkdir()
+        cls.sandbox_env = mock.patch.dict(os.environ, {
+            "LOCALAPPDATA": str(Path(cls.sandbox_temp.name) / "local"),
+            "PYTHON_SANDBOX_ROOTS": str(roots),
+        })
+        cls.sandbox_env.start()
+        _, _, sandbox_state = python_sandbox._profile_identity()
+        cls.identity_patch = mock.patch.object(
+            python_sandbox, "_profile_identity",
+            return_value=("Kestrel.PythonSandbox.Tests.VerificationTurn",
+                          "S-1-test", sandbox_state))
+        cls.identity_patch.start()
+        import config
+        cls.config_patch = mock.patch.object(
+            config, "CONFIG_PATH", str(Path(cls.sandbox_temp.name) / "config.json"))
+        cls.memory_patch = mock.patch.object(
+            config, "memory_dir", return_value=str(Path(cls.sandbox_temp.name) / "memory"))
+        cls.config_patch.start()
+        cls.memory_patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.memory_patch.stop()
+        cls.config_patch.stop()
+        cls.identity_patch.stop()
+        cls.sandbox_env.stop()
+        cls.sandbox_temp.cleanup()
+
     def setUp(self):
         agent.reset_python_failures()
         patches = [
@@ -73,6 +108,68 @@ class VerificationTurnTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertNotIn("System: " + agent.verification_adapter.RETRY_MESSAGE, step_log)
         self.assertEqual(final_message(step_log), "Done — saved notes.txt.")
+
+    def test_python_file_edit_claim_is_accepted_with_receipt(self):
+        with tempfile.TemporaryDirectory(prefix="python_turn_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.txt"
+            path.write_text("before", encoding="utf-8")
+            code = (
+                "from pathlib import Path\n"
+                f"Path({str(path)!r}).write_text('after', encoding='utf-8')"
+            )
+            output = agent.execute_python(code)
+
+            def execute(action):
+                if action["tool"] == "execute_python":
+                    return output
+                return f"AI: {action['input']}"
+
+            step_log, calls = self.run_turn([
+                ({"tool": "execute_python", "input": code}, None),
+                ({"tool": "chat", "input": "I edited the file."}, None),
+            ], execute=execute)
+
+            self.assertEqual(len(calls), 2)
+            self.assertNotIn(
+                "System: " + agent.verification_adapter.RETRY_MESSAGE, step_log)
+            self.assertEqual(final_message(step_log), "I edited the file.")
+            self.assertEqual(path.read_text(encoding="utf-8"), "after")
+
+    def test_python_docx_edit_claim_is_accepted_with_receipt(self):
+        from docx import Document
+
+        with tempfile.TemporaryDirectory(prefix="python_docx_turn_") as directory, \
+                mock.patch.dict(os.environ, {"PYTHON_SANDBOX_ROOTS": directory}):
+            path = Path(directory) / "report.docx"
+            document = Document()
+            document.add_paragraph("before")
+            document.save(path)
+            code = (
+                "from docx import Document\n"
+                f"document = Document({str(path)!r})\n"
+                "for paragraph in document.paragraphs:\n"
+                "    if paragraph.text == 'before':\n"
+                "        paragraph.text = 'after'\n"
+                f"document.save({str(path)!r})"
+            )
+            output = agent.execute_python(code)
+
+            def execute(action):
+                if action["tool"] == "execute_python":
+                    return output
+                return f"AI: {action['input']}"
+
+            step_log, calls = self.run_turn([
+                ({"tool": "execute_python", "input": code}, None),
+                ({"tool": "chat", "input": "I edited the document."}, None),
+            ], execute=execute)
+
+            self.assertEqual(len(calls), 2)
+            self.assertNotIn(
+                "System: " + agent.verification_adapter.RETRY_MESSAGE, step_log)
+            self.assertEqual(final_message(step_log), "I edited the document.")
+            self.assertEqual(Document(path).paragraphs[0].text, "after")
 
     def test_second_rejection_after_a_failed_tool_is_blocked(self):
         def execute(action):

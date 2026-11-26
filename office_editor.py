@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import stat
@@ -187,6 +188,7 @@ def safe_edit_docx(filepath, action, data):
                 cell.text = value
             changes = 1
 
+        receipt = None
         if changes:
             with tempfile.NamedTemporaryFile(
                 mode="w+b", prefix=".office-editor-", suffix=".docx",
@@ -198,6 +200,17 @@ def safe_edit_docx(filepath, action, data):
                 os.fsync(output.fileno())
             if os.name != "nt":
                 os.chmod(temporary_path, stat.S_IMODE(original_stat.st_mode))
+            saved_stat = temporary_path.stat()
+            digest = hashlib.sha256()
+            with temporary_path.open("rb") as saved:
+                for chunk in iter(lambda: saved.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            receipt = {
+                "path": str(path),
+                "size": saved_stat.st_size,
+                "mtime_ns": saved_stat.st_mtime_ns,
+                "sha256": digest.hexdigest(),
+            }
             current_stat = path.stat()
             if any(
                 getattr(current_stat, field) != getattr(original_stat, field)
@@ -206,8 +219,13 @@ def safe_edit_docx(filepath, action, data):
                 return error("CONCURRENT_MODIFICATION", "The document changed during editing; no changes from this call were saved.")
             os.replace(temporary_path, path)
             temporary_path = None
-
-        return json.dumps({"ok": True, "action": action, "filepath": str(path), "changes": changes})
+        return json.dumps({
+            "ok": True,
+            "action": action,
+            "filepath": str(path),
+            "changes": changes,
+            "receipt": receipt,
+        })
 
     except PermissionError:
         return error("FILE_LOCKED_OR_ACCESS_DENIED", "Close the file in Microsoft Word and check file/folder write permissions before trying again.")

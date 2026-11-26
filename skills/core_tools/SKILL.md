@@ -467,8 +467,10 @@ LOCAL FILES & DOCUMENTS
     in it. Use patch_file instead.
 
 PYTHON EXECUTION
-  execute_python(input) — run a Python script in a fresh process with the
-    agent's interpreter; returns stdout/stderr. Input: the code itself.
+  execute_python(input) — run a Python script in an isolated, network-blocked
+    AppContainer; returns stdout/stderr. Input: the code itself. Writes are
+    limited to the project, Downloads, Documents and Desktop, or the roots in
+    PYTHON_SANDBOX_ROOTS. Use a dedicated tool for targets outside those roots.
     For .xlsx or .pdf work, write a script with the relevant library, run it
     with this tool, and observe the output. Do not use read_file for binary
     documents.

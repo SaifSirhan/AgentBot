@@ -51,6 +51,41 @@ class SafeDocxTests(unittest.TestCase):
         self.assertEqual(doc.paragraphs[-1].style.name, "Heading 1")
         self.assertEqual(doc.tables[0].cell(0, 1).text, "Status")
 
+    def test_successful_edit_returns_a_write_receipt(self):
+        result = self.edit("replace_text", {"old": "Draft", "new": "Final"})
+        self.assertIs(result["ok"], True)
+        receipt = result["receipt"]
+        self.assertEqual(Path(receipt["path"]), self.path.resolve())
+        self.assertEqual(receipt["size"], self.path.stat().st_size)
+        self.assertEqual(receipt["mtime_ns"], self.path.stat().st_mtime_ns)
+        import hashlib
+        self.assertEqual(
+            receipt["sha256"],
+            hashlib.sha256(self.path.read_bytes()).hexdigest())
+
+    def test_receipt_failure_after_replace_does_not_misreport_a_saved_edit(self):
+        real_replace = self.editor.os.replace
+        real_stat = Path.stat
+        replaced = False
+
+        def replace_and_mark(source, destination):
+            nonlocal replaced
+            real_replace(source, destination)
+            replaced = True
+
+        def fail_target_stat(path, *args, **kwargs):
+            if replaced and path == self.path:
+                raise OSError("receipt stat failed after save")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(self.editor.os, "replace", side_effect=replace_and_mark), \
+                mock.patch.object(Path, "stat", fail_target_stat):
+            result = self.edit("replace_text", {"old": "Draft", "new": "Final"})
+
+        self.assertIs(result["ok"], True)
+        self.assertEqual(Document(self.path).paragraphs[0].text, "Final report")
+        self.assertIsNotNone(result["receipt"])
+
     def test_replace_across_runs_preserves_formatting(self):
         doc = Document(self.path)
         paragraph = doc.paragraphs[0]

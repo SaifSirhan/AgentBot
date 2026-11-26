@@ -15,12 +15,16 @@ from typing import Any, Callable
 EFFECT_CLASSES = frozenset({"read_only", "write", "system_control"})
 
 MAX_BATCH_ACTIONS = 3
-BATCH_EFFECT_ERROR = (
-    "ERROR: Cannot batch write/system_control tools. "
-    "Execute them sequentially.")
+BATCH_PARALLEL = "parallel"
+BATCH_SEQUENTIAL = "sequential"
 BATCH_SIZE_ERROR = (
     f"ERROR: Cannot batch more than {MAX_BATCH_ACTIONS} actions. "
-    "Execute at most three read-only tools per batch.")
+    "Execute at most three tools per batch.")
+BATCH_UNKNOWN_ERROR = (
+    "ERROR: Cannot batch an unregistered tool. Execute it on its own.")
+BATCH_GRANT_ERROR = (
+    "ERROR: request_tool must be the only action in a response; "
+    "use the granted tool next turn.")
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -243,21 +247,28 @@ class ToolRegistry:
         return "\n".join(lines)
 
 
-def batch_rejection_error(names, registry: ToolRegistry) -> str | None:
-    """Return the rejection for a batch, or None when it is safe to run concurrently.
+def batch_execution_mode(
+        names, registry: ToolRegistry) -> tuple[str | None, str | None]:
+    """Return (mode, rejection); mixed batches run sequentially.
 
     Unregistered tools fail closed: without a spec the effect class cannot be
-    verified, and a legacy write tool must never join a parallel batch.
+    verified, so they may not ride along with any other action.
     """
     names = list(names)
     if len(names) > MAX_BATCH_ACTIONS:
-        return BATCH_SIZE_ERROR
+        return None, BATCH_SIZE_ERROR
+    if "request_tool" in names:
+        return None, BATCH_GRANT_ERROR
+    specs = []
     for name in names:
         spec = (
             registry.get(name)
             if registry is not None and isinstance(name, str)
             else None
         )
-        if spec is None or spec.effect_class != "read_only":
-            return BATCH_EFFECT_ERROR
-    return None
+        if spec is None:
+            return None, BATCH_UNKNOWN_ERROR
+        specs.append(spec)
+    if all(spec.effect_class == "read_only" for spec in specs):
+        return BATCH_PARALLEL, None
+    return BATCH_SEQUENTIAL, None

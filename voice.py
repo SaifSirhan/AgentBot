@@ -210,7 +210,11 @@ def get_whisper_model():
                     f"Loading Whisper model ('{WHISPER_MODEL_SIZE}')... "
                     "(first call only)")
                 _whisper_model = WhisperModel(
-                    WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+                    WHISPER_MODEL_SIZE,
+                    device="cpu",
+                    compute_type="int8",
+                    local_files_only=True,
+                )
     return _whisper_model
     
 def unload_whisper_model():
@@ -238,12 +242,20 @@ def transcribe(audio_path):
 
 
 def _save_wav(audio_int16, samplerate):
-    tmp_path = os.path.join(tempfile.gettempdir(), "agent_mic_input.wav")
-    with wave.open(tmp_path, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(samplerate)
-        wf.writeframes(audio_int16.tobytes())
+    fd, tmp_path = tempfile.mkstemp(prefix="kestrel_mic_", suffix=".wav")
+    os.close(fd)
+    try:
+        with wave.open(tmp_path, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(samplerate)
+            wf.writeframes(audio_int16.tobytes())
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
     return tmp_path
 
 
@@ -477,9 +489,12 @@ def stop_and_transcribe():
         return ""
 
     path = _save_wav(audio, _SAMPLERATE)
-    text = transcribe(path)
-    print(f"Transcribed: {text}")
-    return text
+    try:
+        text = transcribe(path)
+        print(f"Transcribed: {text}")
+        return text
+    finally:
+        os.remove(path)
 
 
 def cancel_recording():
@@ -506,9 +521,12 @@ def record_audio(duration=5, samplerate=_SAMPLERATE):
 
 def listen_and_transcribe(duration=5):
     audio_path = record_audio(duration)
-    text = transcribe(audio_path)
-    print(f"Transcribed: {text}")
-    return text
+    try:
+        text = transcribe(audio_path)
+        print(f"Transcribed: {text}")
+        return text
+    finally:
+        os.remove(audio_path)
 
 
 if __name__ == "__main__":

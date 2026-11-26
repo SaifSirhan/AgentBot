@@ -405,6 +405,7 @@ class FakeTts:
         self.speaking = speaking
         self.spoken = []
         self.stops = 0
+        self.error_callback = None
 
     def speak(self, text):
         self.spoken.append(text)
@@ -418,6 +419,9 @@ class FakeTts:
 
     def last_error(self):
         return ""
+
+    def set_error_callback(self, callback):
+        self.error_callback = callback
 
 
 class FakeWakeService:
@@ -437,6 +441,7 @@ class FakeStt:
         self.kwargs = None
         self.started = threading.Event()
         self.cancelled = 0
+        self.transcribed = 0
 
     def start_recording(self, **kwargs):
         self.kwargs = kwargs
@@ -446,6 +451,7 @@ class FakeStt:
         self.cancelled += 1
 
     def stop_and_transcribe(self):
+        self.transcribed += 1
         return ""
 
 
@@ -468,6 +474,10 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self.window._agent_ready = True
         self.window._f9_held = False
         self.window._pending_f9_start = False
+        self.window._voice_generation = 0
+        self.window._speech_generation = 0
+        self.window._voice_state = "idle"
+        self.window._transcribing = False
         for _ in range(10):
             self.app.processEvents()
 
@@ -476,6 +486,19 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self.window.close()
         self.window.deleteLater()
         self.app.processEvents()
+
+    def _process_events(self, seconds=0.25):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.01)
+
+    def _start_fake_recording(self, stt, continuous=False):
+        with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(self.window, "_release_audio_before_recording"):
+            self.window._start_recording(continuous=continuous)
+            self.assertTrue(stt.started.wait(2.0), "recording never started")
+            self._process_events()
 
     def test_send_stops_tts_before_the_turn(self):
         tts = FakeTts()
@@ -512,8 +535,35 @@ class GuiVoicePipelineTests(unittest.TestCase):
             self.window._handle_transcript("  open the browser  ")
         self.assertEqual(self.window.input_field.toPlainText(), "")
         self.assertEqual(tts.stops, 1)
-        start_turn.assert_called_once()
+        start_turn.assert_called_once_with(
+            "open the browser", [], persist_history=False)
         self.assertEqual(start_turn.call_args.args[0], "open the browser")
+
+    def test_voice_transcript_is_not_added_to_prompt_history(self):
+        with mock.patch.object(self.window, "_start_agent_turn"):
+            self.window._handle_transcript("private voice words")
+        self.assertNotIn(
+            "private voice words", self.window.input_field.history.entries)
+
+    def test_voice_slash_transcript_uses_an_ephemeral_agent_turn(self):
+        with mock.patch.object(
+                self.window, "_handle_slash_command") as slash, \
+                mock.patch.object(self.window, "_start_agent_turn") as start:
+            self.window._handle_transcript("/help")
+        slash.assert_not_called()
+        start.assert_called_once_with("/help", [], persist_history=False)
+        self.assertNotIn("/help", self.window.input_field.history.entries)
+
+    def test_ephemeral_turn_does_not_reset_persisted_task_context(self):
+        with mock.patch.object(
+                self.window, "_reset_task_context_if_new") as reset, \
+                mock.patch.object(g, "AgentWorker") as worker_type:
+            self.window._start_agent_turn(
+                "private voice words", [], persist_history=False)
+        reset.assert_not_called()
+        self.assertIs(
+            worker_type.call_args.kwargs["persist_history"], False)
+        self.window._end_turn()
 
     def test_empty_transcript_is_not_sent(self):
         with mock.patch.object(self.window, "send") as send:
@@ -546,6 +596,35 @@ class GuiVoicePipelineTests(unittest.TestCase):
         write.assert_called_once_with({"CONTINUOUS_LISTENING": False})
         cancel.assert_called_once()
 
+    def test_continuous_off_cancels_transcription_and_drops_late_result(self):
+        self.window._continuous_enabled = True
+        self.window._transcribing = True
+        generation = self.window._voice_generation
+        stt = FakeStt()
+        with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(self.window, "_handle_transcript") as handle:
+            self.window._cancel_continuous_listening()
+            self.window._on_voice_event(generation, "transcript:late words")
+        self.assertEqual(stt.cancelled, 1)
+        self.assertFalse(self.window._transcribing)
+        self.assertEqual(self.window._voice_state, "idle")
+        handle.assert_not_called()
+
+    def test_continuous_listener_does_not_schedule_during_transcription(self):
+        self.window._continuous_enabled = True
+        self.window._transcribing = True
+        self.window._schedule_continuous_listen()
+        self.assertTrue(
+            self.window._continuous_timer is None
+            or not self.window._continuous_timer.isActive())
+
+    def test_continuous_listener_does_not_start_during_transcription(self):
+        self.window._continuous_enabled = True
+        self.window._transcribing = True
+        with mock.patch.object(self.window, "_start_recording") as start:
+            self.window._try_continuous_listen()
+        start.assert_not_called()
+
     def test_continuous_usage_error_does_not_persist(self):
         with mock.patch.object(g, "write_config_keys") as write:
             self.assertTrue(
@@ -559,7 +638,7 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self.window._recording = True
         with mock.patch.object(
                 self.window, "_resume_wake_word") as resume:
-            self.window._on_voice_event("continuous:idle:")
+            self.window._on_voice_event(self.window._voice_generation, "continuous:idle:")
         self.assertFalse(self.window._recording)
         self.assertFalse(self.window._continuous_listening)
         self.assertTrue(self.window._continuous_paused)
@@ -588,6 +667,7 @@ class GuiVoicePipelineTests(unittest.TestCase):
                 mock.patch.object(
                     self.window, "_resume_wake_word") as resume:
             self.window._on_voice_event(
+                self.window._voice_generation,
                 "continuous:silence:open the browser")
         handle.assert_called_once_with("open the browser")
         resume.assert_not_called()
@@ -602,7 +682,7 @@ class GuiVoicePipelineTests(unittest.TestCase):
                 self.window, "_handle_transcript") as handle, \
                 mock.patch.object(
                     self.window, "_resume_wake_word") as resume:
-            self.window._on_voice_event("continuous:error:")
+            self.window._on_voice_event(self.window._voice_generation, "continuous:error:")
         handle.assert_not_called()
         resume.assert_called_once()
         self.assertTrue(self.window._continuous_paused)
@@ -613,7 +693,7 @@ class GuiVoicePipelineTests(unittest.TestCase):
                 self.window, "_handle_transcript") as handle, \
                 mock.patch.object(
                     self.window, "_resume_wake_word") as resume:
-            self.window._on_voice_event("transcript:hello")
+            self.window._on_voice_event(self.window._voice_generation, "transcript:hello")
         handle.assert_called_once_with("hello")
         resume.assert_called_once()
 
@@ -813,16 +893,287 @@ class GuiVoicePipelineTests(unittest.TestCase):
             idle.set()
             self.assertTrue(stt.started.wait(2.0))
 
+    def test_wake_preload_does_not_replace_transcription_status(self):
+        self.window._transcribing = True
+        self.window._wake_word_service = FakeWakeService()
+        self.window.set_status("Transcribing…", busy=True)
+        with mock.patch.object(self.window, "_start_wake_word_service"):
+            self.window._on_preload_ready("wake_word")
+        self.assertIn("Transcribing", self.window.windowTitle())
+
     def test_voice_preload_failure_is_visible(self):
         self.window._on_preload_ready("voice:error")
         self.assertTrue(self.window._voice_failed)
         self.assertIn("Voice unavailable", self.window.windowTitle())
 
     def test_transcription_error_is_written_to_transcript(self):
-        self.window._on_voice_event("error:Transcribe error: whisper failed")
+        self.window._on_voice_event(self.window._voice_generation, "error:Transcribe error: whisper failed")
         texts = [text for _kind, text in self.window.chat.chat_log]
         self.assertTrue(
             any("whisper failed" in text for text in texts), texts)
+        self.assertEqual(getattr(self.window, "_voice_state", None), "error")
+        self.assertIn("VOICE ERROR", self.window.voice_button.text())
+
+    def test_recording_shows_microphone_privacy_indicator(self):
+        stt = FakeStt()
+        self.addCleanup(setattr, self.window, "_recording", False)
+        self._start_fake_recording(stt)
+        self.assertIn("MIC ON", self.window.voice_button.text())
+        self.assertEqual(getattr(self.window, "_voice_state", None), "listening")
+
+    def test_transcribing_state_is_visible(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingStt(FakeStt):
+            def stop_and_transcribe(self):
+                entered.set()
+                release.wait(2.0)
+                return ""
+
+        self.addCleanup(self._process_events)
+        self.addCleanup(release.set)
+        stt = BlockingStt()
+        self._start_fake_recording(stt)
+        with mock.patch.object(g, "get_voice", return_value=stt):
+            self.window._stop_recording()
+            self.assertTrue(entered.wait(2.0))
+        self.assertIn("TRANSCRIBING", self.window.voice_button.text())
+        self.assertTrue(getattr(self.window, "_transcribing", False))
+
+    def test_stop_cancels_active_recording(self):
+        stt = FakeStt()
+        self._start_fake_recording(stt)
+        with mock.patch.object(g, "get_voice", return_value=stt):
+            self.window._request_stop()
+        self.assertEqual(stt.cancelled, 1)
+        self.assertFalse(self.window._recording)
+        self.assertIn("Cancelled", self.window.windowTitle())
+        self.assertIn("CANCELLED", self.window.voice_button.text())
+
+    def test_stop_cancels_transcription_and_drops_late_transcript(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingStt(FakeStt):
+            def stop_and_transcribe(self):
+                entered.set()
+                release.wait(2.0)
+                return "late words"
+
+        self.addCleanup(self._process_events)
+        self.addCleanup(release.set)
+        stt = BlockingStt()
+        self._start_fake_recording(stt)
+        with mock.patch.object(g, "get_voice", return_value=stt):
+            self.window._stop_recording()
+            self.assertTrue(entered.wait(2.0))
+            self.window._request_stop()
+        release.set()
+        self._process_events()
+        with mock.patch.object(self.window, "_start_agent_turn") as start:
+            self._process_events()
+        start.assert_not_called()
+        self.assertIn("Cancelled", self.window.windowTitle())
+        self.assertEqual(getattr(self.window, "_voice_state", None), "cancelled")
+
+    def test_stop_interrupts_speech_playback(self):
+        tts = FakeTts(queued=True, speaking=True)
+        self.window._voice_state = "speaking"
+        with mock.patch.object(g, "get_voice_output", return_value=tts):
+            self.window._request_stop()
+        self.assertEqual(tts.stops, 1)
+        self.assertEqual(getattr(self.window, "_voice_state", None), "cancelled")
+
+    def test_escape_cancels_voice_outside_the_input(self):
+        stt = FakeStt()
+        self._start_fake_recording(stt)
+        event = g.QKeyEvent(
+            g.QEvent.Type.KeyPress,
+            g.Qt.Key.Key_Escape,
+            g.Qt.KeyboardModifier.NoModifier,
+        )
+        with mock.patch.object(g, "get_voice", return_value=stt):
+            self.window.keyPressEvent(event)
+        self.assertEqual(stt.cancelled, 1)
+        self.assertFalse(self.window._recording)
+
+    def test_window_close_cancels_active_recording(self):
+        stt = FakeStt()
+        tts = FakeTts(speaking=True)
+        self._start_fake_recording(stt)
+        event = mock.Mock()
+        with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(g, "get_voice_output", return_value=tts), \
+                mock.patch.object(self.window, "hide_to_tray"):
+            self.window.closeEvent(event)
+        event.ignore.assert_called_once()
+        self.assertEqual(stt.cancelled, 1)
+        self.assertEqual(tts.stops, 1)
+        self.assertFalse(self.window._recording)
+
+    def test_ctrl_c_cancels_active_recording(self):
+        stt = FakeStt()
+        self._start_fake_recording(stt)
+        with mock.patch.object(g, "get_voice", return_value=stt):
+            self.assertTrue(self.window._on_ctrl_c())
+        self.assertEqual(stt.cancelled, 1)
+        self.assertFalse(self.window._recording)
+
+    def test_quit_drops_active_audio_without_transcribing(self):
+        stt = FakeStt()
+        tts = FakeTts(speaking=True)
+        self._start_fake_recording(stt)
+        with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(g, "get_voice_output", return_value=tts), \
+                mock.patch.object(g, "get_agent"), \
+                mock.patch.object(g.screen_copilot, "shutdown"), \
+                mock.patch.object(self.window, "_stop_event_bus"), \
+                mock.patch.object(self.window, "_stop_telegram_doc_service"), \
+                mock.patch.object(self.window, "_quit_when_copilot_workers_stop"), \
+                mock.patch("os_control.stop_kill_switch"), \
+                mock.patch("os_control.set_gui_visibility_handlers"), \
+                mock.patch("os_control.set_gui_capture_handler"), \
+                mock.patch("browser_agent.shutdown"), \
+                mock.patch("browser_agent.set_approval_handler"):
+            self.window.quit_app()
+        self.assertEqual(stt.transcribed, 0)
+        self.assertEqual(stt.cancelled, 1)
+        self.assertEqual(tts.stops, 1)
+        self.assertFalse(self.window._recording)
+
+    def test_app_quit_cancels_active_audio_and_wake_microphone(self):
+        stt = FakeStt()
+        tts = FakeTts(speaking=True)
+        wake = FakeWakeService()
+        self.window._wake_word_service = wake
+        self._start_fake_recording(stt)
+        with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(g, "get_voice_output", return_value=tts), \
+                mock.patch.object(self.window, "_stop_copilot_workers"), \
+                mock.patch.object(self.window, "_detach_copilot_bridge"), \
+                mock.patch.object(g.screen_copilot, "shutdown"), \
+                mock.patch.object(self.window, "_stop_event_bus"):
+            self.window._on_about_to_quit()
+        self.assertEqual(stt.cancelled, 1)
+        self.assertEqual(tts.stops, 1)
+        self.assertEqual(wake.stopped, 1)
+        self.assertFalse(self.window._recording)
+
+    def test_stale_continuous_callback_is_ignored(self):
+        stt = FakeStt()
+        self._start_fake_recording(stt, continuous=True)
+        callback = stt.kwargs["on_transcript"]
+        self.window._voice_generation = getattr(
+            self.window, "_voice_generation", 0) + 1
+        with mock.patch.object(self.window, "_handle_transcript") as handle:
+            callback("stale words", "silence")
+            self._process_events()
+        handle.assert_not_called()
+
+    def test_stale_transcription_is_ignored(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingStt(FakeStt):
+            def stop_and_transcribe(self):
+                entered.set()
+                release.wait(2.0)
+                return "stale words"
+
+        self.addCleanup(self._process_events)
+        self.addCleanup(release.set)
+        stt = BlockingStt()
+        self._start_fake_recording(stt)
+        with mock.patch.object(g, "get_voice", return_value=stt):
+            self.window._stop_recording()
+            self.assertTrue(entered.wait(2.0))
+        self.window._voice_generation = getattr(
+            self.window, "_voice_generation", 0) + 1
+        release.set()
+        with mock.patch.object(self.window, "_start_agent_turn") as start:
+            self._process_events()
+        start.assert_not_called()
+
+    def test_stale_mic_error_is_ignored(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class SlowFailStt(FakeStt):
+            def start_recording(self, **kwargs):
+                entered.set()
+                release.wait(2.0)
+                raise RuntimeError("old mic failure")
+
+        self.addCleanup(self._process_events)
+        self.addCleanup(release.set)
+        stt = SlowFailStt()
+        with mock.patch.object(g, "get_voice", return_value=stt), \
+                mock.patch.object(self.window, "_release_audio_before_recording"):
+            self.window._start_recording()
+            self.assertTrue(entered.wait(2.0))
+        self.window._voice_generation = getattr(
+            self.window, "_voice_generation", 0) + 1
+        self.window.set_status("Newer session")
+        release.set()
+        self._process_events()
+        self.assertIn("Newer session", self.window.windowTitle())
+        texts = [text for _kind, text in self.window.chat.chat_log]
+        self.assertFalse(any("old mic failure" in text for text in texts), texts)
+
+    def test_speaking_state_is_visible_and_returns_to_idle(self):
+        tts = FakeTts(queued=True, speaking=True)
+        with mock.patch.object(
+                g, "read_config_file_raw",
+                return_value={"TTS_AUTO_SPEAK": "true"}), \
+                mock.patch.object(g, "get_voice_output", return_value=tts), \
+                mock.patch.object(
+                    g, "_tts_is_speaking", side_effect=lambda: tts.speaking):
+            self.window._speak_reply("hello")
+        self.assertEqual(getattr(self.window, "_voice_state", None), "speaking")
+        self.assertIn("SPEAKING", self.window.voice_button.text())
+        tts.speaking = False
+        with mock.patch.object(g, "_tts_is_speaking", return_value=False):
+            self.window._sync_hud_state()
+        self.assertEqual(getattr(self.window, "_voice_state", None), "idle")
+        self.assertIn("F9 push-to-talk", self.window.voice_button.text())
+
+    def test_stale_tts_error_is_ignored(self):
+        self.window._tts_error_shown = False
+        tts = FakeTts(queued=True, speaking=True)
+        with mock.patch.object(
+                g, "read_config_file_raw",
+                return_value={"TTS_AUTO_SPEAK": "true"}), \
+                mock.patch.object(g, "get_voice_output", return_value=tts):
+            self.window._speak_reply("hello")
+            self.window._interrupt_speech()
+        self.assertTrue(callable(tts.error_callback))
+        tts.error_callback("old speech failure")
+        self._process_events()
+        widgets = [
+            self.window.chat._layout.itemAt(index).widget()
+            for index in range(self.window.chat._layout.count())
+        ]
+        labels = [
+            label.text()
+            for widget in widgets
+            if isinstance(widget, g.SystemMessage)
+            for label in widget.findChildren(g.QLabel)
+        ]
+        self.assertFalse(
+            any("old speech failure" in text for text in labels), labels)
+
+    def test_cancelled_agent_reply_is_not_spoken(self):
+        self.window._processing = True
+        self.window._turn_cancellable = True
+        self.window._stop_requested = True
+        self.window._voice_state = "thinking"
+        with mock.patch.object(self.window, "_speak_reply") as speak, \
+                mock.patch.object(self.window, "_end_turn"), \
+                mock.patch.object(self.window, "_schedule_continuous_listen"):
+            self.window._on_turn_completed(("cancelled", []))
+        speak.assert_not_called()
+        self.assertEqual(getattr(self.window, "_voice_state", None), "cancelled")
 
     def test_preload_error_detail_reaches_the_transcript(self):
         self.window._preload_errors["voice"] = "Whisper model missing"

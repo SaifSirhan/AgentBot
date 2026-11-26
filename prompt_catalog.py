@@ -72,7 +72,10 @@ DESCRIPTIONS = {
     "inspect_docx": "Map a DOCX's paragraphs, tables, and cells before editing.",
     "edit_docx_safe": "Locked, atomic Word edit; use for every .docx change.",
     "read_word_doc": "Read all text from a Word file via COM.",
-    "execute_python": "Run a Python script in a fresh process.",
+    "execute_python": (
+        "Run Python in a fresh, network-blocked sandbox; file writes are "
+        "limited to approved roots."
+    ),
     "open_app": "Launch a desktop app or known web app.",
     "open_website": "Open a URL, or search a name and open it.",
     "list_windows": "List open windows.",

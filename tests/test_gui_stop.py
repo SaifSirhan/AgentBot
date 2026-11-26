@@ -32,11 +32,12 @@ class _FakeWorker:
     last = None
 
     def __init__(self, user_input, history, attached_paths=None,
-                 stop_event=None):
+                 stop_event=None, persist_history=True):
         self.user_input = user_input
         self.history = history
         self.attached_paths = list(attached_paths or [])
         self._stop_event = stop_event
+        self.persist_history = persist_history
         self.started = False
         self.completed = _FakeSignal()
         self.failed = _FakeSignal()
@@ -50,13 +51,15 @@ class _FakeWorker:
 class _FakeAgent:
     def __init__(self):
         self.received = None
+        self.saved = None
 
     def run_agent_turn(self, text, history, on_step=None, stop_event=None):
-        self.received = {"text": text, "stop_event": stop_event}
+        self.received = {
+            "text": text, "history": history, "stop_event": stop_event}
         return ["Done: ok"]
 
     def save_conversation_history(self, history):
-        pass
+        self.saved = history
 
 
 class GuiStopTests(unittest.TestCase):
@@ -176,6 +179,29 @@ class GuiStopTests(unittest.TestCase):
             worker._run()
         self.assertEqual(fake_agent.received["text"], "hi")
         self.assertIs(fake_agent.received["stop_event"], event)
+
+    def test_ephemeral_worker_copies_history_and_skips_persistence(self):
+        history = ["System: existing context"]
+        fake_agent = _FakeAgent()
+        worker = g.AgentWorker(
+            "private voice words", history, persist_history=False)
+        with mock.patch.object(g, "get_agent", return_value=fake_agent):
+            worker._run()
+        self.assertEqual(history, ["System: existing context"])
+        self.assertIsNot(fake_agent.received["history"], history)
+        self.assertIn(
+            "User: private voice words", fake_agent.received["history"])
+        self.assertIsNone(fake_agent.saved)
+
+    def test_text_worker_still_mutates_and_persists_history(self):
+        history = ["System: existing context"]
+        fake_agent = _FakeAgent()
+        worker = g.AgentWorker("remember this", history)
+        with mock.patch.object(g, "get_agent", return_value=fake_agent):
+            worker._run()
+        self.assertIn("User: remember this", history)
+        self.assertIs(fake_agent.received["history"], history)
+        self.assertIs(fake_agent.saved, history)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ import sqlite3
 import threading
 
 import chromadb
-from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
 
 try:
@@ -221,6 +220,8 @@ def _file_signature(path: str):
     
 class RAGTool:
     def __init__(self, db_path: str = None, fts_path: str = None):
+        from sentence_transformers import SentenceTransformer
+
         db_path = db_path or DB_PATH
         os.makedirs(db_path, exist_ok=True)
         self.client = chromadb.PersistentClient(path=db_path)

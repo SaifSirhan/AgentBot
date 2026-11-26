@@ -21,6 +21,7 @@ class LoopCheckpointTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        self.temp = Path(tmp.name)
         patcher = mock.patch.dict(
             os.environ, {"LOCALAPPDATA": tmp.name})
         patcher.start()
@@ -54,6 +55,8 @@ class LoopCheckpointTests(unittest.TestCase):
         self.assertIn("never play_on_youtube for playback", system)
         self.assertIn("Queueing a song uses queue_on_ytm", system)
         self.assertIn("queued, paused, or playing", system)
+        self.assertIn("mixed batches run in order", system)
+        self.assertNotIn("READ-ONLY actions to run concurrently", system)
 
     def test_grant_does_not_consume_last_work_step(self):
         loop = self.make_loop([action("request_tool"), action("new_tool")], max_steps=1)
@@ -112,6 +115,28 @@ class LoopCheckpointTests(unittest.TestCase):
         checkpoints[-1].scratchpad_notes.clear()
         self.assertIn("plan", result.scratchpad_notes)
         self.assertEqual(notes, {"plan": "Keep original facts"})
+
+    def test_oversized_python_observation_keeps_mutation_receipt(self):
+        import verification_adapter
+
+        path = self.temp / "report.txt"
+        path.write_text("before", encoding="utf-8")
+        code = (
+            "from pathlib import Path\n"
+            f"Path({str(path)!r}).write_text('after', encoding='utf-8')"
+        )
+        before = {
+            os.path.normcase(str(path)): verification_adapter.snapshot_python_file(str(path)),
+        }
+        path.write_text("after", encoding="utf-8")
+        output = verification_adapter.append_python_receipts("x" * 3000, before)
+
+        stored = AutonomousLoop._prepare_observation("execute_python", output)
+
+        self.assertTrue(stored.startswith("[ARTIFACT SAVED:"), stored[:120])
+        engine = verification_adapter.build_engine([("execute_python", code, stored)])
+        self.assertTrue(verification_adapter.reply_is_supported(
+            engine, "I edited the file."))
 
     def test_all_terminal_paths_checkpoint(self):
         for case, expected in [("cancel", "cancelled"), ("deny", "denied"),

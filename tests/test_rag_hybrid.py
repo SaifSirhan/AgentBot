@@ -4,6 +4,7 @@ Run: python -m unittest tests.test_rag_hybrid -v
 """
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,23 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import rag_tool  # noqa: E402
+
+
+class RagImportTests(unittest.TestCase):
+    def test_import_does_not_load_sentence_transformers(self):
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; import rag_tool; "
+             "assert 'sentence_transformers' not in sys.modules"],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            f"rag_tool eagerly loaded sentence_transformers:\n"
+            f"{result.stdout}\n{result.stderr}")
 
 
 class RRFTests(unittest.TestCase):

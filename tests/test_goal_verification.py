@@ -582,6 +582,18 @@ class GoalVerificationTests(unittest.TestCase):
                 verifier = self.verifier()
                 verifier.before_tool(tool, args)
                 write_docx(path)
+                if tool == "edit_docx_safe":
+                    saved = path.stat()
+                    observation = json.dumps({
+                        "ok": True,
+                        "changes": 1,
+                        "receipt": {
+                            "path": str(path),
+                            "size": saved.st_size,
+                            "mtime_ns": saved.st_mtime_ns,
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        },
+                    })
                 self.assertTrue(verifier.verify((action(tool, observation),)).achieved)
 
     def test_relative_paths_use_workspace_not_current_directory(self):

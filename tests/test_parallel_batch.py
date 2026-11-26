@@ -15,11 +15,14 @@ import agent
 from autonomous_loop import AutonomousLoop, ToolResult, Verification
 from loop_guard import GuardVerdict, LoopGuard
 from tool_registry import (
-    BATCH_EFFECT_ERROR,
+    BATCH_GRANT_ERROR,
+    BATCH_PARALLEL,
+    BATCH_SEQUENTIAL,
     BATCH_SIZE_ERROR,
+    BATCH_UNKNOWN_ERROR,
     ToolRegistry,
     ToolSpec,
-    batch_rejection_error,
+    batch_execution_mode,
 )
 
 
@@ -100,29 +103,33 @@ class BatchValidationTests(unittest.TestCase):
         self.registry.register(read_spec("read_a"))
         self.registry.register(write_spec("write_b"))
 
-    def test_all_read_only_registered_tools_pass(self):
-        self.assertIsNone(batch_rejection_error(["read_a"], self.registry))
-        self.assertIsNone(
-            batch_rejection_error(["read_a", "read_a"], self.registry))
+    def test_all_read_only_registered_tools_run_in_parallel(self):
+        self.assertEqual(
+            batch_execution_mode(["read_a"], self.registry),
+            (BATCH_PARALLEL, None))
+        self.assertEqual(
+            batch_execution_mode(["read_a", "read_a"], self.registry),
+            (BATCH_PARALLEL, None))
 
-    def test_write_tool_rejects_the_entire_batch(self):
+    def test_mixed_batch_runs_sequentially(self):
         self.assertEqual(
-            batch_rejection_error(["read_a", "write_b"], self.registry),
-            BATCH_EFFECT_ERROR)
+            batch_execution_mode(["read_a", "write_b"], self.registry),
+            (BATCH_SEQUENTIAL, None))
+
+    def test_request_tool_cannot_join_a_batch(self):
         self.assertEqual(
-            BATCH_EFFECT_ERROR,
-            "ERROR: Cannot batch write/system_control tools. "
-            "Execute them sequentially.")
+            batch_execution_mode(["read_a", "request_tool"], self.registry),
+            (None, BATCH_GRANT_ERROR))
 
     def test_unregistered_tool_fails_closed(self):
         self.assertEqual(
-            batch_rejection_error(["read_a", "mystery"], self.registry),
-            BATCH_EFFECT_ERROR)
+            batch_execution_mode(["read_a", "mystery"], self.registry),
+            (None, BATCH_UNKNOWN_ERROR))
 
     def test_more_than_three_actions_is_rejected(self):
         self.assertEqual(
-            batch_rejection_error(["read_a"] * 4, self.registry),
-            BATCH_SIZE_ERROR)
+            batch_execution_mode(["read_a"] * 4, self.registry),
+            (None, BATCH_SIZE_ERROR))
 
 
 class FastPathBatchTests(unittest.TestCase):
@@ -146,16 +153,22 @@ class FastPathBatchTests(unittest.TestCase):
         spread = max(start_times.values()) - min(start_times.values())
         self.assertLess(spread, 0.2)
 
-    def test_executor_rejects_a_write_without_calling_any_tool(self):
-        with mock.patch.object(agent, "execute_tool") as fake:
+    def test_executor_runs_a_mixed_batch_sequentially(self):
+        calls = []
+
+        def fake(action):
+            calls.append(action["tool"])
+            return "out:" + action["input"]
+
+        with mock.patch.object(agent, "execute_tool", side_effect=fake):
             results, rejection = agent.run_read_only_batch([
                 {"tool": "weather", "input": "a"},
                 {"tool": "write_file", "input": "note.txt|hello"},
             ])
 
-        self.assertEqual(results, [])
-        self.assertEqual(rejection, BATCH_EFFECT_ERROR)
-        fake.assert_not_called()
+        self.assertIsNone(rejection)
+        self.assertEqual(results, ["out:a", "out:note.txt|hello"])
+        self.assertEqual(calls, ["weather", "write_file"])
 
 
 class AutonomousBatchTests(unittest.TestCase):
@@ -227,7 +240,7 @@ class AutonomousBatchTests(unittest.TestCase):
         self.assertEqual([item["tool"] for item in scratch],
                          ["read_a", "read_b", "read_c"])
 
-    def test_batch_containing_a_write_tool_is_rejected_without_execution(self):
+    def test_batch_containing_a_write_tool_runs_sequentially(self):
         self.build([], [read_spec("read_a"), write_spec("write_b")])
         batch = json.dumps([
             {"tool": "read_a", "args": {"q": "first"}},
@@ -241,10 +254,12 @@ class AutonomousBatchTests(unittest.TestCase):
         self.loop.llm = llm
         result = self.loop.run("Research and write")
 
-        self.assertEqual(self.calls, [])
-        self.assertEqual(result.history, ())
-        observed = json.dumps(self.prompts[1])
-        self.assertIn(
+        self.assertEqual(self.calls, ["read_a", "write_b"])
+        self.assertEqual(
+            [item.tool for item in result.history],
+            ["read_a", "write_b"])
+        observed = json.dumps(self.prompts)
+        self.assertNotIn(
             "ERROR: Cannot batch write/system_control tools. "
             "Execute them sequentially.",
             observed)

@@ -31,6 +31,7 @@ import html
 import importlib
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -47,6 +48,7 @@ from PySide6.QtCore import (
     QObject,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QSize,
     QTimer,
     Signal,
@@ -929,12 +931,14 @@ class AgentWorker(QObject):
     step = Signal(str)           # one raw step_log line, live
 
     def __init__(self, user_input, conversation_history, attached_paths=None,
-                 stop_event=None):
+                 stop_event=None, persist_history=True):
         super().__init__()
         self._user_input = user_input
-        self._history = conversation_history
+        self._history = (conversation_history if persist_history
+                         else list(conversation_history))
         self._attached_paths = list(attached_paths or [])
         self._stop_event = stop_event
+        self._persist_history = persist_history
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -977,7 +981,8 @@ class AgentWorker(QObject):
 
         try:
             agent = get_agent()
-            agent.save_conversation_history(self._history)
+            if self._persist_history:
+                agent.save_conversation_history(self._history)
         except Exception:
             pass
 
@@ -3741,6 +3746,400 @@ class RightPanel(QFrame):
 
 
 # ----------------------------------------------------------------------
+# Memory constellation — read-only manual user traits
+# ----------------------------------------------------------------------
+
+class ConstellationCanvas(QWidget):
+    node_selected = Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("memoryConstellationCanvas")
+        self.setMinimumSize(360, 260)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Expanding)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Memory trait constellation")
+        self.setAccessibleDescription(
+            "Select a trait node with the mouse or arrow keys. "
+            "Confidence controls node size, evidence controls halo rings, "
+            "and newer traits appear closer to the center.")
+        self.setStyleSheet(
+            f"QWidget#memoryConstellationCanvas {{ background: {COLOR_BG}; }}")
+        self.traits = []
+        self.selected_index = -1
+        self._nodes = []
+
+    def set_traits(self, traits):
+        self.traits = [dict(record) for record in traits]
+        self.selected_index = 0 if self.traits else -1
+        self._nodes = self._layout_nodes()
+        if self.traits:
+            self.node_selected.emit(0)
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._nodes = self._layout_nodes()
+        self.update()
+
+    @staticmethod
+    def _timestamp(value):
+        try:
+            parsed = datetime.datetime.fromisoformat(
+                str(value or "").strip().replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(
+                    datetime.timezone.utc).replace(tzinfo=None)
+            return parsed.timestamp()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+
+    def _layout_nodes(self):
+        if not self.traits:
+            return []
+        width = max(360, self.width())
+        height = max(260, self.height())
+        center_x = width / 2
+        center_y = height / 2
+        extent = min(width * 0.30, height * 0.34)
+        radius_x = extent * 1.35
+        radius_y = extent
+        timestamps = [self._timestamp(item.get("last_updated"))
+                      for item in self.traits]
+        known = [value for value in timestamps if value is not None]
+        newest = max(known) if known else 0.0
+        oldest = min(known) if known else 0.0
+        span = newest - oldest
+        nodes = []
+        for index, (record, timestamp) in enumerate(
+                zip(self.traits, timestamps)):
+            if timestamp is not None and span > 0:
+                recency = (newest - timestamp) / span
+            else:
+                recency = index / max(1, len(self.traits) - 1)
+            distance = extent * (0.42 + 0.58 * recency)
+            angle = -math.pi / 2 + index * 2.399963229728653
+            confidence = max(1, min(10, int(record["confidence"])))
+            evidence = max(0, int(record["evidence_count"]))
+            rings = 0
+            while evidence > 0 and rings < 4:
+                rings += 1
+                evidence //= 2
+            nodes.append({
+                "index": index,
+                "trait": dict(record),
+                "x": center_x + math.cos(angle) * radius_x * (
+                    0.42 + 0.58 * recency),
+                "y": center_y + math.sin(angle) * radius_y * (
+                    0.42 + 0.58 * recency),
+                "radius": 11 + confidence * 1.1,
+                "rings": rings,
+                "distance": distance,
+            })
+        return nodes
+
+    def _node_at(self, position):
+        for node in self._nodes:
+            dx = position.x() - node["x"]
+            dy = position.y() - node["y"]
+            if math.hypot(dx, dy) <= node["radius"] + 10:
+                return node
+        return None
+
+    def select_node(self, index):
+        if not self._nodes:
+            return
+        index = max(0, min(len(self._nodes) - 1, int(index)))
+        if index == self.selected_index:
+            return
+        self.selected_index = index
+        self.node_selected.emit(index)
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            node = self._node_at(event.pos())
+            if node is not None:
+                self.setFocus()
+                self.select_node(node["index"])
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        node = self._node_at(event.pos())
+        self.setToolTip(node["trait"]["trait"] if node is not None else "")
+        self.setCursor(Qt.CursorShape.PointingHandCursor
+                       if node is not None else Qt.CursorShape.ArrowCursor)
+        super().mouseMoveEvent(event)
+
+    def keyPressEvent(self, event):
+        if not self._nodes:
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if key in (Qt.Key.Key_Right, Qt.Key.Key_Down):
+            self.select_node((self.selected_index + 1) % len(self._nodes))
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up):
+            self.select_node((self.selected_index - 1) % len(self._nodes))
+        elif key == Qt.Key.Key_Home:
+            self.select_node(0)
+        elif key == Qt.Key.Key_End:
+            self.select_node(len(self._nodes) - 1)
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(event.rect(), QColor(COLOR_BG))
+        center_x = self.width() / 2
+        center_y = self.height() / 2
+        accent = QColor(COLOR_ACCENT)
+
+        if not self._nodes:
+            halo = QColor(COLOR_BORDER)
+            painter.setPen(QPen(halo, 1))
+            for radius in (34, 52, 70):
+                painter.drawEllipse(QRectF(
+                    center_x - radius, center_y - radius,
+                    radius * 2, radius * 2))
+            painter.setPen(QColor(COLOR_TEXT_MID))
+            painter.drawText(
+                QRectF(center_x - 80, center_y - 24, 160, 48),
+                Qt.AlignmentFlag.AlignCenter, "NO TRAITS")
+            return
+
+        for node in self._nodes:
+            line = QColor(COLOR_ACCENT)
+            line.setAlphaF(0.16)
+            painter.setPen(QPen(line, 1))
+            painter.drawLine(int(center_x), int(center_y),
+                             int(node["x"]), int(node["y"]))
+
+        painter.setPen(QPen(QColor(COLOR_BORDER), 1))
+        painter.drawEllipse(QRectF(center_x - 30, center_y - 30, 60, 60))
+        painter.setPen(QColor(COLOR_TEXT_MID))
+        font = painter.font()
+        font.setFamily(FONT_MONO)
+        font.setPointSize(8)
+        painter.setFont(font)
+        painter.drawText(
+            QRectF(center_x - 38, center_y - 20, 76, 40),
+            Qt.AlignmentFlag.AlignCenter, "MANUAL\nPROFILE")
+
+        ordered = sorted(self._nodes,
+                         key=lambda node: node["index"] == self.selected_index)
+        for node in ordered:
+            confidence = node["trait"]["confidence"]
+            selected = node["index"] == self.selected_index
+            for ring in range(node["rings"]):
+                radius = node["radius"] + 6 + ring * 4
+                halo = QColor(COLOR_ACCENT)
+                halo.setAlphaF(0.12 + ring * 0.04)
+                painter.setPen(QPen(halo, 1))
+                painter.drawEllipse(QRectF(
+                    node["x"] - radius, node["y"] - radius,
+                    radius * 2, radius * 2))
+            fill = QColor(COLOR_ACCENT)
+            fill.setAlphaF(0.62 if selected else 0.18 + confidence * 0.035)
+            painter.setPen(QPen(accent, 2.4 if selected else 1.4))
+            painter.setBrush(fill)
+            painter.drawEllipse(QRectF(
+                node["x"] - node["radius"], node["y"] - node["radius"],
+                node["radius"] * 2, node["radius"] * 2))
+            painter.setPen(QColor(COLOR_TEXT_MID))
+            painter.drawText(
+                QRectF(node["x"] + node["radius"] + 5,
+                       node["y"] - 8, 28, 16),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                f"{node['index'] + 1:02d}")
+
+
+class MemoryConstellationView(QFrame):
+    back_requested = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("memoryConstellationView")
+        self.setStyleSheet(
+            f"QFrame#memoryConstellationView {{ background: {COLOR_BG}; }}")
+        outer = zero_layout(QVBoxLayout(self))
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        self.back_button = QPushButton("Back to chat")
+        self.back_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.back_button.clicked.connect(self.back_requested.emit)
+        header.addWidget(self.back_button)
+        title = QLabel("MEMORY CONSTELLATION")
+        title.setProperty("tone", "hi")
+        title.setStyleSheet(
+            f'font-family: "{FONT_MONO}"; font-size: 13px; font-weight: bold;')
+        header.addWidget(title)
+        read_only = QLabel("READ ONLY")
+        read_only.setProperty("tone", "dim")
+        read_only.setStyleSheet(
+            f'font-family: "{FONT_MONO}"; font-size: 9px;')
+        header.addWidget(read_only)
+        header.addStretch(1)
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_button.clicked.connect(self.refresh)
+        header.addWidget(self.refresh_button)
+        outer.addLayout(header)
+
+        self.warning_label = QLabel(memory.USER_TRAITS_WARNING)
+        self.warning_label.setObjectName("memoryWarning")
+        self.warning_label.setWordWrap(True)
+        self.warning_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.warning_label.setProperty("tone", "warn")
+        self.warning_label.setStyleSheet(
+            f"background: {COLOR_BG_ALT}; border: 1px solid {COLOR_BORDER};"
+            f" border-radius: 8px; padding: 8px 10px;"
+            f' font-family: "{FONT_MONO}"; font-size: 10px;')
+        outer.addWidget(self.warning_label)
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("memoryStatus")
+        self.status_label.setWordWrap(True)
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.status_label.setProperty("tone", "dim")
+        self.status_label.setStyleSheet(
+            f'font-family: "{FONT_UI}"; font-size: 11px;')
+        outer.addWidget(self.status_label)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        self.canvas = ConstellationCanvas()
+        self.canvas.node_selected.connect(self._update_details)
+        body.addWidget(self.canvas, 1)
+
+        self.detail_panel = QFrame()
+        self.detail_panel.setObjectName("memoryDetailPanel")
+        self.detail_panel.setProperty("panel", "true")
+        self.detail_panel.setFixedWidth(280)
+        details = zero_layout(QVBoxLayout(self.detail_panel))
+        details.setContentsMargins(14, 14, 14, 14)
+        details.setSpacing(8)
+        heading = QLabel("SELECTED TRAIT")
+        heading.setProperty("role", "heading")
+        details.addWidget(heading)
+        self.detail_text = QLabel("Select a node to inspect its source data.")
+        self.detail_text.setWordWrap(True)
+        self.detail_text.setTextFormat(Qt.TextFormat.PlainText)
+        self.detail_text.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail_text.setProperty("tone", "hi")
+        self.detail_text.setStyleSheet(
+            f'font-family: "{FONT_UI}"; font-size: 14px; font-weight: bold;')
+        details.addWidget(self.detail_text)
+
+        meta = zero_layout(QVBoxLayout())
+        meta.setSpacing(6)
+        confidence_row, self.confidence_label = self._detail_value(
+            "CONFIDENCE", "—")
+        evidence_row, self.evidence_label = self._detail_value(
+            "EVIDENCE COUNT", "—")
+        updated_row, self.updated_label = self._detail_value(
+            "LAST UPDATED", "—")
+        meta.addLayout(confidence_row)
+        meta.addLayout(evidence_row)
+        meta.addLayout(updated_row)
+        details.addLayout(meta)
+        details.addStretch(1)
+        hint = QLabel(
+            "Source: user_model.json. Kestrel does not extract, infer, "
+            "or write traits from this view.")
+        hint.setWordWrap(True)
+        hint.setTextFormat(Qt.TextFormat.PlainText)
+        hint.setProperty("tone", "dim")
+        hint.setStyleSheet(
+            f'font-family: "{FONT_UI}"; font-size: 10px;')
+        details.addWidget(hint)
+        body.addWidget(self.detail_panel)
+        outer.addLayout(body, 1)
+        self.refresh()
+
+    @staticmethod
+    def _detail_value(label, value):
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        name = QLabel(label)
+        name.setProperty("tone", "dim")
+        name.setStyleSheet(
+            f'font-family: "{FONT_MONO}"; font-size: 9px;')
+        text = QLabel(value)
+        text.setProperty("tone", "hi")
+        text.setStyleSheet(
+            f'font-family: "{FONT_MONO}"; font-size: 11px;')
+        row.addWidget(name)
+        row.addStretch(1)
+        row.addWidget(text)
+        return row, text
+
+    def refresh(self):
+        self.set_snapshot(memory.inspect_user_model())
+
+    def set_snapshot(self, result):
+        status = result.get("status", "invalid")
+        traits = list(result.get("traits") or [])
+        messages = {
+            "empty": "No manual traits yet. Add them directly to "
+                     "user_model.json; Kestrel never extracts them here.",
+            "missing": "user_model.json is missing. This view stays empty "
+                       "until you create it manually.",
+            "malformed": "user_model.json is malformed. No trait data is shown.",
+            "unavailable": "user_model.json is unavailable. Check its "
+                           "permissions, then choose Refresh.",
+            "invalid": "user_model.json has an unsupported shape. "
+                       "No trait data is shown.",
+            "unsafe": "No safe manual traits to show. Unsafe entries were hidden.",
+        }
+        if status == "valid":
+            count = len(traits)
+            text = f"{count} manual trait{'s' if count != 1 else ''} · read only"
+            filtered = []
+            duplicates = int(result.get("duplicate_count", 0))
+            unsafe = int(result.get("unsafe_count", 0))
+            invalid = int(result.get("invalid_count", 0))
+            if duplicates:
+                filtered.append(
+                    f"{duplicates} duplicate{'s' if duplicates != 1 else ''} ignored")
+            if unsafe:
+                filtered.append(
+                    f"{unsafe} unsafe entr{'ies' if unsafe != 1 else 'y'} hidden")
+            if invalid:
+                filtered.append(
+                    f"{invalid} invalid entr{'ies' if invalid != 1 else 'y'} ignored")
+            if filtered:
+                text += " · " + " · ".join(filtered)
+        else:
+            text = messages.get(status, messages["invalid"])
+        self.status_label.setText(text)
+        self.canvas.set_traits(traits)
+        self._update_details(self.canvas.selected_index)
+
+    def _update_details(self, index):
+        if not self.canvas.traits or not 0 <= index < len(self.canvas.traits):
+            self.detail_text.setText("Select a node to inspect its source data.")
+            self.confidence_label.setText("—")
+            self.evidence_label.setText("—")
+            self.updated_label.setText("—")
+            return
+        record = self.canvas.traits[index]
+        self.detail_text.setText(record["trait"])
+        self.confidence_label.setText(f"{record['confidence']} / 10")
+        self.evidence_label.setText(str(record["evidence_count"]))
+        self.updated_label.setText(record["last_updated"] or "unknown")
+
+
+# ----------------------------------------------------------------------
 # Memory Manager — structured memories, global and project scoped
 # ----------------------------------------------------------------------
 def _memory_button(text, primary=False, danger=False):
@@ -4149,13 +4548,13 @@ class AgentWindow(QMainWindow):
     _event_result = Signal(str)
     _reminder_result = Signal(str, str)  # (result, reminder_text)
     _hotkey_changed = Signal(bool)   # F9 pressed/released (from keyboard thread)
-    _voice_event = Signal(str)       # recording/transcription status from worker
+    _voice_event = Signal(int, str)  # session generation and worker status
     _weather_ready = Signal(str)     # parsed weather text (from worker thread)
     _gui_visibility_request = Signal(bool, object)  # (show, completion event)
     _gui_capture_request = Signal(object, object)   # (event, result holder)
     _wake_word_detected = Signal(float)   # wake word score (from mic thread)
     _wake_word_error = Signal(str)        # listener startup/runtime error
-    _tts_error = Signal(str)              # speech engine error (TTS thread)
+    _tts_error = Signal(int, str)              # speech generation and error
 
     NOTICE_MS = 2000                      # transient terminal notices
     _spontaneous_message = Signal(str)    # proactive observation (worker thread)
@@ -4189,6 +4588,10 @@ class AgentWindow(QMainWindow):
         self._tray_menu = None
         self._hotkey_installed = False
         self._recording = False
+        self._transcribing = False
+        self._voice_generation = 0
+        self._speech_generation = 0
+        self._voice_state = "idle"
         self._voice_ready = False
         self._voice_failed = False
         self._wake_ready = False
@@ -4384,9 +4787,12 @@ class AgentWindow(QMainWindow):
         conversation_layout.setSpacing(12)
         self.chat = ChatView()
         self.copilot_view = CopilotView()
+        self.memory_view = MemoryConstellationView()
+        self.memory_view.back_requested.connect(self._show_chat_page)
         self.page_stack = QStackedWidget()
         self.page_stack.addWidget(self.chat)
         self.page_stack.addWidget(self.copilot_view)
+        self.page_stack.addWidget(self.memory_view)
         self.task_workspace = TaskWorkspace()
         conversation_layout.addWidget(self.page_stack, 1)
         conversation_layout.addWidget(self.task_workspace)
@@ -4409,7 +4815,7 @@ class AgentWindow(QMainWindow):
         buttons["Tasks"].clicked.connect(self.open_schedule_dialog)
         buttons["Files"].clicked.connect(self._choose_attachments)
         buttons["Voice"].clicked.connect(self._toggle_voice)
-        buttons["Memory"].clicked.connect(self.open_memory_manager)
+        buttons["Memory"].clicked.connect(self._show_memory_page)
         buttons["Copilot"].clicked.connect(self._show_copilot_page)
         buttons["Settings"].clicked.connect(self.open_settings)
 
@@ -4419,6 +4825,13 @@ class AgentWindow(QMainWindow):
         if not self._copilot_active and not self._processing:
             self.set_status("Ready", busy=False)
         self.input_field.setFocus()
+
+    def _show_memory_page(self):
+        self.page_stack.setCurrentWidget(self.memory_view)
+        self.composer.hide()
+        self.memory_view.refresh()
+        self.set_status("Memory constellation · read only", busy=False)
+        self.memory_view.canvas.setFocus()
 
     def _show_copilot_page(self):
         self.page_stack.setCurrentWidget(self.copilot_view)
@@ -4439,9 +4852,44 @@ class AgentWindow(QMainWindow):
         self._render_attachments()
         self.input_field.setFocus()
 
+    def _update_voice_indicator(self):
+        labels = {
+            "idle": "F9 push-to-talk",
+            "listening": "MIC ON · F9",
+            "transcribing": "TRANSCRIBING",
+            "thinking": "THINKING",
+            "speaking": "SPEAKING",
+            "cancelled": "CANCELLED",
+            "error": "VOICE ERROR",
+        }
+        self.voice_button.setText(labels.get(self._voice_state, labels["idle"]))
+        mic_active = self._voice_state == "listening"
+        self.voice_button.setProperty("micActive", mic_active)
+        self.voice_button.setToolTip(
+            "Microphone is recording. Press F9 or Stop to cancel."
+            if mic_active else "F9 push-to-talk")
+        self.voice_button.style().unpolish(self.voice_button)
+        self.voice_button.style().polish(self.voice_button)
+
+    def _set_voice_state(self, state):
+        self._voice_state = state
+        self._update_voice_indicator()
+        self._sync_hud_state()
+
+    def _voice_active(self):
+        if (self._recording or self._transcribing
+                or self._continuous_listening):
+            return True
+        if self._voice_state in ("listening", "transcribing", "speaking"):
+            return True
+        return _tts_is_speaking()
+
     def _toggle_voice(self):
         if self._recording:
             self._stop_recording()
+        elif (self._transcribing or self._voice_state == "speaking"
+              or _tts_is_speaking()):
+            self._cancel_voice()
         elif self._voice_ready:
             self._start_recording()
         else:
@@ -4699,7 +5147,8 @@ class AgentWindow(QMainWindow):
         if event.key() == Qt.Key.Key_Escape and self._copilot_active:
             self._cancel_copilot()
             return
-        if event.key() == Qt.Key.Key_Escape and self._processing:
+        if (event.key() == Qt.Key.Key_Escape
+                and (self._processing or self._voice_active())):
             self._request_stop()
             return
         super().keyPressEvent(event)
@@ -4786,7 +5235,7 @@ class AgentWindow(QMainWindow):
             QPushButton:pressed {{ background: {COLOR_HOVER}; }}
             """
         )
-        self.send_button.clicked.connect(self.send)
+        self.send_button.clicked.connect(lambda: self.send())
         pill_row.addWidget(self.send_button)
 
         self.voice_button = QPushButton("F9 push-to-talk")
@@ -4796,13 +5245,16 @@ class AgentWindow(QMainWindow):
         self.voice_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.voice_button.setStyleSheet(
             f"""
-            QPushButton {{
+            QPushButton#voiceButton {{
                 background: {COLOR_HOVER}; border: 1px solid {COLOR_BORDER};
                 border-radius: 8px; color: {COLOR_TEXT_MID};
                 font-family: "{FONT_UI}"; font-size: 10px;
             }}
-            QPushButton:hover {{ color: {COLOR_ACCENT}; border-color: {COLOR_ACCENT}; }}
-            QPushButton:pressed {{ background: {COLOR_SELECTED}; }}
+            QPushButton#voiceButton:hover {{ color: {COLOR_ACCENT}; border-color: {COLOR_ACCENT}; }}
+            QPushButton#voiceButton:pressed {{ background: {COLOR_SELECTED}; }}
+            QPushButton#voiceButton[micActive="true"] {{
+                color: {COLOR_DANGER}; border-color: {COLOR_DANGER};
+            }}
             """
         )
         self.voice_button.clicked.connect(self._toggle_voice)
@@ -4825,9 +5277,12 @@ class AgentWindow(QMainWindow):
         self._autogrow_input()
 
     def _request_stop(self):
-        """Ask the running agent turn or copilot to abort at its next boundary."""
+        """Cancel audio or ask the running agent turn to abort."""
         if self._copilot_active:
             self._cancel_copilot()
+            return
+        if self._voice_active():
+            self._cancel_voice()
             return
         if not (self._processing and self._turn_cancellable):
             return
@@ -4835,7 +5290,31 @@ class AgentWindow(QMainWindow):
             return
         self._stop_requested = True
         self._stop_event.set()
+        self._interrupt_speech()
+        self._set_voice_state("cancelled")
         self.set_status("Stopping…", busy=True)
+
+    def _cancel_voice(self, resume_wake=True):
+        self._voice_generation += 1
+        had_stt = (self._recording or self._transcribing
+                   or self._continuous_listening)
+        self._recording = False
+        self._transcribing = False
+        self._continuous_listening = False
+        if self._continuous_enabled:
+            self._continuous_paused = True
+        if self._continuous_timer is not None:
+            self._continuous_timer.stop()
+        if had_stt:
+            try:
+                get_voice().cancel_recording()
+            except Exception as exc:
+                print(f"[voice] cancel failed: {exc}")
+        self._interrupt_speech()
+        self._set_voice_state("cancelled")
+        self.set_status("Cancelled", busy=False)
+        if resume_wake and not self._shutting_down:
+            self._resume_wake_word()
 
     def _autogrow_input(self):
         doc = self.input_field.document()
@@ -4923,7 +5402,7 @@ class AgentWindow(QMainWindow):
             if self._is_ctrl_c(event):
                 return self._on_ctrl_c()
             if (event.key() == Qt.Key.Key_Escape
-                    and self._processing):
+                    and (self._processing or self._voice_active())):
                 self._request_stop()
                 return True
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -4945,7 +5424,9 @@ class AgentWindow(QMainWindow):
         """Shell interrupt: copy wins over interrupting when text is selected."""
         if self.input_field.textCursor().hasSelection():
             return False
-        if self._processing:
+        if self._voice_active():
+            self._cancel_voice()
+        elif self._processing:
             if not self._turn_cancellable:
                 return False
             self._request_stop()
@@ -4994,6 +5475,10 @@ class AgentWindow(QMainWindow):
         return self._PET_BY_STATE.get(name, "idle")
 
     def _sync_hud_state(self):
+        if (self._voice_state == "speaking"
+                and not _tts_is_speaking()):
+            self._voice_state = "idle"
+            self._update_voice_indicator()
         stage = getattr(self, "owl_stage", None)
         if stage is None:
             return
@@ -5011,18 +5496,25 @@ class AgentWindow(QMainWindow):
             stage.note_pet_activity()
 
     def _resolve_hud_state(self):
-        if time.monotonic() < getattr(self, "_hud_error_until", 0.0):
+        state = getattr(self, "_voice_state", "idle")
+        if (time.monotonic() < getattr(self, "_hud_error_until", 0.0)
+                or state == "error"):
             return "ERROR"
-        if getattr(self, "_recording", False):
+        if state == "cancelled":
+            return "IDLE"
+        if getattr(self, "_recording", False) or state == "listening":
             if getattr(self, "_continuous_listening", False):
                 return "CONTINUOUS"
             return "LISTENING"
-        if _tts_is_speaking():
+        if getattr(self, "_transcribing", False) or state == "transcribing":
+            return "THINKING"
+        if state == "speaking" or _tts_is_speaking():
             return "SPEAKING"
         title = self.windowTitle().lower()
         busy = (
             getattr(self, "_processing", False)
             or getattr(self, "_copilot_active", False)
+            or state == "thinking"
             or any(
                 word in title for word in (
                     "thinking", "working", "reading", "verifying",
@@ -5124,7 +5616,7 @@ class AgentWindow(QMainWindow):
             self._cycle_theme()
         self.set_status(f"theme: {self._theme}", busy=False)
 
-    def send(self):
+    def send(self, persist_history=True):
         if self._processing:
             return
         text = self._get_input_text()
@@ -5132,8 +5624,9 @@ class AgentWindow(QMainWindow):
         if not text and not attached:
             return
         self._note_pet_activity()
-        # Every submission joins the prompt history, slash commands included.
-        self.input_field.history.add(text)
+        # Every persisted submission joins the prompt history.
+        if persist_history:
+            self.input_field.history.add(text)
 
         # A new command cuts the assistant off mid-sentence and stops the
         # hands-free mic; the reply will re-arm it when the turn finishes.
@@ -5141,7 +5634,7 @@ class AgentWindow(QMainWindow):
         self._cancel_continuous_listening(resume_wake=False)
 
         # Slash commands bypass attachments (match agent_gui.send).
-        if text.startswith("/") and not attached:
+        if persist_history and text.startswith("/") and not attached:
             self._clear_input()
             self._handle_slash_command(text)
             return
@@ -5160,10 +5653,17 @@ class AgentWindow(QMainWindow):
         else:
             display = text
         self.chat.add_message(UserMessage(display))
-        self._start_agent_turn(text, attached)
+        if persist_history:
+            self._start_agent_turn(text, attached)
+        else:
+            self._start_agent_turn(
+                text, attached, persist_history=False)
 
     def _interrupt_speech(self):
         """Cut off TTS immediately; a missing backend is not fatal."""
+        self._speech_generation += 1
+        if self._voice_state == "speaking":
+            self._set_voice_state("idle")
         if not self._tts_ready:
             return
         try:
@@ -5192,15 +5692,18 @@ class AgentWindow(QMainWindow):
             return
         self._reset_task_context()
 
-    def _start_agent_turn(self, text, attached_paths=None):
+    def _start_agent_turn(self, text, attached_paths=None,
+                          persist_history=True):
         """Kick off a background agent turn for `text`."""
-        self._reset_task_context_if_new(text)
+        if persist_history:
+            self._reset_task_context_if_new(text)
         # A new message starts a fresh, uncancelled turn: never inherit the
         # previous turn's stop request or its already-set event.
         self._stop_requested = False
         self._stop_event = threading.Event()
         self._processing = True
         self._turn_cancellable = True
+        self._set_voice_state("thinking")
         self.input_field.setEnabled(False)
         self.set_status("Reading attachments…" if attached_paths else "Thinking…",
                         busy=True)
@@ -5212,7 +5715,8 @@ class AgentWindow(QMainWindow):
 
         self._worker = AgentWorker(text, self.conversation_history,
                                    attached_paths,
-                                   stop_event=self._stop_event)
+                                   stop_event=self._stop_event,
+                                   persist_history=persist_history)
         self._worker.completed.connect(self._on_turn_completed)
         self._worker.failed.connect(self._on_turn_failed)
         self._worker.step.connect(self._on_worker_step)
@@ -5262,21 +5766,30 @@ class AgentWindow(QMainWindow):
 
     def _on_turn_completed(self, payload):
         message, step_log = payload
+        cancelled = self._stop_requested
         self._last_step_log = step_log
         self._clear_thinking_message()
         self.chat.add_message(AssistantMessage(message, step_log=step_log))
         self.task_workspace.set_activity(step_log)
-        self._speak_reply(message)
+        if cancelled:
+            self._set_voice_state("cancelled")
+        else:
+            self._speak_reply(message)
         self._end_turn()
-        self._schedule_continuous_listen()
+        if not cancelled:
+            self._schedule_continuous_listen()
 
     def _on_turn_failed(self, error_text):
+        cancelled = self._stop_requested
         self._clear_thinking_message()
         self.chat.add_message(AssistantMessage(error_text))
-        self._hud_error_until = time.monotonic() + 2.5
+        if not cancelled:
+            self._hud_error_until = time.monotonic() + 2.5
         self._end_turn()
-        QTimer.singleShot(2600, self._sync_hud_state)
-        self._schedule_continuous_listen()
+        self._set_voice_state("cancelled" if cancelled else "error")
+        if not cancelled:
+            QTimer.singleShot(2600, self._sync_hud_state)
+            self._schedule_continuous_listen()
 
     def _speak_reply(self, message):
         """Speak a reply if TTS_AUTO_SPEAK is on. Matches agent_gui.handle_result.
@@ -5285,7 +5798,10 @@ class AgentWindow(QMainWindow):
         extra threading is needed here.
         """
         if not message:
+            self._set_voice_state("idle")
             return
+        self._speech_generation += 1
+        generation = self._speech_generation
         try:
             auto_speak = str(
                 read_config_file_raw().get("TTS_AUTO_SPEAK", "true")
@@ -5293,23 +5809,33 @@ class AgentWindow(QMainWindow):
         except Exception:
             auto_speak = True
         if not auto_speak:
+            self._set_voice_state("idle")
             return
         if not self._tts_ready:
+            self._set_voice_state("idle")
             return
         try:
             voice = get_voice_output()
-            voice.set_error_callback(self._tts_error.emit)
+            voice.set_error_callback(
+                lambda error: self._tts_error.emit(generation, str(error)))
             queued = voice.speak(message)
             if not queued:
                 error = voice.last_error()
                 if error:
-                    self._on_tts_error(error)
+                    self._on_tts_error(generation, error)
+                else:
+                    self._set_voice_state("idle")
+            else:
+                self._set_voice_state("speaking")
         except Exception as e:
-            self._on_tts_error(f"speak failed: {e}")
+            self._on_tts_error(generation, f"speak failed: {e}")
 
-    def _on_tts_error(self, message):
+    def _on_tts_error(self, generation, message):
         """Show the first speech failure as a dim system line."""
+        if generation != self._speech_generation:
+            return
         print(f"[tts] {message}")
+        self._set_voice_state("error")
         self._hud_error_until = time.monotonic() + 2.5
         self._sync_hud_state()
         QTimer.singleShot(2600, self._sync_hud_state)
@@ -7157,7 +7683,7 @@ class AgentWindow(QMainWindow):
         """Re-arm hands-free listening once the turn and its speech are done."""
         if not self._continuous_enabled or self._continuous_paused:
             return
-        if self._processing or self._recording:
+        if self._processing or self._recording or self._transcribing:
             return
         if self._continuous_timer is None:
             self._continuous_timer = QTimer(self)
@@ -7168,7 +7694,7 @@ class AgentWindow(QMainWindow):
     def _try_continuous_listen(self):
         if not self._continuous_enabled or self._continuous_paused:
             return
-        if self._processing or self._recording:
+        if self._processing or self._recording or self._transcribing:
             return
         if not self._voice_ready:
             if self._voice_failed:
@@ -7186,15 +7712,20 @@ class AgentWindow(QMainWindow):
         self._start_recording(continuous=True)
 
     def _cancel_continuous_listening(self, resume_wake=True):
+        self._voice_generation += 1
         if self._continuous_timer is not None:
             self._continuous_timer.stop()
-        if self._continuous_listening:
-            self._continuous_listening = False
-            self._recording = False
+        had_stt = (self._recording or self._transcribing
+                   or self._continuous_listening)
+        self._continuous_listening = False
+        self._recording = False
+        self._transcribing = False
+        if had_stt:
             try:
                 get_voice().cancel_recording()
             except Exception:
                 pass
+        self._set_voice_state("idle")
         if resume_wake:
             self._resume_wake_word()
             # /continuous off must not leave the cyan HUD or a stale
@@ -7356,7 +7887,7 @@ class AgentWindow(QMainWindow):
         if self._preload_started:
             return
         self._preload_started = True
-        if not self._processing and not self._recording:
+        if not self._processing and not self._recording and not self._transcribing:
             self.set_status("Voice loading…", busy=False)
         for name, delay in (
             ("voice", 0.0),
@@ -7430,7 +7961,7 @@ class AgentWindow(QMainWindow):
             if self._f9_held and self._pending_f9_start:
                 self._pending_f9_start = False
                 self._start_recording()
-            elif not self._processing and not self._recording:
+            elif not self._processing and not self._recording and not self._transcribing:
                 if self._wake_ready:
                     text = "Ready"
                 elif self._wake_failed:
@@ -7442,7 +7973,9 @@ class AgentWindow(QMainWindow):
             self._tts_ready = True
             try:
                 voice = get_voice_output()
-                voice.set_error_callback(self._tts_error.emit)
+                generation = self._speech_generation
+                voice.set_error_callback(
+                    lambda error: self._tts_error.emit(generation, str(error)))
                 voice.warmup()
                 print("[tts] warmup requested")
             except Exception as exc:
@@ -7467,7 +8000,7 @@ class AgentWindow(QMainWindow):
             self._wake_preload_done = True
             if self._voice_ready:
                 self._start_wake_word_service()
-            if self._voice_ready and not self._processing and not self._recording:
+            if self._voice_ready and not self._processing and not self._recording and not self._transcribing:
                 self.set_status("Ready", busy=False)
 
     # -- Telegram document listener (Section 2) -------------------------
@@ -7484,6 +8017,14 @@ class AgentWindow(QMainWindow):
 
     def _on_about_to_quit(self):
         self._shutting_down = True
+        self._cancel_voice(resume_wake=False)
+        wake_service = self._wake_word_service
+        self._wake_word_service = None
+        if wake_service is not None:
+            try:
+                wake_service.stop()
+            except Exception:
+                pass
         if self._copilot_stop_event is not None:
             self._copilot_stop_event.set()
         self._stop_copilot_workers()
@@ -7680,6 +8221,7 @@ class AgentWindow(QMainWindow):
         if self._shutting_down:
             return
         self._shutting_down = True
+        self._cancel_voice(resume_wake=False)
         if self._copilot_stop_event is not None:
             self._copilot_stop_event.set()
         self._stop_copilot_workers()
@@ -7716,18 +8258,6 @@ class AgentWindow(QMainWindow):
             self._media_poller.stop()
         if getattr(self, "_media_timer", None) is not None:
             self._media_timer.stop()
-        # Stop any in-flight recording / speech before tearing down.
-        if self._recording and _voice_module is not None:
-            try:
-                _voice_module.stop_and_transcribe()
-            except Exception:
-                pass
-            self._recording = False
-        if _voice_output_module is not None:
-            try:
-                _voice_output_module.stop()
-            except Exception:
-                pass
         tray_icon = self._tray_icon
         self._tray_icon = None
         self._tray_menu = None
@@ -7764,6 +8294,8 @@ class AgentWindow(QMainWindow):
     def closeEvent(self, event):
         # Match the old GUI: closing the window hides to tray, it does not exit.
         event.ignore()
+        if self._voice_active():
+            self._cancel_voice(resume_wake=False)
         self.hide_to_tray()
 
     # -- global hotkey (F9) → push-to-talk ------------------------------
@@ -7825,12 +8357,16 @@ class AgentWindow(QMainWindow):
                 self._pending_f9_start = True
                 self._show_voice_loading()
             return
-        if self._recording or self._processing:
+        if self._recording or self._transcribing or self._processing:
             return
+        self._voice_generation += 1
+        generation = self._voice_generation
         self._recording = True
+        self._transcribing = False
         self._continuous_listening = bool(continuous)
         self._voice_start_event = threading.Event()
         start_event = self._voice_start_event
+        self._set_voice_state("listening")
         self.set_status(
             "Listening (Continuous)…" if continuous
             else "Recording… release F9 to transcribe",
@@ -7838,19 +8374,24 @@ class AgentWindow(QMainWindow):
 
         def work():
             try:
+                if generation != self._voice_generation:
+                    return
                 self._release_audio_before_recording()
-                if not self._recording:
+                if generation != self._voice_generation or not self._recording:
                     return
                 if continuous:
                     get_voice().start_recording(
                         on_transcript=lambda text, reason: self._voice_event.emit(
-                            f"continuous:{reason}:{text}"),
+                            generation, f"continuous:{reason}:{text}"),
                         idle_timeout=CONTINUOUS_IDLE_SECONDS)
                 else:
                     get_voice().start_recording()
-                self._voice_event.emit("recording_started")
+                if generation == self._voice_generation:
+                    self._voice_event.emit(generation, "recording_started")
             except Exception as e:
-                self._voice_event.emit(f"error:Mic error: {e}")
+                if generation == self._voice_generation:
+                    self._voice_event.emit(
+                        generation, f"error:Mic error: {e}")
             finally:
                 start_event.set()
 
@@ -7861,11 +8402,11 @@ class AgentWindow(QMainWindow):
         self._pause_wake_word()
         if self._wake_word_service is not None:
             time.sleep(0.1)  # give the OS time to hand the device over
+        self._interrupt_speech()
         if not self._tts_ready:
             return
         try:
             tts = get_voice_output()
-            tts.stop()
             wait_idle = getattr(tts, "wait_until_idle", None)
             if callable(wait_idle):
                 wait_idle(timeout=2.0)
@@ -7873,10 +8414,13 @@ class AgentWindow(QMainWindow):
             print(f"[voice] could not release TTS output: {exc}")
 
     def _stop_recording(self):
-        if not self._recording:
+        if not self._recording or self._transcribing:
             return
+        generation = self._voice_generation
         self._recording = False
         self._continuous_listening = False
+        self._transcribing = True
+        self._set_voice_state("transcribing")
         self.set_status("Transcribing…", busy=True)
         start_event = self._voice_start_event
 
@@ -7884,20 +8428,30 @@ class AgentWindow(QMainWindow):
             # A very quick F9 tap can release before start_recording() has
             # opened the mic; wait for that worker instead of racing it.
             start_event.wait(timeout=2.0)
+            if generation != self._voice_generation:
+                return
             try:
                 text = get_voice().stop_and_transcribe()
-                self._voice_event.emit(f"transcript:{text}")
+                if generation == self._voice_generation:
+                    self._voice_event.emit(generation, f"transcript:{text}")
             except Exception as e:
-                self._voice_event.emit(f"error:Transcribe error: {e}")
+                if generation == self._voice_generation:
+                    self._voice_event.emit(
+                        generation, f"error:Transcribe error: {e}")
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_voice_event(self, payload):
+    def _on_voice_event(self, generation, payload):
         """GUI-thread slot for recording/transcription results."""
+        if generation != self._voice_generation:
+            return
         if payload.startswith("error:"):
             detail = payload[len("error:"):].strip() or "Unknown voice error"
+            self._voice_generation += 1
             self._recording = False
+            self._transcribing = False
             self._continuous_listening = False
+            self._set_voice_state("error")
             self.set_status(detail, busy=False)
             self.chat.add_message(AssistantMessage(f"Voice error: {detail}"))
             self._resume_wake_word()
@@ -7906,10 +8460,13 @@ class AgentWindow(QMainWindow):
             return
         if payload.startswith("continuous:"):
             _, reason, text = payload.split(":", 2)
+            self._voice_generation += 1
             self._recording = False
+            self._transcribing = False
             self._continuous_listening = False
             if reason == "error":
                 self._continuous_paused = True
+                self._set_voice_state("error")
                 self._resume_wake_word()
                 self.set_status(
                     "Transcription failed \u2014 say the wake word",
@@ -7921,6 +8478,7 @@ class AgentWindow(QMainWindow):
             if reason == "idle":
                 # Nobody spoke for 60s: hand the mic back to the wake word.
                 self._continuous_paused = True
+                self._set_voice_state("idle")
                 self._resume_wake_word()
                 sleeping = "Mic sleeping. Press F9 to talk."
                 self.set_status(sleeping, busy=False)
@@ -7929,6 +8487,7 @@ class AgentWindow(QMainWindow):
             self._handle_transcript(text)
             return
         if payload.startswith("transcript:"):
+            self._voice_generation += 1
             self._handle_transcript(payload[len("transcript:"):])
             if not self._continuous_enabled:
                 self._resume_wake_word()
@@ -7936,15 +8495,18 @@ class AgentWindow(QMainWindow):
     def _handle_transcript(self, text):
         # A finished transcript is a command: send it, don't stage it.
         self._recording = False
+        self._transcribing = False
         text = (text or "").strip()
         if not text:
+            self._set_voice_state("idle")
             self.set_status("No speech detected — try again", busy=False)
             if self._continuous_enabled and not self._continuous_paused:
                 self._schedule_continuous_listen()
             return
+        self._set_voice_state("thinking")
         self.input_field.setPlainText(text)
         self.input_field.setFocus()
-        self.send()
+        self.send(persist_history=False)
 
     # -- scheduler notifications ----------------------------------------
     def _on_scheduled_trigger(self, request_text):
