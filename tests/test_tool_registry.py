@@ -138,6 +138,7 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
         "uia_dump_tree",
         "uia_click",
         "uia_type",
+        "screen_copilot",
         "set_volume",
         "read_artifact",
         "sprite_control",
@@ -151,8 +152,10 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
 
         self.agent = agent
         agent._clear_turn_route()
+        agent._clear_copilot_runtime()
         agent.reset_python_failures()
         self.addCleanup(agent._clear_turn_route)
+        self.addCleanup(agent._clear_copilot_runtime)
         for name, value in (("GROUP_MODE", False),
                             ("note_tool_result", mock.Mock())):
             patcher = mock.patch.object(agent, name, value)
@@ -293,6 +296,174 @@ class AgentRegistryIntegrationTests(unittest.TestCase):
                 {"tool": "current_time", "input": ""})
 
         self.assertEqual(result, "now")
+
+    def test_screen_copilot_is_sequential_system_control_with_a_strict_schema(self):
+        spec = self.agent.TOOL_REGISTRY.get("screen_copilot")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.effect_class, "system_control")
+        self.assertEqual(spec.input_schema["required"], ["target", "goal"])
+        self.assertIs(spec.input_schema["additionalProperties"], False)
+        spec.validate({"target": "Notepad", "goal": "Open the file menu"})
+        for value in (
+                {},
+                {"target": "Notepad"},
+                {"goal": "Open the file menu"},
+                {"target": "", "goal": "Open the file menu"},
+                {"target": "Notepad", "goal": ""},
+                {"target": "Notepad", "goal": "Open", "actions": ["click"]},
+                {"target": "Notepad", "goal": 1},
+                "Notepad|Open the file menu"):
+            with self.subTest(value=value):
+                with self.assertRaises(InputValidationError):
+                    spec.validate(value)
+
+    def test_screen_copilot_batches_only_sequentially(self):
+        from tool_registry import BATCH_SEQUENTIAL, batch_execution_mode
+
+        mode, rejection = batch_execution_mode(
+            ["read_file", "screen_copilot"], self.agent.TOOL_REGISTRY)
+        self.assertIsNone(rejection)
+        self.assertEqual(mode, BATCH_SEQUENTIAL)
+
+    def test_screen_copilot_fails_closed_without_an_interactive_bridge(self):
+        with mock.patch.object(
+                self.agent.copilot_tool, "run_copilot_capability") as run:
+            result = self.agent.execute_tool({
+                "tool": "screen_copilot",
+                "input": {"target": "Notepad", "goal": "Open the file menu"},
+            })
+
+        run.assert_not_called()
+        self.assertTrue(result.startswith("ERROR:"), result)
+        self.assertIn("requires interactive approval", result)
+
+    def test_screen_copilot_uses_the_turn_bridge_and_safe_progress_callback(self):
+        approval_handler = mock.Mock()
+        progress = mock.Mock()
+        self.agent._set_copilot_runtime(
+            approval_handler=approval_handler,
+            progress_handler=progress,
+        )
+        with mock.patch.object(
+                self.agent.copilot_tool, "run_copilot_capability",
+                return_value="Screen Copilot status: completed") as run:
+            result = self.agent.execute_tool({
+                "tool": "screen_copilot",
+                "input": {"target": "Notepad", "goal": "Open the file menu"},
+            })
+
+        self.assertEqual(result, "Screen Copilot status: completed")
+        kwargs = run.call_args.kwargs
+        self.assertIs(kwargs["approval_handler"], approval_handler)
+        self.assertIs(kwargs["progress_handler"], progress)
+        self.assertEqual(run.call_args.args[0], {
+            "target": "Notepad", "goal": "Open the file menu"})
+
+    def test_public_turn_streams_copilot_progress_through_on_step(self):
+        from screen_copilot import (
+            CopilotResult,
+            ProcessIdentity,
+            TargetWindow,
+            WindowBounds,
+        )
+
+        target = TargetWindow(
+            hwnd=101,
+            title="Notepad",
+            process=ProcessIdentity(
+                pid=202, executable=r"C:\Apps\notepad.exe", started_at=3,
+                elevated=False),
+            visible=True,
+            bounds=WindowBounds(10, 20, 310, 220),
+        )
+        approval_handler = mock.Mock()
+        progress = []
+        service_calls = []
+
+        def run_task(**kwargs):
+            service_calls.append(kwargs)
+            kwargs["progress_handler"]({
+                "event": "planning", "step": 1, "action": "",
+                "status": "started",
+            })
+            return CopilotResult(
+                status="completed", summary="Approved plan finished.",
+                task_id="task-1", steps=1, changed=True, last_action="click")
+
+        def run_turn(*_args, **_kwargs):
+            return [self.agent.execute_tool({
+                "tool": "screen_copilot",
+                "input": {"target": "Notepad", "goal": "Open the file menu"},
+            })]
+
+        with mock.patch.object(
+                self.agent.screen_copilot, "list_copilot_targets",
+                return_value=[target]), \
+                mock.patch.object(
+                    self.agent.screen_copilot, "run_copilot_task",
+                    side_effect=run_task), \
+                mock.patch.object(
+                    self.agent, "_run_agent_turn_impl", side_effect=run_turn):
+            step_log = self.agent.run_agent_turn(
+                "hello", [], on_step=progress.append,
+                copilot_approval_handler=approval_handler)
+
+        self.assertEqual(progress, ["Copilot: Planning step 1…"])
+        self.assertIs(service_calls[0]["approval_handler"], approval_handler)
+        self.assertIn("Screen Copilot status: completed", "\n".join(step_log))
+
+    def test_screen_copilot_rejects_bad_input_before_running_the_adapter(self):
+        self.agent._set_copilot_runtime(
+            approval_handler=mock.Mock(), progress_handler=mock.Mock())
+        with mock.patch.object(
+                self.agent.copilot_tool, "run_copilot_capability") as run:
+            result = self.agent.execute_tool({
+                "tool": "screen_copilot",
+                "input": {"target": "Notepad", "goal": "x", "hwnd": 123},
+            })
+
+        run.assert_not_called()
+        self.assertTrue(result.startswith(
+            "ERROR: Invalid input for screen_copilot."), result)
+
+    def test_screen_copilot_availability_requires_a_bridge(self):
+        self.agent._clear_copilot_runtime()
+        self.assertNotIn("screen_copilot", self.agent._available_tool_names())
+        self.agent._set_copilot_runtime(approval_handler=mock.Mock())
+        self.assertIn("screen_copilot", self.agent._available_tool_names())
+        self.agent._clear_copilot_runtime()
+        self.assertNotIn("screen_copilot", self.agent._available_tool_names())
+
+    def test_pre_cancelled_turn_does_not_leave_an_approval_bridge(self):
+        stop_event = mock.Mock()
+        stop_event.is_set.return_value = True
+
+        self.agent.run_agent_turn(
+            "hello", [], stop_event=stop_event,
+            copilot_approval_handler=mock.Mock())
+
+        self.assertNotIn("screen_copilot", self.agent._available_tool_names())
+
+    def test_screen_copilot_cannot_be_granted_without_a_bridge(self):
+        granted, message = self.agent._grant_requested_tool("screen_copilot")
+        self.assertFalse(granted)
+        self.assertIn("requires interactive approval", message)
+
+    def test_screen_copilot_router_visibility_tracks_the_bridge(self):
+        self.agent._clear_copilot_runtime()
+        prompt, selected = self.agent._route_prompt(
+            "use screen_copilot to control the open Notepad window")
+        self.assertNotIn("- screen_copilot:", prompt)
+        self.assertNotIn(
+            "screen_copilot", {tool.name for tool in selected})
+        self.agent._set_copilot_runtime(approval_handler=mock.Mock())
+        prompt, selected = self.agent._route_prompt(
+            "use screen_copilot to control the open Notepad window")
+        self.assertIn("- screen_copilot:", prompt)
+        self.assertIn("screen_copilot", {tool.name for tool in selected})
+
+    def test_screen_copilot_is_not_in_the_unconditional_fallback_catalog(self):
+        self.assertNotIn("screen_copilot", self.agent.TOOL_DESCRIPTIONS)
 
 
 class PromptCatalogIntegrationTests(unittest.TestCase):

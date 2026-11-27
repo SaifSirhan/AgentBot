@@ -217,6 +217,8 @@ class PromptInstructionTests(unittest.TestCase):
 
 class ToolArrayTests(unittest.TestCase):
     def test_tools_array_exposes_the_full_catalog(self):
+        agent._set_copilot_runtime(approval_handler=mock.Mock())
+        self.addCleanup(agent._clear_copilot_runtime)
         agent._set_turn_route("open spotify and play jazz")
         tools = native_tools.build_specs(
             sorted(agent._ROUTED.allowed - {"chat", "done"}),

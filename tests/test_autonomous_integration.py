@@ -17,7 +17,9 @@ from autonomous_loop import RecordedAction
 class AutonomousIntegrationTests(unittest.TestCase):
     def setUp(self):
         agent._clear_turn_route()
+        agent._clear_copilot_runtime()
         self.addCleanup(agent._clear_turn_route)
+        self.addCleanup(agent._clear_copilot_runtime)
         p = mock.patch.object(agent, "GROUP_MODE", False)
         p.start()
         self.addCleanup(p.stop)
@@ -377,6 +379,63 @@ class AutonomousIntegrationTests(unittest.TestCase):
         self.assertIn('args: {"input": string}', spec)
         self.assertNotIn("or object", spec)
 
+    def test_screen_copilot_spec_advertises_target_and_goal(self):
+        spec = agent._autonomous_tool_spec("screen_copilot")
+        self.assertIn('args: {"target": string, "goal": string}', spec)
+        self.assertNotIn('args: {"input": string}', spec)
+
+    def test_autonomous_screen_copilot_preserves_structured_args(self):
+        payload = {"target": "Notepad", "goal": "Open the file menu"}
+        replies = iter([
+            json.dumps({"tool": "screen_copilot", "args": payload}),
+            "DONE",
+        ])
+        calls = []
+
+        def fake_execute(action):
+            calls.append(action)
+            return ("Screen Copilot status: completed\n"
+                    "Summary: The approved plan finished.\n"
+                    "Actions completed: 1\n"
+                    "Observed UI change: unknown")
+
+        agent._set_copilot_runtime(approval_handler=mock.Mock())
+        with mock.patch.object(agent, "ask_llm_direct",
+                               side_effect=lambda _prompt: next(replies)), \
+                mock.patch.object(agent, "execute_tool", side_effect=fake_execute):
+            step_log = agent._run_autonomous_goal(
+                "control the open Notepad window")
+
+        self.assertEqual(calls, [{"tool": "screen_copilot", "input": payload}])
+        self.assertIn("Screen Copilot status: completed", "\n".join(step_log))
+
+    def test_autonomous_screen_copilot_terminal_error_cannot_reach_judge(self):
+        payload = {"target": "Notepad", "goal": "Open the file menu"}
+        replies = iter([
+            json.dumps({"tool": "screen_copilot", "args": payload}),
+            "DONE",
+        ])
+        agent._set_copilot_runtime(approval_handler=mock.Mock())
+        with mock.patch.object(agent, "ask_llm_direct",
+                               side_effect=lambda _prompt: next(replies)), \
+                mock.patch.object(agent, "execute_tool", return_value=
+                                  "ERROR: Screen Copilot ended with status 'failed'."), \
+                mock.patch.object(agent, "_autonomous_judge") as judge:
+            step_log = agent._run_autonomous_goal(
+                "control the open Notepad window")
+
+        judge.assert_not_called()
+        self.assertNotIn("Execution and goal checks passed", "\n".join(step_log))
+
+    def test_screen_copilot_is_not_explicitly_required_without_a_bridge(self):
+        self.assertNotIn(
+            "screen_copilot",
+            agent._explicit_autonomous_tools("use screen_copilot in Notepad"))
+        agent._set_copilot_runtime(approval_handler=mock.Mock())
+        self.assertIn(
+            "screen_copilot",
+            agent._explicit_autonomous_tools("use screen_copilot in Notepad"))
+
 
 class AutonomousPermissionTests(unittest.TestCase):
     def run_loop(self, reply, *, tools=None, authorize=None, execute=None):
@@ -427,7 +486,9 @@ class AutonomousPermissionTests(unittest.TestCase):
 class AutoRoutingTests(unittest.TestCase):
     def setUp(self):
         agent._clear_turn_route()
+        agent._clear_copilot_runtime()
         self.addCleanup(agent._clear_turn_route)
+        self.addCleanup(agent._clear_copilot_runtime)
         p = mock.patch.object(agent, "GROUP_MODE", False)
         p.start()
         self.addCleanup(p.stop)

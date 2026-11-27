@@ -423,6 +423,8 @@ class AgentRoutingTests(unittest.TestCase):
         self.assertIn(pr.RULES["weather"], prompt)
 
     def test_turn_allowlist_exposes_every_catalog_tool(self):
+        self.agent._set_copilot_runtime(approval_handler=mock.Mock())
+        self.addCleanup(self.agent._clear_copilot_runtime)
         self.agent._set_turn_route("watch a movie")
         allowed = self.agent._ROUTED.allowed
         self.assertEqual(allowed,

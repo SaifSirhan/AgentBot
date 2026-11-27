@@ -18,7 +18,9 @@ import agent  # noqa: E402
 class FullToolsetTurnTests(unittest.TestCase):
     def setUp(self):
         agent._clear_turn_route()
+        agent._set_copilot_runtime(approval_handler=mock.Mock())
         self.addCleanup(agent._clear_turn_route)
+        self.addCleanup(agent._clear_copilot_runtime)
         patchers = [
             mock.patch.object(agent, "GROUP_MODE", False),
             mock.patch.object(

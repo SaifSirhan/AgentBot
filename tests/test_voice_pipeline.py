@@ -1030,7 +1030,7 @@ class GuiVoicePipelineTests(unittest.TestCase):
                 mock.patch.object(g.screen_copilot, "shutdown"), \
                 mock.patch.object(self.window, "_stop_event_bus"), \
                 mock.patch.object(self.window, "_stop_telegram_doc_service"), \
-                mock.patch.object(self.window, "_quit_when_copilot_workers_stop"), \
+                mock.patch.object(self.window, "_quit_when_agent_workers_stop"), \
                 mock.patch("os_control.stop_kill_switch"), \
                 mock.patch("os_control.set_gui_visibility_handlers"), \
                 mock.patch("os_control.set_gui_capture_handler"), \
@@ -1050,7 +1050,6 @@ class GuiVoicePipelineTests(unittest.TestCase):
         self._start_fake_recording(stt)
         with mock.patch.object(g, "get_voice", return_value=stt), \
                 mock.patch.object(g, "get_voice_output", return_value=tts), \
-                mock.patch.object(self.window, "_stop_copilot_workers"), \
                 mock.patch.object(self.window, "_detach_copilot_bridge"), \
                 mock.patch.object(g.screen_copilot, "shutdown"), \
                 mock.patch.object(self.window, "_stop_event_bus"):

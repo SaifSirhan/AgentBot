@@ -32,12 +32,14 @@ class _FakeWorker:
     last = None
 
     def __init__(self, user_input, history, attached_paths=None,
-                 stop_event=None, persist_history=True):
+                 stop_event=None, persist_history=True,
+                 copilot_approval_handler=None):
         self.user_input = user_input
         self.history = history
         self.attached_paths = list(attached_paths or [])
         self._stop_event = stop_event
         self.persist_history = persist_history
+        self.copilot_approval_handler = copilot_approval_handler
         self.started = False
         self.completed = _FakeSignal()
         self.failed = _FakeSignal()
@@ -53,9 +55,11 @@ class _FakeAgent:
         self.received = None
         self.saved = None
 
-    def run_agent_turn(self, text, history, on_step=None, stop_event=None):
+    def run_agent_turn(self, text, history, on_step=None, stop_event=None,
+                       copilot_approval_handler=None):
         self.received = {
-            "text": text, "history": history, "stop_event": stop_event}
+            "text": text, "history": history, "stop_event": stop_event,
+            "approval_handler": copilot_approval_handler}
         return ["Done: ok"]
 
     def save_conversation_history(self, history):
@@ -165,6 +169,9 @@ class GuiStopTests(unittest.TestCase):
         self.assertFalse(worker._stop_event.is_set())
         self.assertFalse(self.window._stop_requested)
         self.assertTrue(self.window._turn_cancellable)
+        self.assertIs(
+            worker.copilot_approval_handler, self.window._copilot_bridge)
+        self.assertIsNotNone(worker.copilot_approval_handler)
         self.assertTrue(worker.started)
 
         self.window._end_turn()

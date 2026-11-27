@@ -21,7 +21,7 @@ OS_TOOLS = frozenset({
     "close_window", "save_screenshot", "screenshot_background",
     "analyze_screenshot", "click_coordinates", "type_text",
     "get_pixel_color", "uia_dump_tree", "uia_click", "uia_type",
-    "save_macro", "play_macro", "set_volume",
+    "screen_copilot", "save_macro", "play_macro", "set_volume",
     "media_control", "system_status", "lock_pc", "sleep_pc", "shutdown_pc",
     "restart_pc", "read_screen", "describe_screen", "clipboard_read",
     "clipboard_write", "delegate_to_qoder",
@@ -88,6 +88,9 @@ DESCRIPTIONS = {
     "uia_dump_tree": "List interactive UI Automation elements in a window.",
     "uia_click": "Click a UI Automation element: 'window|element'.",
     "uia_type": "Type into a UI Automation field: 'window|element|text'.",
+    "screen_copilot": (
+        "Operate one open desktop window from a natural-language goal; asks for "
+        "one inline approval before a bounded adaptive plan."),
     "delegate_to_qoder": "Send a complex website/app/localhost-server build to Qoder IDE via clipboard and Ctrl+L chat, then let the turn inspect the terminal. Input: prompt and goal.",
     "save_macro": "Save a reusable click/type/hotkey macro.",
     "play_macro": "Run a saved macro by name.",
@@ -159,6 +162,9 @@ EXTRA_KEYWORDS = {
                   "element"),
     "uia_type": ("uia", "automation", "window", "type", "input", "text",
                  "field"),
+    "screen_copilot": ("screen", "copilot", "window", "application", "app",
+                       "control", "operate", "click", "type", "navigate",
+                       "desktop"),
     "delegate_to_qoder": ("qoder", "delegate", "build", "website", "web",
                           "app", "localhost", "server", "complex", "manager"),
     "play_macro": ("macro", "play", "movie", "film", "episode", "stremio"),

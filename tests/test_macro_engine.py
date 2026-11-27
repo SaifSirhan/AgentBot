@@ -466,9 +466,11 @@ class MacroToolTests(unittest.TestCase):
         flat = " ".join(self.agent.load_skill_tool("core_tools").split())
         self.assertIn(
             "For repetitive tasks (like opening a specific folder or app), "
-            "first try play_macro. If it doesn't exist or fails, use OS "
-            "Control with Vision to do it. Once you succeed, use save_macro "
-            "to record the coordinates so you don't have to guess next time.",
+            "first try play_macro. If it doesn't exist or fails, use "
+            "screen_copilot for adaptive multi-step app work when available; "
+            "use OS Control with Vision only for approved simple actions. "
+            "Once you succeed, use save_macro to record the coordinates so "
+            "you don't have to guess next time.",
             flat,
         )
 

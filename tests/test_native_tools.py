@@ -169,6 +169,18 @@ class ToolCallParsingTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(actions[0]["input"], {"path": "a.docx", "ops": []})
 
+    def test_screen_copilot_structured_input_is_preserved(self):
+        import agent
+
+        payload = {"target": "Notepad", "goal": "Open the file menu"}
+        message = self._message([self._call("c0", "screen_copilot", payload)])
+        actions, errors = native_tools.actions_from_tool_calls(
+            message, valid_names={"screen_copilot"},
+            allowed={"screen_copilot"},
+            object_input_tools=agent.OBJECT_INPUT_TOOLS)
+        self.assertEqual(errors, [])
+        self.assertEqual(actions, [{"tool": "screen_copilot", "input": payload}])
+
     def test_delegate_prompt_and_goal_are_mapped(self):
         message = self._message([self._call(
             "c0", "delegate_to_qoder", {"prompt": "build it",

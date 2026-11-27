@@ -766,6 +766,9 @@ class FakeAdapter:
 
 class ServiceTests(unittest.TestCase):
     def setUp(self):
+        shutdown = mock.patch.object(sc, "_shutdown_event", threading.Event())
+        shutdown.start()
+        self.addCleanup(shutdown.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.audit_path = Path(self.directory.name) / "audit.jsonl"
@@ -1470,6 +1473,9 @@ $form.Controls.Add($label)
 
 class LiveFixture:
     def setUp(self):
+        shutdown = mock.patch.object(sc, "_shutdown_event", threading.Event())
+        shutdown.start()
+        self.addCleanup(shutdown.stop)
         self.title = "Copilot Fixture " + uuid.uuid4().hex[:8]
         script_path = None
         with tempfile.NamedTemporaryFile(

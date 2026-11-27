@@ -102,7 +102,8 @@ class SkillIntegrationTests(unittest.TestCase):
             '"input": "tool_input"}. Never write tool("arg") or XML.', prompt)
         self.assertLess(len(agent.TOOL_DESCRIPTIONS), 2000)
         for name in (agent.VALID_TOOLS - {"chat", "done"}
-                     - agent.prompt_catalog.SECURITY_TOOLS):
+                     - agent.prompt_catalog.SECURITY_TOOLS
+                     - {agent.copilot_tool.SCREEN_COPILOT_TOOL}):
             self.assertIn(name, agent.TOOL_DESCRIPTIONS)
 
     def test_prompt_carries_anti_hallucination_and_path_lock_rules(self):

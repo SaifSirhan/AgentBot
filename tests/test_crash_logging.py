@@ -102,7 +102,8 @@ class _RecordingAgent:
         self.calls = calls
         self.error = error
 
-    def run_agent_turn(self, text, history, on_step=None, stop_event=None):
+    def run_agent_turn(self, text, history, on_step=None, stop_event=None,
+                       copilot_approval_handler=None):
         self.calls.append("turn")
         if self.error is not None:
             raise self.error

@@ -44,6 +44,8 @@ from tool_registry import (
 )
 from uia_control import uia_click, uia_dump_tree, uia_type
 import screen
+import screen_copilot
+import copilot_tool
 import security_tools
 import air_quality as air_quality_tool
 import threading as _threading
@@ -946,6 +948,33 @@ def starts_new_task(user_request):
 # ---------------------------
 MAX_PROMPT_TOKENS = 7800
 _ROUTED = _threading.local()
+_COPILOT = _threading.local()
+_SCREEN_COPILOT_UNAVAILABLE = (
+    "ERROR: Screen Copilot requires interactive approval and is unavailable.")
+
+
+def _set_copilot_runtime(approval_handler=None, progress_handler=None):
+    _COPILOT.approval_handler = approval_handler
+    _COPILOT.progress_handler = progress_handler
+
+
+def _current_copilot_runtime():
+    return (getattr(_COPILOT, "approval_handler", None),
+            getattr(_COPILOT, "progress_handler", None))
+
+
+def _clear_copilot_runtime():
+    _COPILOT.__dict__.clear()
+
+
+def _copilot_available():
+    return callable(getattr(_COPILOT, "approval_handler", None))
+
+
+def _available_tool_names():
+    if _copilot_available() and not GROUP_MODE:
+        return VALID_TOOLS
+    return VALID_TOOLS - {copilot_tool.SCREEN_COPILOT_TOOL}
 
 TOOL_PROTOCOL = (
     'Call load_skill("local:core_tools") for unknown tool input formats.\n'
@@ -985,7 +1014,7 @@ def _classify_unmatched_intents(user_request):
 
 
 def _route_prompt(user_request):
-    tools = prompt_catalog.build_tools(frozenset(VALID_TOOLS))
+    tools = prompt_catalog.build_tools(frozenset(_available_tool_names()))
     if "security" not in prompt_router.matching_intents(user_request):
         tools = [
             tool for tool in tools
@@ -1031,7 +1060,7 @@ def _clear_stop_event():
 
 
 def _router_tool_description(name):
-    for tool in prompt_catalog.build_tools(frozenset(VALID_TOOLS)):
+    for tool in prompt_catalog.build_tools(frozenset(_available_tool_names())):
         if tool.name == name:
             return tool.description
     return name.replace("_", " ")
@@ -1039,7 +1068,7 @@ def _router_tool_description(name):
 
 def _closest_tool_name(name):
     """Resolve a misspelling to the canonical catalog name, or None."""
-    candidates = sorted(VALID_TOOLS - {"chat", "done"})
+    candidates = sorted(_available_tool_names() - {"chat", "done"})
     folded = name.lower()
     for candidate in candidates:
         if candidate.lower() == folded:
@@ -1069,6 +1098,8 @@ def _grant_requested_tool(name):
                            f"'{suggested}'? {detail}")
         return True, (f"ERROR: Tool '{name}' not found. Did you mean "
                       f"'{suggested}'? I have granted it.")
+    if name == copilot_tool.SCREEN_COPILOT_TOOL and not _copilot_available():
+        return False, _SCREEN_COPILOT_UNAVAILABLE
     if GROUP_MODE and name not in SAFE_GROUP_TOOLS:
         return False, f"Tool '{name}' is blocked in group chats."
     loop = getattr(_ROUTED, "autonomous_loop", None)
@@ -1090,12 +1121,16 @@ def _grant_requested_tool(name):
 
 
 def _tool_allowed(tool):
+    if tool == copilot_tool.SCREEN_COPILOT_TOOL and not _copilot_available():
+        return False
     allowed = getattr(_ROUTED, "allowed", None)
     return allowed is None or tool in allowed
 
 
 def _not_allowed_error(tool):
-    allowed = getattr(_ROUTED, "allowed", None) or VALID_TOOLS
+    if tool == copilot_tool.SCREEN_COPILOT_TOOL and not _copilot_available():
+        return _SCREEN_COPILOT_UNAVAILABLE
+    allowed = getattr(_ROUTED, "allowed", None) or _available_tool_names()
     return (f"Tool '{tool}' is not available this turn. "
             f"Use one of: {', '.join(sorted(allowed))}.")
 
@@ -1452,7 +1487,7 @@ def _native_action(user_request, native_context, transcript, max_retries=2):
     messages = [{"role": "system", "content": prompt}]
     messages.extend(native_tools.messages_from_transcript(transcript))
 
-    allowed = set(getattr(_ROUTED, "allowed", None) or ()) or set(VALID_TOOLS)
+    allowed = set(getattr(_ROUTED, "allowed", None) or ()) or set(_available_tool_names())
     tools = native_tools.build_specs(sorted(allowed - {"chat", "done"}),
                                      TOOL_REGISTRY, _router_tool_description)
 
@@ -4969,7 +5004,7 @@ VALID_TOOLS = {
     "save_screenshot", "todo", "list_windows", "focus_window", "notify",
     "screenshot_background", "analyze_screenshot", "click_coordinates",
     "type_text", "get_pixel_color", "uia_dump_tree", "uia_click",
-    "uia_type", "save_macro", "play_macro",
+    "uia_type", "save_macro", "play_macro", "screen_copilot",
     "delegate_to_qoder",
     "beep", "done", "set_reminder_at", "list_reminders", "list_brains",
     "close_window", "watch_folder", "stop_watching", "watch_system_condition",
@@ -4997,7 +5032,8 @@ VALID_TOOLS = {
 # skills/core_tools/SKILL.md. The prompt only lists names; the model must load
 # the skill for exact input formats before calling a tool.
 _PROMPT_TOOL_NAMES = ", ".join(sorted(
-    VALID_TOOLS - {"chat", "done"} - prompt_catalog.SECURITY_TOOLS))
+    VALID_TOOLS - {"chat", "done"} - prompt_catalog.SECURITY_TOOLS
+    - {copilot_tool.SCREEN_COPILOT_TOOL}))
 TOOL_DESCRIPTIONS = (
     "AVAILABLE TOOLS: " + _PROMPT_TOOL_NAMES + ".\n"
     "IMPORTANT: This is just a list of names. You MUST call "
@@ -5848,6 +5884,17 @@ def kali_task(inp):
     return _format_kali_result(result)
 
 
+def _screen_copilot_tool(inp):
+    approval_handler, progress_handler = _current_copilot_runtime()
+    return copilot_tool.run_copilot_capability(
+        inp,
+        planner=lambda prompt: _call_deepseek(prompt, force_json=True, max_tokens=768),
+        approval_handler=approval_handler,
+        stop_event=_current_stop_event(),
+        progress_handler=progress_handler,
+    )
+
+
 def _build_tool_registry():
     """Register the migrated core tools. Everything else stays legacy."""
     registry = ToolRegistry()
@@ -5972,6 +6019,28 @@ def _build_tool_registry():
             effect_class="write",
             timeout=20,
             func=uia_type,
+        ),
+        ToolSpec(
+            name="screen_copilot",
+            description=(
+                "Operate one eligible desktop window with an approved adaptive "
+                "plan, target revalidation, safe progress, and a five-action cap."),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string",
+                               "minLength": 1,
+                               "maxLength": copilot_tool.MAX_TARGET_CHARS},
+                    "goal": {"type": "string",
+                             "minLength": 1,
+                             "maxLength": screen_copilot.MAX_GOAL_CHARS},
+                },
+                "required": ["target", "goal"],
+                "additionalProperties": False,
+            },
+            effect_class="system_control",
+            timeout=300,
+            func=_screen_copilot_tool,
         ),
         ToolSpec(
             name="find_files",
@@ -6183,6 +6252,7 @@ def _live_tool_func(func):
 # Tools whose input is a structured envelope rather than a "a|b" string.
 OBJECT_INPUT_TOOLS = frozenset({
     "edit_docx_safe", "sprite_control", "musicapp_control", "kali_task",
+    "screen_copilot",
 })
 
 
@@ -6454,6 +6524,9 @@ def _autonomous_tool_spec(name):
     if name == "delegate_to_qoder":
         return (f"{_router_tool_description(name)} "
                 'args: {"prompt": string, "goal": string}')
+    if name == copilot_tool.SCREEN_COPILOT_TOOL:
+        return (f"{_router_tool_description(name)} "
+                'args: {"target": string, "goal": string}')
     return (f"{_router_tool_description(name)} "
             'args: {"input": string}')
 
@@ -6463,7 +6536,7 @@ _TASK_SNAPSHOT_PREFIX = "System: Autonomous task snapshot: "
 
 def _explicit_autonomous_tools(goal):
     return prompt_router.explicitly_requested_tool_names(
-        goal, VALID_TOOLS - autonomous_engine.CONTROL_TOOLS - {"chat"})
+        goal, _available_tool_names() - autonomous_engine.CONTROL_TOOLS - {"chat"})
 
 
 def _is_task_continuation(text):
@@ -6824,6 +6897,14 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_histo
                     prompt = args.get("prompt", args.get("input", ""))
                     return (isinstance(prompt, str) and bool(prompt.strip())
                             and isinstance(args.get("goal", ""), str))
+                if tool == copilot_tool.SCREEN_COPILOT_TOOL:
+                    if not _tool_allowed(tool):
+                        return False
+                    try:
+                        TOOL_REGISTRY.get(tool).validate(args)
+                    except InputValidationError:
+                        return False
+                    return True
                 if set(args) != {"input"}:
                     return False
                 if tool == "request_tool":
@@ -6844,6 +6925,8 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_histo
                     action = {"tool": tool, "input": args.get("prompt", args.get("input", ""))}
                     if args.get("goal"):
                         action["goal"] = args["goal"]
+                elif tool == copilot_tool.SCREEN_COPILOT_TOOL:
+                    action = {"tool": tool, "input": dict(args)}
                 else:
                     action = {"tool": tool, "input": args.get("input", "")}
                 # Baselines must describe the file BEFORE the dispatcher can mutate it.
@@ -6853,6 +6936,8 @@ def _run_autonomous_goal(goal, on_step=None, stop_event=None, conversation_histo
                 prefix = observation.lstrip().lower()
                 ok = (bool(observation.strip())
                       and not prefix.startswith(("error:", "aborted:", "cancelled:", "canceled:")))
+                if tool == copilot_tool.SCREEN_COPILOT_TOOL and ok:
+                    ok = "Screen Copilot status: completed" in observation
                 if tool == "delegate_to_qoder" and ok:
                     goal_text = args.get("goal") or "Server running or Build successful"
                     observation = f"{observation}\nDelegation goal: {goal_text}"
@@ -6983,9 +7068,11 @@ def _run_read_only_event(user_input, on_step=None, stop_event=None):
 
 
 def run_agent_turn(user_input, conversation_history=None, on_step=None,
-                   stop_event=None, *, read_only=False, group_mode=None):
+                   stop_event=None, *, read_only=False, group_mode=None,
+                   copilot_approval_handler=None):
     """Serialize a full turn, with cancellable waiting and scoped group context."""
     global GROUP_MODE
+    _clear_copilot_runtime()
 
     def cancelled():
         log = _StepLog(on_step)
@@ -7001,6 +7088,10 @@ def run_agent_turn(user_input, conversation_history=None, on_step=None,
     try:
         if stop_event is not None and stop_event.is_set():
             return cancelled()
+        _set_copilot_runtime(
+            approval_handler=copilot_approval_handler,
+            progress_handler=on_step,
+        )
         if group_mode is not None:
             GROUP_MODE = group_mode
         # Must precede /task parsing, routing, context retrieval and eval traces.
@@ -7015,6 +7106,7 @@ def run_agent_turn(user_input, conversation_history=None, on_step=None,
         GROUP_MODE = previous_group_mode
         _clear_stop_event()
         _clear_turn_route()
+        _clear_copilot_runtime()
         _TURN_LOCK.release()
 
 

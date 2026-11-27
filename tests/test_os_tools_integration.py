@@ -81,17 +81,22 @@ class OSToolRegistryTests(unittest.TestCase):
                      "input": "1,1" if name != "screenshot_background" else ""})
                 self.assertIn("disabled in group chats", out, name)
 
-    def test_prompt_requires_autonomous_execution(self):
+    def test_prompt_requires_one_approval_for_adaptive_control(self):
         text = agent.load_skill_tool("core_tools")
         flat = " ".join(text.split())
         self.assertIn(
-            "You are an autonomous agent. When the user asks you to perform a "
-            "multi-step task (like controlling an app), you MUST execute the "
-            "full sequence of steps (screenshot, click, type, screenshot, "
-            "click) without stopping to ask for permission. Only ask for "
-            "permission before deleting files or sending money.",
+            "When the user asks to operate or complete a multi-step task in "
+            "one desktop application, use screen_copilot when available "
+            "instead of assembling a raw screenshot/click/type sequence. "
+            "It accepts only {\"target\": string, \"goal\": string}. It "
+            "displays one plan-level approval in the main chat. Denial or "
+            "timeout executes nothing. After approval, the bounded adaptive "
+            "sequence may continue without asking again, within five actions.",
             flat,
         )
+        self.assertIn(
+            "Completed means the planner marked the goal done, not independent "
+            "proof that an external effect occurred.", flat)
         self.assertIn("Stop, take a fresh screenshot, and look again.", flat)
         self.assertIn('"x,y | App title"', text)
         self.assertIn('"{enter}" to submit', text)
@@ -100,7 +105,21 @@ class OSToolRegistryTests(unittest.TestCase):
             flat)
         self.assertIn("Never ask the user for coordinates.", flat)
 
-    def test_pre_action_rubric_precedes_autonomy_rules(self):
+    def test_prompt_forbids_raw_control_approval_bypass(self):
+        flat = " ".join(agent.load_skill_tool("core_tools").split())
+        self.assertIn(
+            "Raw tools are for inspection or simple deterministic actions "
+            "where approval requirements permit. Never use raw UIA/vision "
+            "actions to bypass screen_copilot approval.", flat)
+        self.assertIn(
+            "Without an interactive approval bridge (headless, Telegram, or "
+            "group context), do not attempt multi-step desktop control with "
+            "raw tools.", flat)
+        self.assertIn(
+            'screen_copilot({"target": "Notepad", '
+            '"goal": "Open the file menu"})', flat)
+
+    def test_pre_action_rubric_precedes_adaptive_control_rules(self):
         flat = " ".join(agent.load_skill_tool("core_tools").split())
         rubric = (
             "Before executing a click or file modification, ask yourself: "
@@ -111,7 +130,7 @@ class OSToolRegistryTests(unittest.TestCase):
         self.assertIn(rubric, flat)
         self.assertLess(flat.index("PRE-ACTION RUBRIC"), flat.index(rubric))
         self.assertLess(
-            flat.index(rubric), flat.index("You are an autonomous agent."))
+            flat.index(rubric), flat.index("ADAPTIVE DESKTOP CONTROL"))
 
     def test_screenshots_can_repeat_but_clicks_cannot(self):
         shot = ("screenshot_background", "Stremio")
