@@ -114,6 +114,7 @@ import memory
 import kali_bus
 import screen_copilot
 import sprite_bus
+import task_ledger
 from hud_core import PetWidget, ReactorHud
 from window_chrome import FramelessChrome
 
@@ -1860,6 +1861,209 @@ class UntrustedTextMessage(MessageBase):
         self.body_label = body
 
 
+class TaskLedgerCard(MessageBase):
+    """Persistent manual task ledger embedded in the chat transcript."""
+
+    focus_requested = Signal(str)
+    action_requested = Signal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        self.focused_task_id = None
+        self.task_buttons = []
+        self._tasks = []
+        self._error = ""
+
+        frame = QFrame()
+        frame.setObjectName("taskLedgerCard")
+        frame.setStyleSheet(
+            f"""
+            QFrame#taskLedgerCard {{
+                background: {COLOR_RAISED}; border: 1px solid {COLOR_BORDER};
+                border-radius: 12px;
+            }}
+            QFrame#taskLedgerCard QLabel {{ background: transparent; }}
+            """
+        )
+        outer = zero_layout(QVBoxLayout(frame))
+        outer.setContentsMargins(14, 12, 14, 12)
+        outer.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        title = QLabel("TASK LEDGER")
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        title.setStyleSheet(
+            f'color: {COLOR_TEXT_MID}; font-family: "{FONT_MONO}"; '
+            "font-size: 9px; font-weight: bold;")
+        header.addWidget(title)
+        self.summary_label = QLabel("0 open · 0 active · 0 done")
+        self.summary_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.summary_label.setStyleSheet(
+            f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_MONO}"; '
+            "font-size: 9px;")
+        header.addWidget(self.summary_label)
+        header.addStretch(1)
+        self.add_button = QPushButton("Add task")
+        self.add_button.setProperty("action", "add")
+        self.add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {COLOR_ACCENT_DIM}; border: 1px solid {COLOR_ACCENT};
+                border-radius: 7px; color: {COLOR_TEXT_HI}; padding: 4px 9px;
+                font-family: "{FONT_UI}"; font-size: 10px;
+            }}
+            QPushButton:hover {{ background: {COLOR_HOVER}; }}
+            """
+        )
+        self.add_button.clicked.connect(
+            lambda: self.action_requested.emit("add", ""))
+        header.addWidget(self.add_button)
+        outer.addLayout(header)
+
+        self.error_label = QLabel()
+        self.error_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.error_label.setWordWrap(True)
+        self.error_label.setStyleSheet(
+            f"color: {COLOR_WARN}; font-family: \"{FONT_UI}\"; font-size: 10px;")
+        self.error_label.hide()
+        outer.addWidget(self.error_label)
+
+        self._list_host = QWidget()
+        self._list_host.setStyleSheet("background: transparent;")
+        self._list_layout = zero_layout(QVBoxLayout(self._list_host))
+        self._list_layout.setSpacing(4)
+        self._list_layout.addStretch(1)
+        self._list_scroll = QScrollArea()
+        self._list_scroll.setObjectName("taskLedgerList")
+        self._list_scroll.setWidgetResizable(True)
+        self._list_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._list_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list_scroll.setStyleSheet(
+            "QScrollArea#taskLedgerList, QScrollArea#taskLedgerList > QWidget "
+            "{ background: transparent; border: none; }")
+        self._list_scroll.setWidget(self._list_host)
+        self._list_scroll.setFixedHeight(40)
+        outer.addWidget(self._list_scroll)
+        self._col_layout.addWidget(frame)
+
+    def set_ledger_state(self, state):
+        self._tasks = list(state.get("tasks") or [])
+        self.focused_task_id = state.get("focused_task_id")
+        self._error = str(state.get("error") or "")
+        open_count = sum(task["status"] != "done" for task in self._tasks)
+        active_count = sum(task["status"] == "active" for task in self._tasks)
+        done_count = sum(task["status"] == "done" for task in self._tasks)
+        self.summary_label.setText(
+            f"{open_count} open · {active_count} active · {done_count} done")
+        self.error_label.setText(self._error)
+        self.error_label.setVisible(bool(self._error))
+        self.add_button.setEnabled(not self._error)
+        self._rebuild_tasks()
+
+    def _rebuild_tasks(self):
+        while self._list_layout.count():
+            item = self._list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.task_buttons = []
+
+        if not self._tasks:
+            empty = QLabel("No tasks yet. Add one to start a persistent ledger.")
+            empty.setTextFormat(Qt.TextFormat.PlainText)
+            empty.setWordWrap(True)
+            empty.setStyleSheet(
+                f'color: {COLOR_TEXT_LOW}; font-family: "{FONT_UI}"; '
+                "font-size: 11px;")
+            self._list_layout.addWidget(empty)
+            self._list_layout.addStretch(1)
+            self._list_scroll.setFixedHeight(40)
+            return
+
+        for task in self._tasks:
+            row = QFrame()
+            row.setObjectName("taskLedgerRow")
+            focused = task["id"] == self.focused_task_id
+            row.setStyleSheet(
+                f"""
+                QFrame#taskLedgerRow {{
+                    background: {COLOR_CODE_BG};
+                    border: 1px solid {COLOR_ACCENT if focused else COLOR_BORDER};
+                    border-radius: 8px;
+                }}
+                """
+            )
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(6, 3, 6, 3)
+            row_layout.setSpacing(4)
+
+            status = {"planned": "OPEN", "active": "ACTIVE", "done": "DONE"}[
+                task["status"]]
+            title = QPushButton(f"{'› ' if focused else ''}{status}  {task['title']}")
+            title.setProperty("taskId", task["id"])
+            title.setProperty("focused", focused)
+            title.setToolTip(task["title"])
+            title.setCursor(Qt.CursorShape.PointingHandCursor)
+            title.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            title.setMinimumWidth(0)
+            title.setFixedHeight(28)
+            title.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: transparent; border: none; text-align: left;
+                    color: {COLOR_TEXT_USER}; padding: 2px 4px;
+                    font-family: "{FONT_UI}"; font-size: 11px;
+                }}
+                QPushButton:hover {{ color: {COLOR_TEXT_HI}; }}
+                QPushButton[focused="true"] {{ color: {COLOR_TEXT_HI}; }}
+                """
+            )
+            title.clicked.connect(
+                lambda _checked=False, task_id=task["id"]:
+                self.focus_requested.emit(task_id))
+            row_layout.addWidget(title, 1)
+            self.task_buttons.append(title)
+
+            actions = []
+            if task["status"] == "planned":
+                actions.append(("Start", "start"))
+            if task["status"] != "done":
+                actions.append(("Done", "done"))
+            else:
+                actions.append(("Reopen", "reopen"))
+            actions.append(("Delete", "delete"))
+            for label, action in actions:
+                button = QPushButton(label)
+                button.setProperty("action", action)
+                button.setProperty("taskId", task["id"])
+                button.setEnabled(not self._error)
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.setFixedHeight(24)
+                button.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        background: {COLOR_RAISED}; border: 1px solid {COLOR_BORDER};
+                        border-radius: 6px; color: {COLOR_TEXT_MID}; padding: 2px 7px;
+                        font-family: "{FONT_UI}"; font-size: 9px;
+                    }}
+                    QPushButton:hover {{ color: {COLOR_TEXT_HI};
+                        background: {COLOR_HOVER}; }}
+                    """
+                )
+                button.clicked.connect(
+                    lambda _checked=False, name=action, task_id=task["id"]:
+                    self.action_requested.emit(name, task_id))
+                row_layout.addWidget(button)
+            self._list_layout.addWidget(row)
+
+        self._list_layout.addStretch(1)
+        self._list_scroll.setFixedHeight(min(180, max(40, len(self._tasks) * 38)))
+
+
 class BrowserApprovalCard(QFrame):
     """Inline approval for one browser action (never blocks the Qt thread)."""
 
@@ -2854,6 +3058,8 @@ class NavRail(QFrame):
 
 
 class TaskWorkspace(QFrame):
+    focus_requested = Signal(str)
+
     def __init__(self):
         super().__init__()
         self.setObjectName("taskWorkspace")
@@ -2867,30 +3073,143 @@ class TaskWorkspace(QFrame):
             QFrame#taskWorkspace QLabel {{ background: transparent; }}
             """
         )
-        layout = zero_layout(QVBoxLayout(self))
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(6)
+        layout = zero_layout(QHBoxLayout(self))
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(14)
 
+        live = QWidget()
+        live_layout = zero_layout(QVBoxLayout(live))
+        live_layout.setSpacing(5)
         heading = QLabel("CURRENT TASK")
         heading.setStyleSheet(
             f"color: {COLOR_TEXT_MID}; font-family: \"{FONT_MONO}\"; "
-            f"font-size: 9px; font-weight: bold;")
-        layout.addWidget(heading)
+            "font-size: 9px; font-weight: bold;")
+        live_layout.addWidget(heading)
 
         self.task_label = QLabel("No active task")
         self.task_label.setWordWrap(True)
         self.task_label.setStyleSheet(
             f"color: {COLOR_TEXT_USER}; font-family: \"{FONT_UI}\"; "
-            f"font-size: 14px; font-weight: bold;")
-        layout.addWidget(self.task_label)
+            "font-size: 14px; font-weight: bold;")
+        live_layout.addWidget(self.task_label)
 
         self.steps_label = QLabel("Activity will appear here while Kestrel works.")
         self.steps_label.setWordWrap(True)
         self.steps_label.setTextFormat(Qt.TextFormat.PlainText)
         self.steps_label.setStyleSheet(
             f"color: {COLOR_TEXT_MID}; font-family: \"{FONT_MONO}\"; "
-            f"font-size: 10px;")
-        layout.addWidget(self.steps_label, 1)
+            "font-size: 10px;")
+        live_layout.addWidget(self.steps_label, 1)
+        layout.addWidget(live, 3)
+
+        separator = QFrame()
+        separator.setFixedWidth(1)
+        separator.setStyleSheet(f"background: {COLOR_BORDER};")
+        layout.addWidget(separator)
+
+        ledger = QWidget()
+        ledger_layout = zero_layout(QVBoxLayout(ledger))
+        ledger_layout.setSpacing(5)
+        ledger_header = QHBoxLayout()
+        ledger_header.setSpacing(6)
+        ledger_heading = QLabel("TASKS")
+        ledger_heading.setStyleSheet(
+            f"color: {COLOR_TEXT_MID}; font-family: \"{FONT_MONO}\"; "
+            "font-size: 9px; font-weight: bold;")
+        ledger_header.addWidget(ledger_heading)
+        self.ledger_summary = QLabel("0 open · 0 done")
+        self.ledger_summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.ledger_summary.setStyleSheet(
+            f"color: {COLOR_TEXT_LOW}; font-family: \"{FONT_MONO}\"; "
+            "font-size: 9px;")
+        ledger_header.addWidget(self.ledger_summary)
+        ledger_header.addStretch(1)
+        ledger_layout.addLayout(ledger_header)
+
+        self.ledger_buttons = []
+        self.focused_task_id = None
+        self._ledger_list_layout = zero_layout(QVBoxLayout())
+        self._ledger_list_layout.setSpacing(4)
+        ledger_layout.addLayout(self._ledger_list_layout)
+        ledger_layout.addStretch(1)
+        layout.addWidget(ledger, 2)
+
+    def set_ledger_state(self, state):
+        tasks = list(state.get("tasks") or [])
+        self.focused_task_id = state.get("focused_task_id")
+        error = str(state.get("error") or "")
+        open_tasks = [task for task in tasks if task["status"] != "done"]
+        done_count = sum(task["status"] == "done" for task in tasks)
+        if error:
+            self.ledger_summary.setText("Ledger unavailable")
+        else:
+            self.ledger_summary.setText(
+                f"{len(open_tasks)} open · {done_count} done")
+
+        while self._ledger_list_layout.count():
+            item = self._ledger_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.ledger_buttons = []
+
+        if error:
+            message = QLabel("Open Chat for the storage error.")
+            message.setTextFormat(Qt.TextFormat.PlainText)
+            message.setWordWrap(True)
+            message.setStyleSheet(
+                f"color: {COLOR_WARN}; font-family: \"{FONT_UI}\"; "
+                "font-size: 10px;")
+            self._ledger_list_layout.addWidget(message)
+            return
+
+        focused = next(
+            (task for task in open_tasks if task["id"] == self.focused_task_id),
+            None,
+        )
+        if focused is not None:
+            open_tasks = [focused] + [task for task in open_tasks
+                                     if task["id"] != focused["id"]]
+        for task in open_tasks[:2]:
+            button = QPushButton(
+                f"{'› ' if task['id'] == self.focused_task_id else ''}"
+                f"{task['title']}")
+            button.setObjectName("ledgerTaskButton")
+            button.setProperty("taskId", task["id"])
+            button.setProperty(
+                "focused", task["id"] == self.focused_task_id)
+            button.setToolTip(task["title"])
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            button.setMinimumWidth(0)
+            button.setFixedHeight(26)
+            button.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: {COLOR_RAISED}; border: 1px solid {COLOR_BORDER};
+                    border-radius: 6px; color: {COLOR_TEXT_USER}; text-align: left;
+                    padding: 3px 7px; font-family: "{FONT_UI}"; font-size: 10px;
+                }}
+                QPushButton:hover {{ background: {COLOR_HOVER};
+                    color: {COLOR_TEXT_HI}; }}
+                QPushButton[focused="true"] {{ border-color: {COLOR_ACCENT};
+                    color: {COLOR_TEXT_HI}; }}
+                """
+            )
+            button.clicked.connect(
+                lambda _checked=False, task_id=task["id"]:
+                self.focus_requested.emit(task_id))
+            self._ledger_list_layout.addWidget(button)
+            self.ledger_buttons.append(button)
+
+        if not open_tasks:
+            empty = QLabel("No open tasks")
+            empty.setTextFormat(Qt.TextFormat.PlainText)
+            empty.setStyleSheet(
+                f"color: {COLOR_TEXT_LOW}; font-family: \"{FONT_UI}\"; "
+                "font-size: 10px;")
+            self._ledger_list_layout.addWidget(empty)
 
     def set_task_title(self, title):
         text = " ".join(str(title or "").split())
@@ -4357,8 +4676,9 @@ class AgentWindow(QMainWindow):
     _spontaneous_message = Signal(str)    # proactive observation (worker thread)
     _spontaneous_finished = Signal()      # worker done; clear the busy flag
     _preload_ready = Signal(str)          # a heavy module finished importing
+    task_ledger_changed = Signal(object)  # shared Chat/TaskWorkspace ledger state
 
-    def __init__(self):
+    def __init__(self, task_ledger_path=None):
         super().__init__()
         resolve_fonts()
         # Native-message handler for the frameless shell; None where the OS
@@ -4482,6 +4802,10 @@ class AgentWindow(QMainWindow):
         self._spontaneous_finished.connect(self._on_spontaneous_finished)
         self._preload_ready.connect(self._on_preload_ready)
         self._preload_started = False
+        self._task_ledger_path = task_ledger_path
+        self.task_ledger = None
+        self._task_ledger_error = ""
+        self._task_ledger_card = None
 
         # Conversation history is filled after agent.py imports in the
         # background; an empty list keeps the window usable until then.
@@ -4515,6 +4839,7 @@ class AgentWindow(QMainWindow):
         shell_row = zero_layout(QHBoxLayout(shell))
         self.nav_rail = NavRail()
         self.workspace = self._build_workspace()
+        self._load_task_ledger()
         shell_row.addWidget(self.nav_rail)
         shell_row.addWidget(self.workspace, 1)
         root.addWidget(shell, 1)
@@ -4581,6 +4906,10 @@ class AgentWindow(QMainWindow):
         self.page_stack.addWidget(self.chat)
         self.page_stack.addWidget(self.memory_view)
         self.task_workspace = TaskWorkspace()
+        self.task_workspace.focus_requested.connect(
+            self._on_task_focus_requested)
+        self.task_ledger_changed.connect(
+            self.task_workspace.set_ledger_state)
         conversation_layout.addWidget(self.page_stack, 1)
         conversation_layout.addWidget(self.task_workspace)
         self._main_col_layout = conversation_layout
@@ -6504,6 +6833,86 @@ class AgentWindow(QMainWindow):
             "Memory reset — saved history cleared, chat kept."))
 
     # ------------------------------------------------------------------
+    # Persistent task ledger
+    # ------------------------------------------------------------------
+    def _load_task_ledger(self):
+        try:
+            self.task_ledger = task_ledger.TaskLedger(self._task_ledger_path)
+            self._task_ledger_error = ""
+        except task_ledger.TaskLedgerError as exc:
+            self.task_ledger = None
+            self._task_ledger_error = str(exc)
+        self._refresh_task_ledger()
+
+    def _refresh_task_ledger(self):
+        if self.task_ledger is None:
+            tasks = []
+            focused_task_id = None
+        else:
+            tasks = self.task_ledger.list_tasks()
+            focused_task_id = self.task_ledger.focused_task_id
+        self.task_ledger_changed.emit({
+            "tasks": tasks,
+            "focused_task_id": focused_task_id,
+            "error": self._task_ledger_error,
+        })
+
+    def _add_task_ledger_card(self):
+        if self._task_ledger_card is not None:
+            self.task_ledger_changed.disconnect(
+                self._task_ledger_card.set_ledger_state)
+            self.chat.remove_message(self._task_ledger_card)
+        card = TaskLedgerCard()
+        card.focus_requested.connect(self._on_task_focus_requested)
+        card.action_requested.connect(self._on_task_action_requested)
+        self.task_ledger_changed.connect(card.set_ledger_state)
+        self.chat.add_message(card, fade=False)
+        self._task_ledger_card = card
+        self._refresh_task_ledger()
+
+    def _on_task_focus_requested(self, task_id):
+        self._on_task_action_requested("focus", task_id)
+
+    def _on_task_action_requested(self, action, task_id):
+        if self.task_ledger is None:
+            self._task_ledger_error = "Task ledger is unavailable."
+            self._refresh_task_ledger()
+            return
+        try:
+            if action == "add":
+                title, accepted = QInputDialog.getText(
+                    self, "Add task", "Task title:")
+                if not accepted:
+                    return
+                self.task_ledger.add_task(title)
+            elif action == "focus":
+                self.task_ledger.focus_task(task_id)
+            elif action == "start":
+                self.task_ledger.activate_task(task_id)
+            elif action == "done":
+                self.task_ledger.complete_task(task_id)
+            elif action == "reopen":
+                self.task_ledger.reopen_task(task_id)
+            elif action == "delete":
+                reply = QMessageBox.question(
+                    self, "Delete task",
+                    "Delete this task from the persistent ledger?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+                self.task_ledger.delete_task(task_id)
+            else:
+                raise ValueError(f"Unknown task action: {action}")
+        except (task_ledger.TaskLedgerError, OSError, ValueError, KeyError) as exc:
+            self._task_ledger_error = str(exc) or "Task ledger update failed."
+            self._refresh_task_ledger()
+            return
+        self._task_ledger_error = ""
+        self._refresh_task_ledger()
+
+    # ------------------------------------------------------------------
     # Chat / UI handlers (formerly driven by the sidebar)
     # ------------------------------------------------------------------
     def new_chat(self):
@@ -6530,7 +6939,12 @@ class AgentWindow(QMainWindow):
             get_agent().save_conversation_history(self.conversation_history)
         except Exception:
             pass
+        if self._task_ledger_card is not None:
+            self.task_ledger_changed.disconnect(
+                self._task_ledger_card.set_ledger_state)
         self.chat.clear()
+        self._task_ledger_card = None
+        self._add_task_ledger_card()
         self._telegram_messages.clear()
         self._last_step_log = None
         self._live_steps = []
@@ -6831,6 +7245,7 @@ class AgentWindow(QMainWindow):
         self.chat.add_message(ReadyMessage("KESTREL Ready..."), fade=False)
         self.chat.add_message(SystemMessage(
             "System Online. Type /help for commands."), fade=False)
+        self._add_task_ledger_card()
         if self.conversation_history:
             self.chat.add_message(SystemMessage(
                 f"Resumed — {len(self.conversation_history)} messages from last session."
